@@ -817,7 +817,8 @@ pub fn query_top_spans(
     if truncated_only {
         where_clause.push_str(
             " AND (json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') IN ('max_tokens','length')\
-             OR json_extract(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'), '$[0]') IN ('max_tokens','length'))",
+             OR (json_type(attributes, '$.\"gen_ai.response.finish_reasons\"') = 'array'\
+                 AND json_extract(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'), '$[0]') IN ('max_tokens','length')))",
         );
     }
 
@@ -850,7 +851,9 @@ pub fn query_top_spans(
             COALESCE({input}, 0) + COALESCE({output}, 0) + COALESCE({cache_creation}, 0) + COALESCE({cache_read}, 0) as total_tokens,
             COALESCE(
                 json_extract(attributes, '$.\"gen_ai.response.finish_reason\"'),
-                json_extract(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'), '$[0]')
+                CASE WHEN json_type(attributes, '$.\"gen_ai.response.finish_reasons\"') = 'array'
+                     THEN json_extract(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'), '$[0]')
+                     ELSE NULL END
             ) as finish_reason,
             json_extract(attributes, '$.\"gen_ai.conversation.id\"') as conversation_id,
             {input} as input_tokens_raw,
