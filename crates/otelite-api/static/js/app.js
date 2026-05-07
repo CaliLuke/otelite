@@ -5,15 +5,22 @@ import { api } from './api.js';
 /**
  * Main application class
  */
+const VALID_VIEWS = ['logs', 'traces', 'metrics', 'usage', 'setup'];
+
 class App {
     constructor() {
-        this.currentView = 'logs';
+        this.currentView = this._readHash() || 'logs';
         this.connectionCheckInterval = null;
         this.renderedViews = new Set();
         this.views = {};
         this.popoverOpen = false;
         this.lastHealthData = null;
         this.init();
+    }
+
+    _readHash() {
+        const h = (window.location.hash || '').replace(/^#/, '').split('?')[0];
+        return VALID_VIEWS.includes(h) ? h : null;
     }
 
     /**
@@ -30,6 +37,13 @@ class App {
         this.setupNavigation();
         this.setupConnectionMonitoring();
         this.loadInitialView();
+
+        window.addEventListener('hashchange', () => {
+            const v = this._readHash();
+            if (v && v !== this.currentView) {
+                this.switchView(v);
+            }
+        });
     }
 
     /**
@@ -61,6 +75,12 @@ class App {
         });
 
         this.currentView = viewName;
+
+        // Persist tab in URL hash so reload/back/forward keep the current view.
+        // Use replaceState to avoid spawning extra history entries on every click.
+        if (this._readHash() !== viewName) {
+            window.history.replaceState(null, '', `#${viewName}`);
+        }
 
         // Render the view on first visit; subsequent visits use the view's own auto-refresh
         if (this.views[viewName] && !this.renderedViews.has(viewName)) {

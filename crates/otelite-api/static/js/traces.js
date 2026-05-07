@@ -278,6 +278,31 @@ class TracesView {
         if (endEl) endEl.value = this.trEnd ? this._toDatetimeLocal(this.trEnd) : '';
     }
 
+    // When the user has no explicit range ("All time"), show what range the
+    // query actually covered by populating the date inputs from returned
+    // traces. Visual only — trStart/trEnd are not mutated.
+    _prefillDateInputsFromTraces(traces) {
+        if (this.trStart !== null || this.trEnd !== null) return;
+        const startEl = document.getElementById('tr-start-traces');
+        const endEl = document.getElementById('tr-end-traces');
+        if (!startEl || !endEl) return;
+        if (!Array.isArray(traces) || traces.length === 0) {
+            startEl.value = '';
+            endEl.value = '';
+            return;
+        }
+        let minStart = Infinity, maxEnd = -Infinity;
+        for (const t of traces) {
+            if (typeof t.start_time !== 'number') continue;
+            if (t.start_time < minStart) minStart = t.start_time;
+            const end = t.start_time + (typeof t.duration === 'number' ? t.duration : 0);
+            if (end > maxEnd) maxEnd = end;
+        }
+        if (!isFinite(minStart) || !isFinite(maxEnd)) return;
+        startEl.value = this._toDatetimeLocal(new Date(minStart / 1_000_000));
+        endEl.value = this._toDatetimeLocal(new Date(maxEnd / 1_000_000));
+    }
+
     _toDatetimeLocal(date) {
         const pad = n => String(n).padStart(2, '0');
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -380,6 +405,7 @@ class TracesView {
             this._updateObservedSpanKinds();
             this.renderTraces();
             this.updatePagination(response.total);
+            this._prefillDateInputsFromTraces(this.traces);
         } catch (error) {
             console.error('Failed to load traces:', error);
             this.showError('Failed to load traces');

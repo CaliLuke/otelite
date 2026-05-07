@@ -494,6 +494,15 @@ class MetricsView {
             this._lastBuckets = buckets;
             this.renderChart(metricName, buckets);
             this.attachResizeObserver();
+            // Show the effective window in the date inputs when the user
+            // hasn't pinned an explicit range. Visual only — we don't mutate
+            // trStart/trEnd so the "Window: 1 hr" dropdown stays authoritative.
+            if (!this.trStart) {
+                const startEl = document.getElementById('tr-start-metrics');
+                const endEl = document.getElementById('tr-end-metrics');
+                if (startEl) startEl.value = this._toDatetimeLocal(new Date(start_time / 1_000_000));
+                if (endEl) endEl.value = this._toDatetimeLocal(new Date(end_time / 1_000_000));
+            }
             // Update time range label
             const label = document.getElementById('chart-time-range');
             if (label) {

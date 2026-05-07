@@ -291,6 +291,27 @@ class LogsView {
         if (endEl) endEl.value = this.trEnd ? this._toDatetimeLocal(this.trEnd) : '';
     }
 
+    // When the user has no explicit range ("All time"), show what range the
+    // query actually covered by populating the date inputs from returned
+    // rows. Visual only — we don't mutate trStart/trEnd.
+    _prefillDateInputsFromRows(rows, tsField = 'timestamp') {
+        if (this.trStart !== null || this.trEnd !== null) return;
+        const startEl = document.getElementById('tr-start-logs');
+        const endEl = document.getElementById('tr-end-logs');
+        if (!startEl || !endEl) return;
+        if (!Array.isArray(rows) || rows.length === 0) {
+            if (startEl) startEl.value = '';
+            if (endEl) endEl.value = '';
+            return;
+        }
+        const timestamps = rows.map(r => r[tsField]).filter(t => typeof t === 'number');
+        if (timestamps.length === 0) return;
+        const minMs = Math.min(...timestamps) / 1_000_000;
+        const maxMs = Math.max(...timestamps) / 1_000_000;
+        startEl.value = this._toDatetimeLocal(new Date(minMs));
+        endEl.value = this._toDatetimeLocal(new Date(maxMs));
+    }
+
     _toDatetimeLocal(date) {
         // Format as YYYY-MM-DD HH:MM (ISO-style, locale-independent)
         const pad = n => String(n).padStart(2, '0');
@@ -378,6 +399,7 @@ class LogsView {
             this._updateLlmToggleButton();
             this.renderLogs();
             this.updatePagination(response.total);
+            this._prefillDateInputsFromRows(this.logs, 'timestamp');
         } catch (error) {
             console.error('Failed to load logs:', error);
             this.showError('Failed to load logs');
