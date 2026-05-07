@@ -123,7 +123,7 @@ impl UsageCommand {
         let (start_time, end_time) = parse_time_range(&self.since)?;
 
         let (summary, by_model_raw, by_system_raw) = storage
-            .query_token_usage(Some(start_time), Some(end_time))
+            .query_token_usage(Some(start_time), Some(end_time), None)
             .await
             .map_err(|e| Error::ApiError(format!("Failed to query token usage: {}", e)))?;
 

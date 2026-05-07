@@ -55,6 +55,8 @@ pub struct TokenUsageQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
+    /// Filter to a specific model name
+    pub model: Option<String>,
 }
 
 /// Get token usage statistics for GenAI/LLM spans
@@ -77,7 +79,7 @@ pub async fn get_token_usage(
 ) -> Result<Json<TokenUsageResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (summary, by_model, by_system) = state
         .storage
-        .query_token_usage(query.start_time, query.end_time)
+        .query_token_usage(query.start_time, query.end_time, query.model.as_deref())
         .await
         .map_err(|e| {
             (
@@ -105,6 +107,8 @@ pub struct CostSeriesQuery {
     pub end_time: Option<i64>,
     /// Bucket size in seconds (defaults to 3600 = 1 hour)
     pub bucket: Option<i64>,
+    /// Filter to a specific model name
+    pub model: Option<String>,
 }
 
 /// Get time-bucketed token usage (cost-over-time)
@@ -139,7 +143,7 @@ pub async fn get_cost_series(
 
     let mut series = state
         .storage
-        .query_cost_series(query.start_time, query.end_time, bucket_ns)
+        .query_cost_series(query.start_time, query.end_time, bucket_ns, query.model.as_deref())
         .await
         .map_err(|e| {
             (
@@ -326,6 +330,8 @@ pub struct FinishReasonsQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
+    /// Filter to a specific model name
+    pub model: Option<String>,
 }
 
 /// Get the distribution of finish / stop reasons across LLM spans
@@ -348,7 +354,7 @@ pub async fn get_finish_reasons(
 ) -> Result<Json<Vec<FinishReasonCount>>, (StatusCode, Json<ErrorResponse>)> {
     let rows = state
         .storage
-        .query_finish_reasons(query.start_time, query.end_time)
+        .query_finish_reasons(query.start_time, query.end_time, query.model.as_deref())
         .await
         .map_err(|e| {
             (
@@ -370,6 +376,8 @@ pub struct LatencyQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
+    /// Filter to a specific model name
+    pub model: Option<String>,
 }
 
 /// Get latency / TTFT percentile statistics per model for LLM spans.
@@ -389,7 +397,7 @@ pub async fn get_latency_stats(
 ) -> Result<Json<Vec<LatencyStats>>, (StatusCode, Json<ErrorResponse>)> {
     let rows = state
         .storage
-        .query_latency_stats(query.start_time, query.end_time)
+        .query_latency_stats(query.start_time, query.end_time, query.model.as_deref())
         .await
         .map_err(|e| {
             (
@@ -411,6 +419,8 @@ pub struct ErrorRateQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
+    /// Filter to a specific model name
+    pub model: Option<String>,
 }
 
 /// Get error rate per model across LLM spans.
@@ -430,7 +440,7 @@ pub async fn get_error_rate(
 ) -> Result<Json<Vec<ErrorRateByModel>>, (StatusCode, Json<ErrorResponse>)> {
     let rows = state
         .storage
-        .query_error_rate(query.start_time, query.end_time)
+        .query_error_rate(query.start_time, query.end_time, query.model.as_deref())
         .await
         .map_err(|e| {
             (

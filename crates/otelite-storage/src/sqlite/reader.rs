@@ -584,6 +584,7 @@ pub fn query_token_usage(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    model: Option<&str>,
 ) -> Result<(
     otelite_core::api::TokenUsageSummary,
     Vec<otelite_core::api::ModelUsage>,
@@ -601,6 +602,10 @@ pub fn query_token_usage(
     if let Some(end) = end_time {
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
+    }
+    if let Some(m) = model {
+        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
+        params.push(Box::new(m.to_string()));
     }
 
     let input_expr = exprs.input;
@@ -713,6 +718,7 @@ pub fn query_cost_series(
     start_time: Option<i64>,
     end_time: Option<i64>,
     bucket_ns: i64,
+    model: Option<&str>,
 ) -> Result<Vec<otelite_core::api::CostSeriesPoint>> {
     if bucket_ns <= 0 {
         return Err(StorageError::QueryError(format!(
@@ -732,6 +738,10 @@ pub fn query_cost_series(
     if let Some(end) = end_time {
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
+    }
+    if let Some(m) = model {
+        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
+        params.push(Box::new(m.to_string()));
     }
 
     let sql = format!(
@@ -1057,9 +1067,11 @@ pub fn query_finish_reasons(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    model: Option<&str>,
 ) -> Result<Vec<otelite_core::api::FinishReasonCount>> {
-    // Time filters are applied per sub-query. We build three fragments so each UNION
-    // branch only references its own table's time column (spans.start_time / logs.timestamp).
+    // Time/model filters are applied per sub-query. We build fragments so each UNION
+    // branch only references its own table's columns (spans.start_time / logs.timestamp).
+    let exprs = token_exprs();
     let mut spans_time_filter = String::new();
     let mut logs_time_filter = String::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1072,12 +1084,19 @@ pub fn query_finish_reasons(
         spans_time_filter.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    // The plural (json_each) branch re-uses the same spans time filter, so bind again.
+    if let Some(m) = model {
+        spans_time_filter.push_str(&format!(" AND ({}) = ?", exprs.model));
+        params.push(Box::new(m.to_string()));
+    }
+    // The plural (json_each) branch re-uses the same spans time/model filter, so bind again.
     if let Some(start) = start_time {
         params.push(Box::new(start));
     }
     if let Some(end) = end_time {
         params.push(Box::new(end));
+    }
+    if let Some(m) = model {
+        params.push(Box::new(m.to_string()));
     }
     if let Some(start) = start_time {
         logs_time_filter.push_str(" AND timestamp >= ?");
@@ -1159,6 +1178,7 @@ pub fn query_latency_stats(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    model: Option<&str>,
 ) -> Result<Vec<otelite_core::api::LatencyStats>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -1171,6 +1191,10 @@ pub fn query_latency_stats(
     if let Some(end) = end_time {
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
+    }
+    if let Some(m) = model {
+        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
+        params.push(Box::new(m.to_string()));
     }
 
     let sql = format!(
@@ -1282,6 +1306,7 @@ pub fn query_error_rate(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    model: Option<&str>,
 ) -> Result<Vec<otelite_core::api::ErrorRateByModel>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -1294,6 +1319,10 @@ pub fn query_error_rate(
     if let Some(end) = end_time {
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
+    }
+    if let Some(m) = model {
+        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
+        params.push(Box::new(m.to_string()));
     }
 
     let sql = format!(

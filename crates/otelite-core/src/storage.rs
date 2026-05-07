@@ -172,6 +172,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<(TokenUsageSummary, Vec<ModelUsage>, Vec<SystemUsage>)>;
 
     /// Time-bucketed token usage grouped by model for cost-over-time analysis.
@@ -182,6 +183,7 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_ns: i64,
+        model: Option<&str>,
     ) -> Result<Vec<CostSeriesPoint>>;
 
     /// Top-N LLM spans ordered by the given sort dimension.
@@ -219,6 +221,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<Vec<FinishReasonCount>>;
 
     /// Latency (and optional TTFT) percentile statistics per model for LLM spans.
@@ -226,6 +229,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<Vec<LatencyStats>>;
 
     /// Error rate by model across LLM spans.
@@ -233,6 +237,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<Vec<ErrorRateByModel>>;
 
     /// Aggregated tool-execution usage counts and durations.

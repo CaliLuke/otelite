@@ -257,6 +257,7 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<(
         otelite_core::api::TokenUsageSummary,
         Vec<otelite_core::api::ModelUsage>,
@@ -267,7 +268,7 @@ impl StorageBackend for SqliteBackend {
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
 
-        reader::query_token_usage(conn, start_time, end_time).map_err(StorageError::from)
+        reader::query_token_usage(conn, start_time, end_time, model).map_err(StorageError::from)
     }
 
     async fn query_cost_series(
@@ -275,13 +276,14 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_ns: i64,
+        model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::CostSeriesPoint>> {
         let conn_guard = self.conn.lock().unwrap();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
 
-        reader::query_cost_series(conn, start_time, end_time, bucket_ns).map_err(StorageError::from)
+        reader::query_cost_series(conn, start_time, end_time, bucket_ns, model).map_err(StorageError::from)
     }
 
     async fn query_top_spans(
@@ -334,39 +336,42 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::FinishReasonCount>> {
         let conn_guard = self.conn.lock().unwrap();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
 
-        reader::query_finish_reasons(conn, start_time, end_time).map_err(StorageError::from)
+        reader::query_finish_reasons(conn, start_time, end_time, model).map_err(StorageError::from)
     }
 
     async fn query_latency_stats(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::LatencyStats>> {
         let conn_guard = self.conn.lock().unwrap();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
 
-        reader::query_latency_stats(conn, start_time, end_time).map_err(StorageError::from)
+        reader::query_latency_stats(conn, start_time, end_time, model).map_err(StorageError::from)
     }
 
     async fn query_error_rate(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::ErrorRateByModel>> {
         let conn_guard = self.conn.lock().unwrap();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
 
-        reader::query_error_rate(conn, start_time, end_time).map_err(StorageError::from)
+        reader::query_error_rate(conn, start_time, end_time, model).map_err(StorageError::from)
     }
 
     async fn query_tool_usage(

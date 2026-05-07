@@ -18,6 +18,7 @@ class UsageView {
         this.trEnd = null;
         this.trWindowHours = null;
         this.activeTopNTab = 'cost';
+        this.modelFilter = null;
     }
 
     async render() {
@@ -45,12 +46,19 @@ class UsageView {
                         <option value="168">7 days</option>
                     </select>
                 </div>
+                <select id="usage-model-filter" class="filter-select">
+                    <option value="">All models</option>
+                </select>
             </div>
             <div id="usage-data-container"></div>
         `;
 
         this._attachTimeRangeListeners();
         this._attachTipsPanelListener();
+        document.getElementById('usage-model-filter').addEventListener('change', (e) => {
+            this.modelFilter = e.target.value || null;
+            this._loadAndRender();
+        });
         await this._loadAndRender();
 
         if (!this.refreshInterval) {
@@ -227,6 +235,7 @@ class UsageView {
                 params.start_time = this.trStart.getTime() * 1_000_000;
                 params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
             }
+            if (this.modelFilter) params.model = this.modelFilter;
             const bucket = this._chooseBucket();
             const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta] = await Promise.all([
                 this.api.getTokenUsage(params),
@@ -242,6 +251,7 @@ class UsageView {
             ]);
             dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta);
             this._attachTopNTabHandlers(params);
+            this._populateModelDropdown(summary?.by_model || []);
             // When no explicit range is selected ("All time"), show the user
             // what effective range the query covered by prefilling the date
             // inputs from the returned cost-series data. Prefill is visual
@@ -251,6 +261,16 @@ class UsageView {
         } catch (err) {
             dataContainer.innerHTML = `<div class="empty-state"><p>Failed to load usage data</p><p class="empty-state-hint">${err.message}</p></div>`;
         }
+    }
+
+    _populateModelDropdown(byModel) {
+        const sel = document.getElementById('usage-model-filter');
+        if (!sel) return;
+        const current = this.modelFilter || '';
+        const models = byModel.map(r => r.model).filter(Boolean).sort();
+        // Rebuild options preserving current selection
+        sel.innerHTML = '<option value="">All models</option>' +
+            models.map(m => `<option value="${this._esc(m)}"${m === current ? ' selected' : ''}>${this._esc(m)}</option>`).join('');
     }
 
     _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta) {

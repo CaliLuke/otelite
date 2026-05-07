@@ -44,7 +44,7 @@ fn insert_claude_code_response_log(conn: &Connection, body_value: &str) {
 #[test]
 fn test_finish_reasons_empty() {
     let conn = setup_test_db();
-    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    let rows = reader::query_finish_reasons(&conn, None, None, None).unwrap();
     assert!(rows.is_empty());
 }
 
@@ -62,7 +62,7 @@ fn test_finish_reasons_plural_array() {
         r#"{"gen_ai.response.finish_reasons":["stop"]}"#,
     );
 
-    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    let rows = reader::query_finish_reasons(&conn, None, None, None).unwrap();
     let stop = rows.iter().find(|r| r.reason == "stop").unwrap();
     assert_eq!(stop.count, 2);
     let length = rows.iter().find(|r| r.reason == "length").unwrap();
@@ -73,7 +73,7 @@ fn test_finish_reasons_plural_array() {
 fn test_finish_reasons_singular_scalar() {
     let conn = setup_test_db();
     insert_span(&conn, "s1", r#"{"gen_ai.response.finish_reason":"stop"}"#);
-    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    let rows = reader::query_finish_reasons(&conn, None, None, None).unwrap();
     let stop = rows.iter().find(|r| r.reason == "stop").unwrap();
     assert_eq!(stop.count, 1);
 }
@@ -86,7 +86,7 @@ fn test_finish_reasons_scalar_in_plural_field_does_not_error() {
     insert_span(&conn, "s1", r#"{"gen_ai.response.finish_reasons":"stop"}"#);
     insert_span(&conn, "s2", r#"{"gen_ai.response.finish_reason":"length"}"#);
 
-    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    let rows = reader::query_finish_reasons(&conn, None, None, None).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].reason, "length");
     assert_eq!(rows[0].count, 1);
@@ -107,7 +107,7 @@ fn test_finish_reasons_object_in_plural_field_does_not_error() {
         r#"{"gen_ai.response.finish_reasons":["stop"]}"#,
     );
 
-    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    let rows = reader::query_finish_reasons(&conn, None, None, None).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].reason, "stop");
 }
@@ -127,7 +127,7 @@ fn test_finish_reasons_malformed_response_body_is_skipped() {
     insert_claude_code_response_log(&conn, r#"{"stop_reason":"max_tokens","mod"#);
     insert_claude_code_response_log(&conn, "not even close to json");
 
-    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    let rows = reader::query_finish_reasons(&conn, None, None, None).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].reason, "end_turn");
     assert_eq!(rows[0].count, 1);
@@ -139,6 +139,6 @@ fn test_finish_reasons_malformed_response_body_is_skipped() {
 fn test_finish_reasons_body_without_stop_reason() {
     let conn = setup_test_db();
     insert_claude_code_response_log(&conn, r#"{"model":"claude-sonnet-4"}"#);
-    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    let rows = reader::query_finish_reasons(&conn, None, None, None).unwrap();
     assert!(rows.is_empty());
 }
