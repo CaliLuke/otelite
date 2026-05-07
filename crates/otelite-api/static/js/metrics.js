@@ -158,9 +158,11 @@ class MetricsView {
                     <label>Bucket:
                         <select id="interval-select" class="filter-select">
                             <option value="10">10s</option>
-                            <option value="60" selected>1 min</option>
+                            <option value="60">1 min</option>
                             <option value="300">5 min</option>
+                            <option value="900">15 min</option>
                             <option value="3600">1 hr</option>
+                            <option value="86400">1 day</option>
                         </select>
                     </label>
                     <span id="chart-time-range" class="chart-time-range-label">—</span>
