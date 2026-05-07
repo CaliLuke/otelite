@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use otelite_core::api::{ErrorResponse, LogEntry, LogsResponse};
+use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::LogRecord;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,10 @@ pub struct LogsQuery {
     /// Filter by trace ID
     #[serde(default)]
     pub trace_id: Option<String>,
+
+    /// Filter by session ID (session.id attribute)
+    #[serde(default)]
+    pub session_id: Option<String>,
 
     /// Maximum number of results (default: 100, max: 1000)
     #[serde(default = "default_limit")]
@@ -92,6 +97,16 @@ pub async fn list_logs(
     // Parse severity filter if provided
     if let Some(severity_str) = params.severity.as_deref().filter(|s| !s.is_empty()) {
         query.min_severity = parse_severity(severity_str);
+    }
+
+    if let Some(ref sid) = params.session_id {
+        if !sid.is_empty() {
+            query.predicates.push(QueryPredicate {
+                field: "session.id".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String(sid.clone()),
+            });
+        }
     }
 
     // Query logs from storage

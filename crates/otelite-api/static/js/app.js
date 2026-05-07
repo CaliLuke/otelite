@@ -95,6 +95,22 @@ class App {
         logsView.loadLogs();
     }
 
+    navigateToLogsBySession(sessionId) {
+        this.switchView('logs');
+        const v = this.views.logs;
+        v.filters.session_id = sessionId;
+        v.currentPage = 0;
+        v.loadLogs();
+    }
+
+    navigateToTracesBySession(sessionId) {
+        this.switchView('traces');
+        const v = this.views.traces;
+        v.filters.sessionId = sessionId;
+        v.currentPage = 0;
+        v.loadTraces();
+    }
+
     /**
      * Dispatch custom event for view change
      */

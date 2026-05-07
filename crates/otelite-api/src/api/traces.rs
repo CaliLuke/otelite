@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use otelite_core::api::{ErrorResponse, SpanEntry, TraceDetail, TraceEntry, TracesResponse};
+use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::Span;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,10 @@ pub struct TracesQuery {
     /// Full-text search in span names
     #[serde(default)]
     pub search: Option<String>,
+
+    /// Filter by session ID (session.id attribute)
+    #[serde(default)]
+    pub session_id: Option<String>,
 
     /// Start time (Unix timestamp in nanoseconds)
     #[serde(default)]
@@ -80,12 +85,22 @@ pub async fn list_traces(
     let limit = params.limit.min(1000);
 
     // Build query parameters
-    let query = QueryParams {
+    let mut query = QueryParams {
         start_time: params.start_time,
         end_time: params.end_time,
         trace_id: params.trace_id.clone(),
         ..Default::default()
     };
+
+    if let Some(ref sid) = params.session_id {
+        if !sid.is_empty() {
+            query.predicates.push(QueryPredicate {
+                field: "session.id".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String(sid.clone()),
+            });
+        }
+    }
 
     // Query spans from storage — two-step: get N most-recent trace IDs, then all their spans
     let spans = state

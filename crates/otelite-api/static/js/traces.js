@@ -20,7 +20,8 @@ class TracesView {
             resource: '',
             search: '',
             startTime: null,
-            endTime: null
+            endTime: null,
+            sessionId: null
         };
         this.attrFilters = [];
         this.trStart = null;
@@ -288,6 +289,7 @@ class TracesView {
                 offset: this.currentPage * this.pageSize,
                 ...this.filters
             };
+            if (this.filters.sessionId) params.session_id = this.filters.sessionId;
 
             if (this.trStart !== null) {
                 params.start_time = this.trStart.getTime() * 1_000_000;
@@ -407,6 +409,12 @@ class TracesView {
                     <div class="trace-info-item"><strong>Trace ID:</strong> <a class="trace-link" onclick="window.app.navigateToLogs('${this.escapeHtml(trace.trace_id)}');return false;" href="#" title="View logs for this trace"><code>${this.escapeHtml(trace.trace_id)}</code></a></div>
                     <div class="trace-info-item"><strong>Start:</strong> ${formatTs(startTime)}</div>
                     ${trace.service_names.length > 0 ? `<div class="trace-info-item"><strong>Services:</strong> ${this.escapeHtml(trace.service_names.join(', '))}</div>` : ''}
+                    ${(() => {
+                        const firstSpan = trace.spans?.[0];
+                        const res = firstSpan?.resource?.attributes ?? {};
+                        const items = ['service.version','host.arch','os.type','os.version'].filter(k => res[k]).map(k => `${k}=${res[k]}`).join(' · ');
+                        return items ? `<div class="trace-info-item"><strong>Host:</strong> ${this.escapeHtml(items)}</div>` : '';
+                    })()}
                 </div>
                 <div class="trace-waterfall">
                     <div class="span-kind-legend">
@@ -590,7 +598,8 @@ class TracesView {
     }
 
     renderSpanAttributes(attributes) {
-        const entries = Object.entries(attributes ?? {});
+        const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version']);
+        const entries = Object.entries(attributes ?? {}).filter(([k]) => !SKIP_ATTRS.has(k));
         if (entries.length === 0) {
             return '';
         }
@@ -602,12 +611,17 @@ class TracesView {
         return `
             ${genaiSection}
             <div class="span-attributes">
-                ${entries.map(([key, value]) => `
+                ${entries.map(([key, value]) => {
+                    if (key === 'session.id') {
+                        return `<div class="attribute-item"><span class="attribute-key">session.id</span><span class="attribute-value"><a class="trace-link" onclick="window.app.navigateToTracesBySession('${this.escapeHtml(String(value))}');return false;" href="#">${this.escapeHtml(String(value))}</a></span></div>`;
+                    }
+                    return `
                     <div class="attribute-item">
                         <span class="attribute-key">${this.escapeHtml(key)}</span>
                         ${this.renderAttributeValue(value)}
                     </div>
-                `).join('')}
+                `;
+                }).join('')}
             </div>
         `;
     }
@@ -810,7 +824,8 @@ class TracesView {
             resource: '',
             search: '',
             startTime: null,
-            endTime: null
+            endTime: null,
+            sessionId: null
         };
         this.attrFilters = [];
         this._renderAttrChips();
@@ -1117,6 +1132,7 @@ class TracesView {
                 <div class="span-attrs-grid">
                     <div class="span-attr-row"><span class="span-attr-key">duration</span><span class="span-attr-val">${duration}ms</span></div>
                     <div class="span-attr-row"><span class="span-attr-key">start</span><span class="span-attr-val">${formatTs(startTime)}</span></div>
+                    <div class="span-attr-row"><span class="span-attr-key">status</span><span class="span-attr-val">${span.status?.code ?? 'Unset'}${span.status?.message ? ': ' + this.escapeHtml(span.status.message) : ''}</span></div>
                     <div class="span-attr-row"><span class="span-attr-key">span_id</span><span class="span-attr-val">${span.span_id}</span></div>
                     <div class="span-attr-row"><span class="span-attr-key">trace_id</span><span class="span-attr-val">${span.trace_id}</span></div>
                     ${parent ? `<div class="span-attr-row"><span class="span-attr-key">parent</span><span class="span-attr-val">${this.escapeHtml(parent.name)}</span></div>` : ''}
@@ -1235,7 +1251,7 @@ class TracesView {
                 <div class="span-event">
                     <div class="span-event-header">
                         <span class="span-event-name">${this.escapeHtml(event.name)}</span>
-                        <span class="span-event-time">+${offsetMs}ms</span>
+                        <span class="span-event-time">${formatTs(eventTime)} (+${offsetMs}ms)</span>
                     </div>
                     ${Object.keys(event.attributes || {}).length > 0 ? `
                         <div class="span-event-attributes">

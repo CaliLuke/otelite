@@ -1,4 +1,14 @@
 // Metrics view implementation
+function formatTs(date) {
+    const p = n => String(n).padStart(2, '0');
+    const ms = String(date.getMilliseconds()).padStart(3, '0');
+    return `${date.getFullYear()}-${p(date.getMonth()+1)}-${p(date.getDate())} ` +
+           `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}.${ms}`;
+}
+function formatTimeOnly(date) {
+    const p = n => String(n).padStart(2, '0');
+    return `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
+}
 class MetricsView {
     constructor(apiClient) {
         this.apiClient = apiClient;
@@ -271,7 +281,7 @@ class MetricsView {
                     <span style="font-size:2.5rem;font-weight:700;font-family:monospace;color:#818cf8;line-height:1;">${this.formatChartValue(avg)}</span>
                     <span style="font-size:1rem;color:var(--text-secondary);">avg${unit ? ' ' + unit : ''}</span>
                     <span style="font-size:0.85rem;color:var(--text-secondary);padding-left:0.5rem;">${v.count !== undefined ? v.count.toLocaleString() + ' obs' : ''}</span>
-                    <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:auto;">${new Date(latest.timestamp / 1_000_000).toLocaleString()}</span>
+                    <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:auto;">${formatTs(new Date(latest.timestamp / 1_000_000))}</span>
                 `;
                 if (header) header.after(heroEl);
 
@@ -302,7 +312,7 @@ class MetricsView {
         heroEl.innerHTML = `
             <span style="font-size:2.5rem;font-weight:700;font-family:monospace;color:#818cf8;line-height:1;">${formatted}</span>
             ${unit ? `<span style="font-size:1rem;color:var(--text-secondary);">${unit}</span>` : ''}
-            <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:auto;">${new Date(latest.timestamp / 1_000_000).toLocaleString()}</span>
+            <span style="font-size:0.75rem;color:var(--text-secondary);margin-left:auto;">${formatTs(new Date(latest.timestamp / 1_000_000))}</span>
         `;
         if (header) header.after(heroEl);
     }
@@ -450,19 +460,27 @@ class MetricsView {
     // Only show discriminating attributes — skip IDs, otel internals, and resource-level keys
     formatLabels(attributes) {
         const skipKeys = new Set([
-            'session.id', 'user.id', 'trace.id', 'span.id',
+            'user.id', 'trace.id', 'span.id',
             'otel.scope.name', 'otel.scope.version',
             'service.name', 'service.version',
             'os.type', 'os.version', 'host.arch',
         ]);
+        const escapeHtmlInline = (text) => {
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        };
         const entries = Object.entries(attributes)
-            .filter(([k]) => !skipKeys.has(k) && !k.endsWith('.id'))
+            .filter(([k]) => !skipKeys.has(k) && (k === 'session.id' || !k.endsWith('.id')))
             .filter(([, v]) => String(v).length <= 40);
 
         if (entries.length === 0) return '<span class="no-labels">—</span>';
-        return entries.map(([k, v]) =>
-            `<span class="label-tag">${this.escapeHtml(k)}: <strong>${this.escapeHtml(String(v))}</strong></span>`
-        ).join('');
+        return entries.map(([k, v]) => {
+            if (k === 'session.id') {
+                return `<span class="label-tag">session.id: <a class="trace-link" onclick="window.app.navigateToLogsBySession('${escapeHtmlInline(String(v))}');return false;" href="#" title="View logs for this session"><strong>${escapeHtmlInline(String(v))}</strong></a></span>`;
+            }
+            return `<span class="label-tag">${this.escapeHtml(k)}: <strong>${this.escapeHtml(String(v))}</strong></span>`;
+        }).join('');
     }
 
     async loadTimeseries(metricName) {
@@ -479,7 +497,7 @@ class MetricsView {
             // Update time range label
             const label = document.getElementById('chart-time-range');
             if (label) {
-                const fmt = t => new Date(t / 1_000_000).toLocaleTimeString();
+                const fmt = t => formatTimeOnly(new Date(t / 1_000_000));
                 label.textContent = `${fmt(start_time)} – ${fmt(end_time)}`;
             }
             // Disable "next" button when at now
@@ -531,7 +549,7 @@ class MetricsView {
             ctx.fillStyle = '#818cf8';
             ctx.textAlign = 'center';
             ctx.fillText(this.formatChartValue(buckets[0].value), drawW / 2, drawH / 2);
-            const t = new Date(buckets[0].timestamp / 1000000).toLocaleString();
+            const t = formatTs(new Date(buckets[0].timestamp / 1000000));
             ctx.font = '12px sans-serif';
             ctx.fillStyle = '#64748b';
             ctx.fillText(t, drawW / 2, drawH / 2 + 28);
@@ -613,7 +631,7 @@ class MetricsView {
         for (let i = 0; i < labelCount; i++) {
             const idx = Math.round(i * (buckets.length - 1) / (labelCount - 1));
             const x = padL + (idx / (buckets.length - 1)) * w;
-            const t = new Date(buckets[idx].timestamp / 1000000).toLocaleTimeString();
+            const t = formatTimeOnly(new Date(buckets[idx].timestamp / 1000000));
             ctx.fillText(t, x, drawH - 4);
         }
     }
@@ -621,6 +639,9 @@ class MetricsView {
     // MetricValue is untagged: Gauge/Counter → plain number, Histogram/Summary → {sum, count, buckets/quantiles}
     formatValue(metric) {
         const v = metric.value;
+        if (typeof v === 'number' && metric.unit === 'USD') {
+            return `$${v.toFixed(4)}`;
+        }
         if (typeof v === 'number') {
             return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
         }
@@ -644,7 +665,7 @@ class MetricsView {
     }
 
     formatTimestamp(nanos) {
-        return new Date(nanos / 1000000).toLocaleString();
+        return formatTs(new Date(nanos / 1000000));
     }
 
     async exportMetrics() {

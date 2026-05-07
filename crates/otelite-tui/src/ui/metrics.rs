@@ -245,6 +245,10 @@ fn render_metric_info(frame: &mut Frame, area: Rect, metric: &Metric) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from(metric.description.as_deref().unwrap_or("No description")),
+        Line::from(vec![
+            Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(crate::ui::logs::format_timestamp_full(metric.timestamp)),
+        ]),
     ];
 
     let paragraph = Paragraph::new(lines)

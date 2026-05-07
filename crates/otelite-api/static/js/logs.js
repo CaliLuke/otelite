@@ -21,6 +21,7 @@ class LogsView {
             endTime: null
         };
         this.filters.trace_id = null;
+        this.filters.session_id = null;
         this.attrFilters = [];
         this.trStart = null;
         this.trEnd = null;
@@ -286,9 +287,18 @@ class LogsView {
 
             const response = await this.apiClient.getLogs(params);
             this.logs = response.logs;
-            this.hasGenAiData = this.logs.some(log =>
-                log.attributes && Object.keys(log.attributes).some(k => k.startsWith('gen_ai.'))
-            );
+            this.hasGenAiData = this.logs.some(log => {
+                if (log.attributes && Object.keys(log.attributes).some(k => k.startsWith('gen_ai.'))) {
+                    return true;
+                }
+                if (log.body === 'claude_code.api_response_body' && log.attributes && log.attributes.body) {
+                    try {
+                        const parsed = JSON.parse(log.attributes.body);
+                        return parsed && parsed.model != null;
+                    } catch { return false; }
+                }
+                return false;
+            });
             this._updateLlmToggleButton();
             this.renderLogs();
             this.updatePagination(response.total);
@@ -375,11 +385,23 @@ class LogsView {
         const attrs = log.attributes || {};
         const bodyPreview = this.escapeHtml(log.body.substring(0, 100)) + (log.body.length > 100 ? '...' : '');
 
+        // Detect claude_code.api_response_body logs and extract tokens from JSON body
+        let bodyDerivedModel = null, bodyDerivedInput = null, bodyDerivedOutput = null;
+        if (log.body === 'claude_code.api_response_body' && attrs.body) {
+            try {
+                const parsed = JSON.parse(attrs.body);
+                bodyDerivedModel = parsed.model ?? null;
+                const u = parsed.usage ?? {};
+                bodyDerivedInput = u.input_tokens ?? null;
+                bodyDerivedOutput = u.output_tokens ?? null;
+            } catch {}
+        }
+
         let headerCols;
         if (useLlm) {
-            const model = attrs['gen_ai.request.model'] || attrs['gen_ai.response.model'] || '—';
-            const rawInput = attrs['gen_ai.usage.input_tokens'];
-            const rawOutput = attrs['gen_ai.usage.output_tokens'];
+            const model = attrs['gen_ai.request.model'] || attrs['gen_ai.response.model'] || bodyDerivedModel || '—';
+            const rawInput = attrs['gen_ai.usage.input_tokens'] ?? bodyDerivedInput;
+            const rawOutput = attrs['gen_ai.usage.output_tokens'] ?? bodyDerivedOutput;
             const inputTokens = rawInput != null ? Number(rawInput).toLocaleString() : '—';
             const outputTokens = rawOutput != null ? Number(rawOutput).toLocaleString() : '—';
             const finishReasonsRaw = attrs['gen_ai.response.finish_reasons'];
@@ -410,6 +432,7 @@ class LogsView {
                 <div class="log-details" style="display: none;">
                     ${this.renderBodyField(log.body)}
                     ${log.trace_id ? `<div class="log-field"><strong>Trace ID:</strong> <a class="trace-link" onclick="window.app.navigateToTrace('${this.escapeHtml(log.trace_id)}');return false;" href="#" title="View trace">${this.escapeHtml(log.trace_id)}</a></div>` : ''}
+                    ${attrs['session.id'] ? `<div class="log-field"><strong>Session:</strong> <a class="trace-link" onclick="window.app.navigateToLogsBySession('${this.escapeHtml(attrs['session.id'])}');return false;" href="#" title="View all logs for this session">${this.escapeHtml(attrs['session.id'])}</a></div>` : ''}
                     ${log.span_id ? `<div class="log-field"><strong>Span ID:</strong> ${log.span_id}</div>` : ''}
                     ${Object.keys(attrs).length > 0 ? `
                         <div class="log-field">
@@ -429,7 +452,8 @@ class LogsView {
     }
 
     renderAttributeMap(attributes) {
-        const entries = Object.entries(attributes);
+        const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version', 'session.id']);
+        const entries = Object.entries(attributes).filter(([k]) => !SKIP_ATTRS.has(k));
         if (entries.length === 0) {
             return '';
         }
@@ -665,6 +689,7 @@ class LogsView {
             startTime: null,
             endTime: null,
             trace_id: null,
+            session_id: null,
         };
         this.attrFilters = [];
         this._renderAttrChips();

@@ -8,6 +8,7 @@ use otelite_core::api::{
     ErrorResponse, HistogramBucket, HistogramValue, MetricResponse, MetricValue, Quantile,
     Resource, SummaryValue,
 };
+use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::metric::MetricType;
 use otelite_core::telemetry::Metric;
@@ -21,6 +22,8 @@ pub struct MetricsQuery {
     pub name: Option<String>,
     /// Filter by resource attribute (format: key=value)
     pub resource: Option<String>,
+    /// Filter by session ID (session.id attribute)
+    pub session_id: Option<String>,
     /// Start time (nanoseconds since Unix epoch)
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
@@ -98,6 +101,16 @@ pub async fn list_metrics(
     }
     if let Some(limit) = query.limit {
         params.limit = Some(limit);
+    }
+
+    if let Some(ref sid) = query.session_id {
+        if !sid.is_empty() {
+            params.predicates.push(QueryPredicate {
+                field: "session.id".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String(sid.clone()),
+            });
+        }
     }
 
     // Query metrics from storage: use latest-per-name so that high-frequency

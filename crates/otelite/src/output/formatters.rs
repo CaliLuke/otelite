@@ -1,10 +1,13 @@
 //! Shared formatting utilities for output
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 
 /// Format a timestamp in human-readable format (ISO 8601)
 pub fn format_timestamp(timestamp: &DateTime<Utc>) -> String {
-    timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+    timestamp
+        .with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 /// Format a duration in human-readable format
@@ -142,7 +145,8 @@ mod tests {
     fn test_format_timestamp() {
         let timestamp = Utc::now();
         let formatted = format_timestamp(&timestamp);
-        assert!(formatted.contains("UTC"));
+        assert!(formatted.starts_with("20"));
+        assert_eq!(formatted.len(), 19);
         assert!(formatted.contains("-"));
         assert!(formatted.contains(":"));
     }

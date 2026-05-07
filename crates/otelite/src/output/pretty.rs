@@ -80,9 +80,12 @@ pub fn print_logs_table(logs: &[LogEntry], config: &Config) -> io::Result<()> {
             Cell::new(&log.severity).fg(color)
         };
 
-        use chrono::{DateTime, Utc};
+        use chrono::{DateTime, Local, Utc};
         let dt = DateTime::<Utc>::from_timestamp_nanos(log.timestamp);
-        let timestamp_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+        let timestamp_str = dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
 
         table.add_row(vec![
             Cell::new(log.timestamp.to_string()),
@@ -112,9 +115,12 @@ pub fn print_log_details(log: &LogEntry, config: &Config) -> io::Result<()> {
         colors::ansi::RESET
     };
 
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Local, Utc};
     let dt = DateTime::<Utc>::from_timestamp_nanos(log.timestamp);
-    let timestamp_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    let timestamp_str = dt
+        .with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
 
     writeln!(output, "Timestamp: {}", timestamp_str).unwrap();
     writeln!(
@@ -157,7 +163,14 @@ pub fn print_traces_table(traces: &[TraceEntry], config: &Config) -> io::Result<
 
     // Add header (unless disabled)
     if !config.no_header {
-        table.set_header(vec!["Trace ID", "Root Span", "Duration", "Status", "Spans"]);
+        table.set_header(vec![
+            "Time",
+            "Trace ID",
+            "Root Span",
+            "Duration",
+            "Status",
+            "Spans",
+        ]);
     }
 
     // Add rows
@@ -172,7 +185,17 @@ pub fn print_traces_table(traces: &[TraceEntry], config: &Config) -> io::Result<
 
         let duration_ms = trace.duration / 1_000_000;
 
+        use chrono::{DateTime, Local, Utc};
+        let dt = DateTime::<Utc>::from_timestamp_millis(trace.start_time / 1_000_000)
+            .map(|dt| {
+                dt.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "?".to_string());
+
         table.add_row(vec![
+            Cell::new(dt),
             Cell::new(&trace.trace_id),
             Cell::new(&trace.root_span_name),
             Cell::new(format!("{}ms", duration_ms)),
@@ -300,18 +323,27 @@ pub fn print_metrics_table(metrics: &[MetricResponse], config: &Config) -> io::R
             Cell::new(&metric.metric_type).fg(color)
         };
 
-        use chrono::{DateTime, Utc};
+        use chrono::{DateTime, Local, Utc};
         use otelite_client::models::MetricValue;
 
         let value_str = match &metric.value {
             MetricValue::Gauge(v) => format!("{:.2}", v),
-            MetricValue::Counter(v) => format!("{}", v),
+            MetricValue::Counter(v) => {
+                if metric.unit.as_deref() == Some("USD") {
+                    format!("${:.4}", *v as f64)
+                } else {
+                    format!("{}", v)
+                }
+            },
             MetricValue::Histogram(h) => format!("count={}, sum={:.2}", h.count, h.sum),
             MetricValue::Summary(s) => format!("count={}, sum={:.2}", s.count, s.sum),
         };
 
         let dt = DateTime::<Utc>::from_timestamp_nanos(metric.timestamp);
-        let timestamp_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+        let timestamp_str = dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
 
         table.add_row(vec![
             Cell::new(&metric.name),
@@ -327,7 +359,7 @@ pub fn print_metrics_table(metrics: &[MetricResponse], config: &Config) -> io::R
 
 /// Print a single metric with full details including percentiles
 pub fn print_metric_details(metric: &MetricResponse, config: &Config) -> io::Result<()> {
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Local, Utc};
     use otelite_client::models::MetricValue;
     use std::fmt::Write;
     let mut output = String::new();
@@ -337,7 +369,13 @@ pub fn print_metric_details(metric: &MetricResponse, config: &Config) -> io::Res
 
     match &metric.value {
         MetricValue::Gauge(v) => writeln!(output, "Value:     {:.2}", v).unwrap(),
-        MetricValue::Counter(v) => writeln!(output, "Value:     {}", v).unwrap(),
+        MetricValue::Counter(v) => {
+            if metric.unit.as_deref() == Some("USD") {
+                writeln!(output, "Value:     ${:.4}", *v as f64).unwrap();
+            } else {
+                writeln!(output, "Value:     {}", v).unwrap();
+            }
+        },
         MetricValue::Histogram(h) => {
             writeln!(output, "Count:     {}", h.count).unwrap();
             writeln!(output, "Sum:       {:.2}", h.sum).unwrap();
@@ -357,7 +395,12 @@ pub fn print_metric_details(metric: &MetricResponse, config: &Config) -> io::Res
     }
 
     let dt = DateTime::<Utc>::from_timestamp_nanos(metric.timestamp);
-    writeln!(output, "Timestamp: {}", dt.format("%Y-%m-%d %H:%M:%S")).unwrap();
+    writeln!(
+        output,
+        "Timestamp: {}",
+        dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S")
+    )
+    .unwrap();
 
     if !metric.attributes.is_empty() {
         writeln!(output, "\nAttributes:").unwrap();
