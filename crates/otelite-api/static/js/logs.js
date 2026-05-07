@@ -99,6 +99,7 @@ class LogsView {
     render() {
         const container = document.getElementById('logs-view');
         container.innerHTML = `
+            ${this._renderTipsPanel()}
             <div class="view-header">
                 <h2>Logs</h2>
                 <div class="view-actions">
@@ -182,9 +183,43 @@ class LogsView {
     }
 
     /**
+     * Build the collapsible tips panel HTML for the logs view.
+     */
+    _renderTipsPanel() {
+        const dismissed = localStorage.getItem('otelite_tips_dismissed_logs') === 'true';
+        const openAttr = dismissed ? '' : ' open';
+        return `
+            <details class="tips-panel" id="tips-panel-logs"${openAttr}>
+                <summary>Tips</summary>
+                <div class="tips-panel-body">
+                    <ul>
+                        <li>Click a session / prompt ID in any log detail to filter logs for that scope</li>
+                        <li>Toggle "LLM View" (button appears when GenAI data is present) for model / tokens / finish reason columns</li>
+                        <li>Filter by model using the Model dropdown (populates from observed values)</li>
+                        <li>Filtering by prompt.id adds an aggregated cost / token / cache banner above the list</li>
+                    </ul>
+                </div>
+            </details>
+        `;
+    }
+
+    _attachTipsPanelListener() {
+        const panel = document.getElementById('tips-panel-logs');
+        if (!panel) return;
+        panel.addEventListener('toggle', () => {
+            if (!panel.open) {
+                localStorage.setItem('otelite_tips_dismissed_logs', 'true');
+            } else {
+                localStorage.removeItem('otelite_tips_dismissed_logs');
+            }
+        });
+    }
+
+    /**
      * Attach event listeners
      */
     attachEventListeners() {
+        this._attachTipsPanelListener();
         document.getElementById('refresh-logs').addEventListener('click', () => this.loadLogs());
         document.getElementById('export-logs-json').addEventListener('click', () => this.exportLogs('json'));
         document.getElementById('export-logs-csv').addEventListener('click', () => this.exportLogs('csv'));

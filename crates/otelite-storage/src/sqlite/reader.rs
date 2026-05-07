@@ -598,7 +598,8 @@ fn token_exprs() -> TokenExprs {
              OR json_extract(attributes, '$.\"gen_ai.provider.name\"') IS NOT NULL \
              OR json_extract(attributes, '$.\"llm.system\"') IS NOT NULL \
              OR json_extract(attributes, '$.\"llm.vendor\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"llm.request.model\"') IS NOT NULL)",
+             OR json_extract(attributes, '$.\"llm.request.model\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"openinference.span.kind\"') IN ('LLM', 'EMBEDDING'))",
     }
 }
 
@@ -1329,6 +1330,151 @@ pub fn query_retry_stats(
         retried_calls,
         extra_attempts: extra_attempts as usize,
         retry_rate,
+    })
+}
+
+/// Aggregated retrieval / RAG statistics across retriever spans.
+///
+/// Retriever spans are identified by either:
+/// - `openinference.span.kind = 'RETRIEVER'`, or
+/// - presence of a `retrieval.query` attribute (fallback for non-OpenInference instrumentations).
+///
+/// OpenInference stores retrieved documents under `retrieval.documents` as a JSON
+/// array of `{document.id, document.score, document.content, document.metadata}`.
+/// Document count is taken from `json_array_length`, and the per-span top-1 score
+/// is the `document.score` of the first element.
+pub fn query_retrieval_stats(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    top_queries_limit: usize,
+) -> Result<otelite_core::api::RetrievalStats> {
+    let mut time_filter = String::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        time_filter.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        time_filter.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    // CTE: per-retrieval-span query, document count, and top-1 score.
+    // Reused by both the summary and top-queries aggregations.
+    let cte = format!(
+        "WITH retrieval_spans AS (
+            SELECT
+                CAST(json_extract(attributes, '$.\"retrieval.query\"') AS TEXT) AS query,
+                COALESCE(
+                    json_array_length(json_extract(attributes, '$.\"retrieval.documents\"')),
+                    0
+                ) AS doc_count,
+                CAST(json_extract(attributes, '$.\"retrieval.documents\"[0].\"document.score\"') AS REAL) AS top_score
+            FROM spans
+            WHERE (
+                json_extract(attributes, '$.\"openinference.span.kind\"') = 'RETRIEVER'
+                OR json_extract(attributes, '$.\"retrieval.query\"') IS NOT NULL
+            )
+            {time_filter}
+        )"
+    );
+
+    // Summary query: totals plus averages. AVG(top_score) auto-ignores NULLs.
+    let summary_sql = format!(
+        "{cte}
+         SELECT
+             COUNT(*) AS total,
+             COALESCE(AVG(CAST(doc_count AS REAL)), 0.0) AS avg_docs,
+             AVG(top_score) AS avg_top_score
+         FROM retrieval_spans"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let (total_retrievals, avg_documents_per_query, avg_top_document_score) = conn
+        .query_row(&summary_sql, param_refs.as_slice(), |row| {
+            let total: i64 = row.get(0)?;
+            let avg_docs: f64 = row.get(1)?;
+            let avg_top_score: Option<f64> = row.get(2)?;
+            Ok((total as usize, avg_docs, avg_top_score))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to query retrieval summary: {}", e))
+        })?;
+
+    if total_retrievals == 0 {
+        return Ok(otelite_core::api::RetrievalStats {
+            total_retrievals: 0,
+            avg_documents_per_query: 0.0,
+            avg_top_document_score: None,
+            top_queries: Vec::new(),
+        });
+    }
+
+    // Top queries: group by query text, ordered by count desc.
+    // The same time-filter params are bound a second time for this query.
+    let top_sql = format!(
+        "{cte}
+         SELECT
+             query,
+             COUNT(*) AS cnt,
+             COALESCE(AVG(CAST(doc_count AS REAL)), 0.0) AS avg_docs,
+             AVG(top_score) AS avg_top_score
+         FROM retrieval_spans
+         WHERE query IS NOT NULL
+         GROUP BY query
+         ORDER BY cnt DESC
+         LIMIT ?"
+    );
+
+    let mut top_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 1);
+    if let Some(start) = start_time {
+        top_params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        top_params.push(Box::new(end));
+    }
+    top_params.push(Box::new(top_queries_limit as i64));
+
+    let top_param_refs: Vec<&dyn rusqlite::ToSql> = top_params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&top_sql).map_err(|e| {
+        StorageError::QueryError(format!(
+            "Failed to prepare retrieval top_queries query: {}",
+            e
+        ))
+    })?;
+
+    let top_queries = stmt
+        .query_map(top_param_refs.as_slice(), |row| {
+            Ok(otelite_core::api::TopRetrievalQuery {
+                query: row.get::<_, String>(0)?,
+                count: row.get::<_, i64>(1)? as usize,
+                avg_documents: row.get::<_, f64>(2)?,
+                avg_top_score: row.get::<_, Option<f64>>(3)?,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to execute retrieval top_queries query: {}",
+                e
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to parse retrieval top_queries results: {}",
+                e
+            ))
+        })?;
+
+    Ok(otelite_core::api::RetrievalStats {
+        total_retrievals,
+        avg_documents_per_query,
+        avg_top_document_score,
+        top_queries,
     })
 }
 

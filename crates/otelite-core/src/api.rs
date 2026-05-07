@@ -586,3 +586,24 @@ pub struct RetryStats {
     /// Fraction in the range 0.0..1.0.
     pub retry_rate: f64,
 }
+
+/// Retrieval / RAG statistics aggregated across retriever spans.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RetrievalStats {
+    pub total_retrievals: usize,
+    pub avg_documents_per_query: f64,
+    /// None when no retrieval span emitted a document score.
+    pub avg_top_document_score: Option<f64>,
+    pub top_queries: Vec<TopRetrievalQuery>,
+}
+
+/// A single grouped retrieval query with aggregate stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TopRetrievalQuery {
+    pub query: String,
+    pub count: usize,
+    pub avg_documents: f64,
+    pub avg_top_score: Option<f64>,
+}

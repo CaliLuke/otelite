@@ -184,6 +184,7 @@ class ApiClient {
     async getErrorRate(params = {}) { return this.get('/genai/error_rate', params); }
     async getToolUsage(params = {}) { return this.get('/genai/tool_usage', params); }
     async getRetryStats(params = {}) { return this.get('/genai/retry_stats', params); }
+    async getRetrievalStats(params = {}) { return this.get('/genai/retrieval_stats', params); }
 
     /**
      * Check health status

@@ -364,6 +364,21 @@ impl StorageBackend for SqliteBackend {
         reader::query_retry_stats(conn, start_time, end_time).map_err(StorageError::from)
     }
 
+    async fn query_retrieval_stats(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        top_queries_limit: usize,
+    ) -> Result<otelite_core::api::RetrievalStats> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_retrieval_stats(conn, start_time, end_time, top_queries_limit)
+            .map_err(StorageError::from)
+    }
+
     async fn close(&mut self) -> Result<()> {
         if let Some(handle) = self.purge_handle.lock().unwrap().take() {
             handle.abort();

@@ -27,6 +27,7 @@ class TracesView {
         };
         this.attrFilters = [];
         this.observedModels = new Set();
+        this.observedSpanKinds = new Set();
         this.trStart = null;
         this.trEnd = null;
         this.trWindowHours = null;
@@ -44,6 +45,7 @@ class TracesView {
     render() {
         const container = document.getElementById('traces-view');
         container.innerHTML = `
+            ${this._renderTipsPanel()}
             <div class="view-header">
                 <h2>Traces</h2>
                 <div class="view-actions">
@@ -89,6 +91,7 @@ class TracesView {
                 <select id="model-filter-traces" class="filter-select hidden">
                     <option value="">All models</option>
                 </select>
+                <span id="span-kind-chips-traces" class="span-kind-chips hidden"></span>
                 <span style="width:1px;height:1.2em;background:var(--border-color);display:inline-block;margin:0 0.3rem;"></span>
                 <input type="text" id="attr-key-traces" placeholder="attribute key" class="filter-input attr-filter-key" list="attr-keys-traces-list">
                 <datalist id="attr-keys-traces-list"></datalist>
@@ -126,9 +129,43 @@ class TracesView {
     }
 
     /**
+     * Build the collapsible tips panel HTML for the traces view.
+     */
+    _renderTipsPanel() {
+        const dismissed = localStorage.getItem('otelite_tips_dismissed_traces') === 'true';
+        const openAttr = dismissed ? '' : ' open';
+        return `
+            <details class="tips-panel" id="tips-panel-traces"${openAttr}>
+                <summary>Tips</summary>
+                <div class="tips-panel-body">
+                    <ul>
+                        <li>Click <code>session.id</code> in any span's attributes to filter traces by session</li>
+                        <li>LLM spans are split into Request / Response / Usage / Tool / Agent sections — gen_ai.* attrs are organised, not dumped</li>
+                        <li>Chat transcripts render as role-coloured bubbles when the instrumentation emits <code>gen_ai.*.message</code> events or OpenInference <code>llm.*_messages</code> attributes</li>
+                        <li>Use the Model dropdown or span-kind chips (if present) to narrow results server-side</li>
+                    </ul>
+                </div>
+            </details>
+        `;
+    }
+
+    _attachTipsPanelListener() {
+        const panel = document.getElementById('tips-panel-traces');
+        if (!panel) return;
+        panel.addEventListener('toggle', () => {
+            if (!panel.open) {
+                localStorage.setItem('otelite_tips_dismissed_traces', 'true');
+            } else {
+                localStorage.removeItem('otelite_tips_dismissed_traces');
+            }
+        });
+    }
+
+    /**
      * Attach event listeners
      */
     attachEventListeners() {
+        this._attachTipsPanelListener();
         document.getElementById('refresh-traces').addEventListener('click', () => this.loadTraces());
         document.getElementById('export-traces').addEventListener('click', () => this.exportTraces());
         document.getElementById('auto-refresh-traces').addEventListener('change', (e) => this.toggleAutoRefresh(e.target.checked));
@@ -323,6 +360,7 @@ class TracesView {
             const response = await this.apiClient.getTraces(params);
             this.traces = response.traces;
             this._updateObservedModels();
+            this._updateObservedSpanKinds();
             this.renderTraces();
             this.updatePagination(response.total);
         } catch (error) {
@@ -398,6 +436,7 @@ class TracesView {
             const trace = await this.apiClient.getTrace(traceId);
             this.selectedTrace = trace;
             this.collapsedSpans = new Set();
+            this._updateObservedSpanKinds();
             this.renderTraceDetail(trace);
         } catch (error) {
             console.error('Failed to load trace details:', error);
@@ -626,7 +665,10 @@ class TracesView {
     }
 
     renderSpanAttributes(attributes) {
-        const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version']);
+        const SKIP_ATTRS = new Set([
+            'duration_ms', 'otel.scope.name', 'otel.scope.version',
+            'llm.input_messages', 'llm.output_messages',
+        ]);
         const entries = Object.entries(attributes ?? {})
             .filter(([k]) => !SKIP_ATTRS.has(k) && !k.startsWith('gen_ai.'));
         if (entries.length === 0) {
@@ -1254,6 +1296,79 @@ class TracesView {
                     <div class="span-events-timeline">${this.renderSpanEvents(span.events, span.start_time)}</div>
                 </div>
             ` : ''}
+
+            ${this.renderLlmMessagesFromAttributes(span.attributes || {})}
+        `;
+    }
+
+    /**
+     * Render OpenInference-style llm.input_messages / llm.output_messages as chat bubbles.
+     * The attributes may arrive as JSON-encoded strings or as arrays.
+     */
+    renderLlmMessagesFromAttributes(attributes) {
+        if (!attributes) return '';
+        const inRaw = attributes['llm.input_messages'];
+        const outRaw = attributes['llm.output_messages'];
+        if (inRaw == null && outRaw == null) return '';
+
+        const parseList = (raw) => {
+            if (raw == null) return [];
+            if (Array.isArray(raw)) return raw;
+            if (typeof raw === 'string') {
+                try {
+                    const parsed = JSON.parse(raw);
+                    return Array.isArray(parsed) ? parsed : [];
+                } catch { return []; }
+            }
+            return [];
+        };
+
+        const inputs = parseList(inRaw);
+        const outputs = parseList(outRaw);
+        if (inputs.length === 0 && outputs.length === 0) return '';
+
+        const roleClass = (role) => {
+            const r = String(role || '').toLowerCase();
+            if (r === 'user' || r === 'assistant' || r === 'system' || r === 'tool') return r;
+            return 'choice';
+        };
+
+        const renderBubble = (msg) => {
+            const role = msg?.['message.role'] ?? msg?.role ?? 'unknown';
+            const content = msg?.['message.content'] ?? msg?.content ?? '';
+            const toolCalls = msg?.['message.tool_calls'] ?? msg?.tool_calls;
+            const contentStr = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+            let toolCallsHtml = '';
+            if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+                const items = toolCalls.map(tc => {
+                    const name = tc?.['tool_call.function.name'] ?? tc?.function?.name ?? tc?.name ?? 'tool';
+                    const args = tc?.['tool_call.function.arguments'] ?? tc?.function?.arguments ?? tc?.arguments ?? '';
+                    const argsStr = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+                    return `<li><code>${this.escapeHtml(String(name))}</code><pre class="json-block"><code>${this.escapeHtml(argsStr)}</code></pre></li>`;
+                }).join('');
+                toolCallsHtml = `<div class="chat-bubble-toolcalls"><strong>Tool calls:</strong><ul>${items}</ul></div>`;
+            }
+            return `
+                <div class="chat-bubble chat-bubble-${roleClass(role)}">
+                    <div class="chat-bubble-header">
+                        <span class="chat-bubble-role">${this.escapeHtml(String(role))}</span>
+                    </div>
+                    <div class="chat-bubble-content">${this.escapeHtml(contentStr)}</div>
+                    ${toolCallsHtml}
+                </div>
+            `;
+        };
+
+        const inputHtml = inputs.map(renderBubble).join('');
+        const outputHtml = outputs.map(renderBubble).join('');
+
+        return `
+            <div class="span-detail-section">
+                <h5>Chat (from llm.*_messages)</h5>
+                <div class="span-events-timeline">
+                    ${inputHtml}${outputHtml}
+                </div>
+            </div>
         `;
     }
 
@@ -1462,6 +1577,63 @@ class TracesView {
         const sorted = Array.from(this.observedModels).sort();
         sel.innerHTML = '<option value="">All models</option>' +
             sorted.map(m => `<option value="${this.escapeHtml(m)}"${m === current ? ' selected' : ''}>${this.escapeHtml(m)}</option>`).join('');
+    }
+
+    /**
+     * Scan loaded traces (and currently selected trace's spans) for OpenInference
+     * span-kind attributes, and render toggle chips for the supported set.
+     */
+    _updateObservedSpanKinds() {
+        const KNOWN = ['LLM', 'CHAIN', 'RETRIEVER', 'EMBEDDING', 'TOOL', 'AGENT', 'RERANKER', 'GUARDRAIL'];
+        for (const trace of this.traces) {
+            const attrs = trace.attributes || {};
+            const k = attrs['openinference.span.kind'];
+            if (k) this.observedSpanKinds.add(String(k).toUpperCase());
+        }
+        if (this.selectedTrace && Array.isArray(this.selectedTrace.spans)) {
+            for (const span of this.selectedTrace.spans) {
+                const k = span.attributes && span.attributes['openinference.span.kind'];
+                if (k) this.observedSpanKinds.add(String(k).toUpperCase());
+            }
+        }
+        const container = document.getElementById('span-kind-chips-traces');
+        if (!container) return;
+        if (this.observedSpanKinds.size === 0) {
+            container.classList.add('hidden');
+            container.innerHTML = '';
+            return;
+        }
+        container.classList.remove('hidden');
+        const activeKinds = new Set(
+            this.attrFilters
+                .filter(f => f.key === 'openinference.span.kind' && f.op === '=')
+                .map(f => String(f.value).toUpperCase())
+        );
+        const chips = KNOWN
+            .filter(k => this.observedSpanKinds.has(k))
+            .map(k => {
+                const active = activeKinds.has(k) ? ' active' : '';
+                return `<button class="span-kind-chip${active}" data-kind="${this.escapeHtml(k)}">${this.escapeHtml(k)}</button>`;
+            })
+            .join('');
+        container.innerHTML = chips;
+        container.querySelectorAll('.span-kind-chip').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const kind = btn.getAttribute('data-kind');
+                const idx = this.attrFilters.findIndex(f =>
+                    f.key === 'openinference.span.kind' && f.op === '=' &&
+                    String(f.value).toUpperCase() === String(kind).toUpperCase()
+                );
+                if (idx >= 0) {
+                    this.attrFilters.splice(idx, 1);
+                } else {
+                    this.attrFilters.push({ key: 'openinference.span.kind', op: '=', value: kind });
+                }
+                this._renderAttrChips();
+                this.currentPage = 0;
+                this.loadTraces();
+            });
+        });
     }
 
     /**

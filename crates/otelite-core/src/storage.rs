@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::api::{
-    CostSeriesPoint, ErrorRateByModel, FinishReasonCount, LatencyStats, ModelUsage, RetryStats,
-    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
+    CostSeriesPoint, ErrorRateByModel, FinishReasonCount, LatencyStats, ModelUsage, RetrievalStats,
+    RetryStats, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
 };
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
@@ -226,4 +226,12 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<RetryStats>;
+
+    /// Aggregated retrieval / RAG statistics across retriever spans.
+    async fn query_retrieval_stats(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        top_queries_limit: usize,
+    ) -> Result<RetrievalStats>;
 }

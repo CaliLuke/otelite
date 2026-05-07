@@ -57,6 +57,7 @@ class UsageView {
         if (!container) return;
 
         container.innerHTML = `
+            ${this._renderTipsPanel()}
             <div class="view-header">
                 <h2>GenAI Usage</h2>
             </div>
@@ -81,11 +82,54 @@ class UsageView {
         `;
 
         this._attachTimeRangeListeners();
+        this._attachTipsPanelListener();
         await this._loadAndRender();
 
         if (!this.refreshInterval) {
             this.refreshInterval = setInterval(() => this._loadAndRender(), 30000);
         }
+    }
+
+    _renderTipsPanel() {
+        const dismissed = localStorage.getItem('otelite_tips_dismissed_usage') === 'true';
+        const openAttr = dismissed ? '' : ' open';
+        return `
+            <details class="tips-panel" id="tips-panel-usage"${openAttr}>
+                <summary>Tips</summary>
+                <div class="tips-panel-body">
+                    <h4>Widget tips</h4>
+                    <ul>
+                        <li>Cost is estimated from a Claude 4.x pricing table — unknown models show "—"</li>
+                        <li>Cost-over-time bucket auto-scales with your time window (1m for ≤1h up to 1d for ≥7d)</li>
+                        <li>Click session / prompt / trace cells in the Top expensive calls table to drill in</li>
+                        <li>Truncation gauge turns red if any response ended with <code>finish_reason=max_tokens</code></li>
+                        <li>Tool rows go amber if success rate &lt; 90%</li>
+                    </ul>
+                    <h4>Debugging recipes</h4>
+                    <ul>
+                        <li>What did this prompt cost? — Logs → click any <code>prompt.id</code> → summary banner</li>
+                        <li>All activity for a session — click <code>session.id</code> anywhere</li>
+                        <li>Any truncation? — Usage → finish_reasons → <code>max_tokens</code> bar</li>
+                        <li>Top expensive calls — Usage → top calls table</li>
+                        <li>Which tool is failing? — Usage → tool usage table → success rate column</li>
+                        <li>Is Opus slower than Sonnet? — Usage → latency-by-model → compare P50 / P95</li>
+                        <li>How much is cache saving? — Usage → cache hit rate gauge</li>
+                    </ul>
+                </div>
+            </details>
+        `;
+    }
+
+    _attachTipsPanelListener() {
+        const panel = document.getElementById('tips-panel-usage');
+        if (!panel) return;
+        panel.addEventListener('toggle', () => {
+            if (!panel.open) {
+                localStorage.setItem('otelite_tips_dismissed_usage', 'true');
+            } else {
+                localStorage.removeItem('otelite_tips_dismissed_usage');
+            }
+        });
     }
 
     _attachTimeRangeListeners() {
@@ -197,7 +241,7 @@ class UsageView {
                 params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
             }
             const bucket = this._chooseBucket();
-            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats] = await Promise.all([
+            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats] = await Promise.all([
                 this.api.getTokenUsage(params),
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
@@ -206,14 +250,15 @@ class UsageView {
                 this.api.getErrorRate(params),
                 this.api.getToolUsage(params),
                 this.api.getRetryStats(params),
+                this.api.getRetrievalStats(params).catch(() => null),
             ]);
-            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats);
+            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats);
         } catch (err) {
             dataContainer.innerHTML = `<div class="empty-state"><p>Failed to load usage data</p><p class="empty-state-hint">${err.message}</p></div>`;
         }
     }
 
-    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats) {
+    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats) {
         const { summary, by_model, by_system } = data;
 
         if (summary.total_requests === 0) {
@@ -277,6 +322,7 @@ class UsageView {
         const latencySection = this._buildLatencyTable(latencyStats || []);
         const errorRateSection = this._buildErrorRate(errorRate || []);
         const toolUsageSection = this._buildToolUsage(toolUsage || []);
+        const retrievalSection = this._buildRetrievalStats(retrievalStats);
 
         const modelRows = by_model.map(m => `
             <tr>
@@ -313,8 +359,54 @@ class UsageView {
             </table>`;
 
         return summaryCards + costChart + topSpansSection + finishReasonsSection
-            + latencySection + errorRateSection + toolUsageSection
+            + latencySection + errorRateSection + toolUsageSection + retrievalSection
             + modelTable + systemTable;
+    }
+
+    _buildRetrievalStats(stats) {
+        if (!stats || !stats.total_retrievals) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const avgDocs = stats.avg_documents_per_query != null
+            ? Number(stats.avg_documents_per_query).toFixed(2)
+            : '—';
+        const avgScore = stats.avg_top_document_score != null
+            ? Number(stats.avg_top_document_score).toFixed(3)
+            : null;
+
+        const summaryLine = `
+            <div class="retrieval-summary">
+                <span><strong>${fmt(stats.total_retrievals)}</strong> retrievals</span>
+                <span>·</span>
+                <span><strong>${avgDocs}</strong> avg docs / query</span>
+                ${avgScore !== null ? `<span>·</span><span><strong>${avgScore}</strong> avg top-1 score</span>` : ''}
+            </div>`;
+
+        const topQueries = Array.isArray(stats.top_queries) ? stats.top_queries : [];
+        const topTable = topQueries.length > 0 ? `
+            <table class="data-table">
+                <thead><tr>
+                    <th>Query</th><th>Retrievals</th><th>Avg docs</th><th>Avg top score</th>
+                </tr></thead>
+                <tbody>${topQueries.map(q => {
+                    const full = String(q.query ?? '');
+                    const truncated = full.length > 80 ? full.slice(0, 80) + '…' : full;
+                    const avgDocsQ = q.avg_documents != null ? Number(q.avg_documents).toFixed(2) : '—';
+                    const avgScoreQ = q.avg_top_score != null ? Number(q.avg_top_score).toFixed(3) : '—';
+                    return `
+                        <tr>
+                            <td title="${this._esc(full)}">${this._esc(truncated)}</td>
+                            <td>${fmt(q.count || 0)}</td>
+                            <td>${this._esc(avgDocsQ)}</td>
+                            <td>${this._esc(avgScoreQ)}</td>
+                        </tr>`;
+                }).join('')}</tbody>
+            </table>` : '';
+
+        return `
+            <h3>Retrieval (RAG) activity</h3>
+            ${summaryLine}
+            ${topTable}
+        `;
     }
 
     _formatDuration(ms) {
