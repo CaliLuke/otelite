@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::api::{
-    CostSeriesPoint, ErrorRateByModel, FinishReasonCount, LatencyStats, ModelUsage, RetrievalStats,
-    RetryStats, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
+    ConversationCostRow, CostSeriesPoint, ErrorRateByModel, FinishReasonCount, LatencyStats,
+    ModelUsage, RetrievalStats, RetryStats, SessionCostRow, SystemUsage, TokenUsageSummary,
+    ToolUsage, TopSpan, TopSpanSort,
 };
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
@@ -183,13 +184,35 @@ pub trait StorageBackend: Send + Sync {
         bucket_ns: i64,
     ) -> Result<Vec<CostSeriesPoint>>;
 
-    /// Top-N most expensive LLM spans by total tokens.
+    /// Top-N LLM spans ordered by the given sort dimension.
+    ///
+    /// When `truncated_only` is true, only spans whose finish reason is
+    /// `max_tokens` or `length` are returned.
+    #[allow(clippy::too_many_arguments)]
     async fn query_top_spans(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
         limit: usize,
+        sort_by: TopSpanSort,
+        truncated_only: bool,
     ) -> Result<Vec<TopSpan>>;
+
+    /// Top-N sessions by total tokens, suitable for cost enrichment.
+    async fn query_top_sessions(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<SessionCostRow>>;
+
+    /// Top-N conversations (gen_ai.conversation.id) by total tokens.
+    async fn query_top_conversations(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ConversationCostRow>>;
 
     /// Finish-reason distribution across LLM spans and Claude Code api_response_body logs.
     async fn query_finish_reasons(

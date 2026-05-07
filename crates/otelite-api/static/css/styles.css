@@ -2349,6 +2349,29 @@ body {
 
 .top-spans-cost-high { color: #f59e0b; font-weight: 600; }
 
+/* Top-N tabbed section */
+.top-n-section { margin-bottom: 2rem; }
+.top-n-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-bottom: 0.75rem;
+}
+.top-n-tab {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.82rem;
+    white-space: nowrap;
+}
+.top-n-tab:hover { background: var(--hover-bg, rgba(255,255,255,0.05)); color: var(--text-primary); }
+.top-n-tab.active { background: var(--accent-color, #3b82f6); color: #fff; border-color: transparent; }
+.top-n-panel[hidden] { display: none; }
+.top-n-loading { color: var(--text-secondary); font-size: 0.85rem; padding: 0.5rem 0; cursor: default; }
+
 .finish-reasons-list { margin-top: 0.5rem; }
 .finish-reason-row {
     display: flex;

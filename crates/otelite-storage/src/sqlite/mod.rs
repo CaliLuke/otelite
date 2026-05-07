@@ -289,13 +289,45 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
         limit: usize,
+        sort_by: otelite_core::api::TopSpanSort,
+        truncated_only: bool,
     ) -> Result<Vec<otelite_core::api::TopSpan>> {
         let conn_guard = self.conn.lock().unwrap();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
 
-        reader::query_top_spans(conn, start_time, end_time, limit).map_err(StorageError::from)
+        reader::query_top_spans(conn, start_time, end_time, limit, sort_by, truncated_only)
+            .map_err(StorageError::from)
+    }
+
+    async fn query_top_sessions(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<otelite_core::api::SessionCostRow>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_top_sessions(conn, start_time, end_time, limit).map_err(StorageError::from)
+    }
+
+    async fn query_top_conversations(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<otelite_core::api::ConversationCostRow>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_top_conversations(conn, start_time, end_time, limit)
+            .map_err(StorageError::from)
     }
 
     async fn query_finish_reasons(

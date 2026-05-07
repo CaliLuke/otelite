@@ -793,11 +793,14 @@ pub fn query_cost_series(
 }
 
 /// Top-N most expensive LLM spans by total tokens.
+#[allow(clippy::too_many_arguments)]
 pub fn query_top_spans(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
     limit: usize,
+    sort_by: otelite_core::api::TopSpanSort,
+    truncated_only: bool,
 ) -> Result<Vec<otelite_core::api::TopSpan>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -811,6 +814,24 @@ pub fn query_top_spans(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    if truncated_only {
+        where_clause.push_str(
+            " AND (json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') IN ('max_tokens','length')\
+             OR json_extract(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'), '$[0]') IN ('max_tokens','length'))",
+        );
+    }
+
+    use otelite_core::api::TopSpanSort;
+    let order_by = match sort_by {
+        TopSpanSort::TotalTokens => "total_tokens DESC".to_string(),
+        TopSpanSort::Duration => "(end_time - start_time) DESC".to_string(),
+        TopSpanSort::OutputInputRatio => {
+            "CAST(COALESCE(output_tokens_raw, 0) AS FLOAT) / NULLIF(COALESCE(input_tokens_raw, 0), 0) DESC".to_string()
+        }
+        TopSpanSort::CacheEfficiency => {
+            "CAST(COALESCE(cache_read_tokens_raw, 0) AS FLOAT) / NULLIF(COALESCE(input_tokens_raw, 0) + COALESCE(cache_read_tokens_raw, 0), 0) ASC".to_string()
+        }
+    };
 
     let sql = format!(
         "SELECT
@@ -826,10 +847,18 @@ pub fn query_top_spans(
             COALESCE({output}, 0) as output_tokens,
             COALESCE({cache_creation}, 0) as cache_creation_tokens,
             COALESCE({cache_read}, 0) as cache_read_tokens,
-            COALESCE({input}, 0) + COALESCE({output}, 0) + COALESCE({cache_creation}, 0) + COALESCE({cache_read}, 0) as total_tokens
+            COALESCE({input}, 0) + COALESCE({output}, 0) + COALESCE({cache_creation}, 0) + COALESCE({cache_read}, 0) as total_tokens,
+            COALESCE(
+                json_extract(attributes, '$.\"gen_ai.response.finish_reason\"'),
+                json_extract(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'), '$[0]')
+            ) as finish_reason,
+            json_extract(attributes, '$.\"gen_ai.conversation.id\"') as conversation_id,
+            {input} as input_tokens_raw,
+            {output} as output_tokens_raw,
+            {cache_read} as cache_read_tokens_raw
         FROM spans
         {where_clause}
-        ORDER BY total_tokens DESC
+        ORDER BY {order_by}
         LIMIT ?",
         model = exprs.model,
         system = exprs.system,
@@ -837,6 +866,7 @@ pub fn query_top_spans(
         output = exprs.output,
         cache_creation = exprs.cache_creation,
         cache_read = exprs.cache_read,
+        order_by = order_by,
     );
 
     params.push(Box::new(limit as i64));
@@ -862,6 +892,8 @@ pub fn query_top_spans(
                 cache_creation_tokens: row.get::<_, i64>(10)? as u64,
                 cache_read_tokens: row.get::<_, i64>(11)? as u64,
                 total_tokens: row.get::<_, i64>(12)? as u64,
+                finish_reason: row.get::<_, Option<String>>(13)?,
+                conversation_id: row.get::<_, Option<String>>(14)?,
                 // Cost enrichment happens in the API layer.
                 cost: None,
                 cost_source: None,
@@ -872,6 +904,141 @@ pub fn query_top_spans(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| {
             StorageError::QueryError(format!("Failed to parse top_spans results: {}", e))
+        })?;
+
+    Ok(rows)
+}
+
+pub fn query_top_sessions(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: usize,
+) -> Result<Vec<otelite_core::api::SessionCostRow>> {
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {} AND session_id IS NOT NULL", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            json_extract(attributes, '$.\"session.id\"') as session_id,
+            COUNT(*) as request_count,
+            SUM(COALESCE({input}, 0)) as input_tokens,
+            SUM(COALESCE({output}, 0)) as output_tokens,
+            SUM(COALESCE({input}, 0) + COALESCE({output}, 0) + COALESCE({cache_creation}, 0) + COALESCE({cache_read}, 0)) as total_tokens
+        FROM spans
+        {where_clause}
+        GROUP BY session_id
+        ORDER BY total_tokens DESC
+        LIMIT ?",
+        input = exprs.input,
+        output = exprs.output,
+        cache_creation = exprs.cache_creation,
+        cache_read = exprs.cache_read,
+    );
+
+    params.push(Box::new(limit as i64));
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare top_sessions query: {}", e))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(otelite_core::api::SessionCostRow {
+                session_id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                request_count: row.get::<_, i64>(1)? as u64,
+                input_tokens: row.get::<_, i64>(2)? as u64,
+                output_tokens: row.get::<_, i64>(3)? as u64,
+                total_tokens: row.get::<_, i64>(4)? as u64,
+                cost: None,
+                cost_source: None,
+            })
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to execute top_sessions query: {}", e)))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse top_sessions results: {}", e))
+        })?;
+
+    Ok(rows)
+}
+
+pub fn query_top_conversations(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: usize,
+) -> Result<Vec<otelite_core::api::ConversationCostRow>> {
+    let exprs = token_exprs();
+    let conversation_id_expr = "json_extract(attributes, '$.\"gen_ai.conversation.id\"')";
+    let mut where_clause = format!(
+        "WHERE {} AND {} IS NOT NULL",
+        exprs.llm_span_guard, conversation_id_expr
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            {conv_id} as conversation_id,
+            COUNT(*) as request_count,
+            SUM(COALESCE({input}, 0)) as input_tokens,
+            SUM(COALESCE({output}, 0)) as output_tokens,
+            SUM(COALESCE({input}, 0) + COALESCE({output}, 0) + COALESCE({cache_creation}, 0) + COALESCE({cache_read}, 0)) as total_tokens
+        FROM spans
+        {where_clause}
+        GROUP BY conversation_id
+        ORDER BY total_tokens DESC
+        LIMIT ?",
+        conv_id = conversation_id_expr,
+        input = exprs.input,
+        output = exprs.output,
+        cache_creation = exprs.cache_creation,
+        cache_read = exprs.cache_read,
+    );
+
+    params.push(Box::new(limit as i64));
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare top_conversations query: {}", e))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(otelite_core::api::ConversationCostRow {
+                conversation_id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                request_count: row.get::<_, i64>(1)? as u64,
+                input_tokens: row.get::<_, i64>(2)? as u64,
+                output_tokens: row.get::<_, i64>(3)? as u64,
+                total_tokens: row.get::<_, i64>(4)? as u64,
+                cost: None,
+                cost_source: None,
+            })
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to execute top_conversations query: {}", e)))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse top_conversations results: {}", e))
         })?;
 
     Ok(rows)

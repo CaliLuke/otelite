@@ -38,6 +38,8 @@ use utoipa::OpenApi;
         crate::api::genai::get_token_usage,
         crate::api::genai::get_cost_series,
         crate::api::genai::get_top_spans,
+        crate::api::genai::get_top_sessions,
+        crate::api::genai::get_top_conversations,
         crate::api::genai::get_finish_reasons,
         crate::api::genai::get_latency_stats,
         crate::api::genai::get_error_rate,
@@ -82,6 +84,7 @@ use utoipa::OpenApi;
             crate::api::genai::TokenUsageQuery,
             crate::api::genai::CostSeriesQuery,
             crate::api::genai::TopSpansQuery,
+            crate::api::genai::TopGroupQuery,
             crate::api::genai::FinishReasonsQuery,
             crate::api::genai::LatencyQuery,
             crate::api::genai::ErrorRateQuery,
@@ -217,6 +220,8 @@ impl DashboardServer {
             .route("/api/genai/usage", get(crate::api::get_token_usage))
             .route("/api/genai/cost_series", get(crate::api::genai::get_cost_series))
             .route("/api/genai/top_spans", get(crate::api::genai::get_top_spans))
+            .route("/api/genai/top_sessions", get(crate::api::genai::get_top_sessions))
+            .route("/api/genai/top_conversations", get(crate::api::genai::get_top_conversations))
             .route("/api/genai/finish_reasons", get(crate::api::genai::get_finish_reasons))
             .route("/api/genai/latency_stats", get(crate::api::genai::get_latency_stats))
             .route("/api/genai/error_rate", get(crate::api::genai::get_error_rate))

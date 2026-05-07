@@ -187,6 +187,8 @@ class ApiClient {
     async getRetrievalStats(params = {}) { return this.get('/genai/retrieval_stats', params); }
     async getPricingMetadata() { return this.get('/genai/pricing_metadata'); }
     async getAgentFrameworkDefs() { return this.get('/genai/agent_framework_defs'); }
+    async getTopSessions(params = {}) { return this.get('/genai/top_sessions', params); }
+    async getTopConversations(params = {}) { return this.get('/genai/top_conversations', params); }
 
     /**
      * Check health status

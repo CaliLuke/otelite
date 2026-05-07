@@ -240,6 +240,7 @@ class UsageView {
                 this.api.getPricingMetadata().catch(() => null),
             ]);
             dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta);
+            this._attachTopNTabHandlers(params);
             // When no explicit range is selected ("All time"), show the user
             // what effective range the query covered by prefilling the date
             // inputs from the returned cost-series data. Prefill is visual
@@ -310,7 +311,7 @@ class UsageView {
             </div>`;
 
         const costChart = this._buildCostChart(costSeries || [], bucket);
-        const topSpansSection = this._buildTopSpans(topSpans || []);
+        const topNSection = this._buildTopNSection(topSpans || [], errorRate || []);
         const finishReasonsSection = this._buildFinishReasons(reasons);
         const latencySection = this._buildLatencyTable(latencyStats || []);
         const errorRateSection = this._buildErrorRate(errorRate || []);
@@ -353,7 +354,7 @@ class UsageView {
 
         const pricingNotice = this._renderPricingNotice(pricingMeta);
 
-        return pricingNotice + summaryCards + costChart + topSpansSection + finishReasonsSection
+        return pricingNotice + summaryCards + costChart + topNSection + finishReasonsSection
             + latencySection + errorRateSection + toolUsageSection + retrievalSection
             + modelTable + systemTable;
     }
@@ -578,64 +579,207 @@ class UsageView {
             </div>`;
     }
 
-    _buildTopSpans(topSpans) {
-        if (!topSpans.length) {
-            return `<h3>Top 20 most expensive calls</h3><div class="empty-state-hint">No GenAI spans in this window.</div>`;
-        }
+    // ── Top-N tabbed section ─────────────────────────────────────────────────
 
+    _buildTopNSection(topSpans, errorRate) {
+        const tabs = [
+            { id: 'cost',      label: 'Most expensive' },
+            { id: 'slow',      label: 'Slowest' },
+            { id: 'truncated', label: 'Truncated' },
+            { id: 'sessions',  label: 'Sessions' },
+            { id: 'convs',     label: 'Conversations' },
+            { id: 'verbose',   label: 'Most verbose' },
+            { id: 'cache',     label: 'Cache efficiency' },
+            { id: 'errors',    label: 'Error runs' },
+        ];
+
+        const tabBtns = tabs.map((t, i) =>
+            `<button class="top-n-tab${i === 0 ? ' active' : ''}" data-tab="${t.id}">${t.label}</button>`
+        ).join('');
+
+        const panels = tabs.map((t, i) => {
+            let content = '';
+            if (t.id === 'cost') {
+                content = this._renderSpanTable(topSpans || [], { extraCol: 'cost', emptyMsg: 'No expensive calls in this window.' });
+            } else if (t.id === 'errors') {
+                content = this._renderErrorRunsTable(errorRate || []);
+            } else {
+                content = `<div class="top-n-loading" data-tab="${t.id}">Click to load…</div>`;
+            }
+            return `<div id="top-n-panel-${t.id}" class="top-n-panel" ${i !== 0 ? 'hidden' : ''}>${content}</div>`;
+        }).join('');
+
+        return `
+            <div class="top-n-section">
+                <h3>Top 20 calls</h3>
+                <div class="top-n-tabs">${tabBtns}</div>
+                ${panels}
+            </div>`;
+    }
+
+    _attachTopNTabHandlers(params) {
+        const tabDefs = {
+            slow:      p => this.api.getTopSpans({...p, sort_by: 'duration'}),
+            truncated: p => this.api.getTopSpans({...p, truncated_only: true}),
+            sessions:  p => this.api.getTopSessions(p),
+            convs:     p => this.api.getTopConversations(p),
+            verbose:   p => this.api.getTopSpans({...p, sort_by: 'output_input_ratio'}),
+            cache:     p => this.api.getTopSpans({...p, sort_by: 'cache_efficiency'}),
+        };
+
+        document.querySelectorAll('.top-n-tab').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const tabId = btn.dataset.tab;
+                document.querySelectorAll('.top-n-tab').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                document.querySelectorAll('.top-n-panel').forEach(p => p.hidden = true);
+                const panel = document.getElementById(`top-n-panel-${tabId}`);
+                if (!panel) return;
+                panel.hidden = false;
+
+                // Only load if the placeholder is still showing
+                const placeholder = panel.querySelector('.top-n-loading');
+                if (!placeholder || !tabDefs[tabId]) return;
+                placeholder.textContent = 'Loading…';
+
+                try {
+                    const data = await tabDefs[tabId]({ ...params, limit: 20 });
+                    let html;
+                    if (tabId === 'sessions') {
+                        html = this._renderGroupTable(data || [], 'session_id', 'Session ID');
+                    } else if (tabId === 'convs') {
+                        html = this._renderGroupTable(data || [], 'conversation_id', 'Conversation ID');
+                    } else {
+                        const extraCol = {slow: 'duration', truncated: 'finish_reason', verbose: 'ratio', cache: 'cache_rate'}[tabId] || 'cost';
+                        html = this._renderSpanTable(data || [], { extraCol, emptyMsg: 'No matching spans in this window.' });
+                    }
+                    panel.innerHTML = html;
+                } catch (e) {
+                    panel.innerHTML = `<div class="empty-state-hint">Failed to load: ${this._esc(e.message)}</div>`;
+                }
+            });
+        });
+    }
+
+    _renderSpanTable(spans, { extraCol, emptyMsg }) {
+        if (!spans.length) return `<div class="empty-state-hint">${emptyMsg}</div>`;
         const fmt = n => Number(n).toLocaleString();
+        const anySession = spans.some(r => r.session_id);
 
-        // Hide optional columns entirely when no row populates them. Claude
-        // Code emits prompt.id only on api_request_body logs (not on spans),
-        // so a column of em-dashes adds noise without signal.
-        const anyPrompt = topSpans.some(r => r.prompt_id);
-        const anySession = topSpans.some(r => r.session_id);
+        const extraHeader = {
+            cost:         '<th>Cost</th>',
+            duration:     '<th>Duration</th>',
+            finish_reason:'<th>Finish reason</th>',
+            ratio:        '<th>Out/In ratio</th>',
+            cache_rate:   '<th>Cache hit%</th>',
+        }[extraCol] || '';
 
-        const rows = topSpans.map(row => {
+        const rows = spans.map(row => {
             const cost = row.cost ?? null;
             const costStr = cost === null
                 ? `<span title="${this._esc(row.cost_reason || 'no pricing match')}">—</span>`
                 : `$${cost.toFixed(4)}`;
             const costClass = cost !== null && cost >= 0.01 ? 'top-spans-cost-high' : '';
 
-            const tsDate = new Date((row.start_time ?? 0) / 1_000_000);
-            const timeStr = formatTs(tsDate);
-
+            const timeStr = formatTs(new Date((row.start_time ?? 0) / 1_000_000));
             const sessionCell = row.session_id
                 ? `<a href="#" onclick="window.app.navigateToLogsBySession('${this._esc(row.session_id)}'); return false;" title="${this._esc(row.session_id)}">${this._esc(String(row.session_id).slice(0, 8))}</a>`
-                : '—';
-            const promptCell = row.prompt_id
-                ? `<a href="#" onclick="window.app.navigateToLogsByPrompt('${this._esc(row.prompt_id)}'); return false;" title="${this._esc(row.prompt_id)}">${this._esc(String(row.prompt_id).slice(0, 8))}</a>`
                 : '—';
             const traceCell = row.trace_id
                 ? `<a href="#" onclick="window.app.navigateToTrace('${this._esc(row.trace_id)}'); return false;" title="${this._esc(row.trace_id)}">${this._esc(String(row.trace_id).slice(0, 8))}</a>`
                 : '—';
 
-            return `
-                <tr>
-                    <td>${this._esc(timeStr)}</td>
-                    <td>${this._esc(row.model || '—')}</td>
-                    ${anySession ? `<td>${sessionCell}</td>` : ''}
-                    ${anyPrompt ? `<td>${promptCell}</td>` : ''}
-                    <td>${fmt(row.input_tokens ?? 0)}</td>
-                    <td>${fmt(row.output_tokens ?? 0)}</td>
-                    <td>${fmt(row.cache_read_tokens ?? 0)}</td>
-                    <td class="${costClass}">${costStr}</td>
-                    <td>${traceCell}</td>
-                </tr>`;
+            let extraCell = '';
+            if (extraCol === 'cost') {
+                extraCell = `<td class="${costClass}">${costStr}</td>`;
+            } else if (extraCol === 'duration') {
+                const ms = Math.round((row.duration ?? 0) / 1_000_000);
+                extraCell = `<td>${ms.toLocaleString()}ms</td>`;
+            } else if (extraCol === 'finish_reason') {
+                extraCell = `<td>${this._esc(row.finish_reason || '—')}</td>`;
+            } else if (extraCol === 'ratio') {
+                const inp = row.input_tokens || 0;
+                const out = row.output_tokens || 0;
+                const ratio = inp > 0 ? (out / inp).toFixed(2) : '—';
+                extraCell = `<td>${ratio}</td>`;
+            } else if (extraCol === 'cache_rate') {
+                const inp = (row.input_tokens || 0) + (row.cache_read_tokens || 0);
+                const pct = inp > 0 ? ((row.cache_read_tokens || 0) / inp * 100).toFixed(1) : '—';
+                extraCell = `<td>${pct}%</td>`;
+            }
+
+            return `<tr>
+                <td>${this._esc(timeStr)}</td>
+                <td>${this._esc(row.model || '—')}</td>
+                ${anySession ? `<td>${sessionCell}</td>` : ''}
+                <td>${fmt(row.input_tokens ?? 0)}</td>
+                <td>${fmt(row.output_tokens ?? 0)}</td>
+                ${extraCell}
+                <td>${traceCell}</td>
+            </tr>`;
         }).join('');
 
-        return `
-            <h3>Top 20 most expensive calls</h3>
-            <table class="data-table">
-                <thead><tr>
-                    <th>Time</th><th>Model</th>
-                    ${anySession ? '<th>Session</th>' : ''}
-                    ${anyPrompt ? '<th>Prompt</th>' : ''}
-                    <th>Input</th><th>Output</th><th>Cache read</th><th>Cost (est.)</th><th>Trace</th>
-                </tr></thead>
-                <tbody>${rows}</tbody>
-            </table>`;
+        return `<table class="data-table">
+            <thead><tr>
+                <th>Time</th><th>Model</th>
+                ${anySession ? '<th>Session</th>' : ''}
+                <th>Input</th><th>Output</th>
+                ${extraHeader}
+                <th>Trace</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    _renderGroupTable(rows, idField, idLabel) {
+        const fmt = n => Number(n).toLocaleString();
+        if (!rows.length) return `<div class="empty-state-hint">No data in this window.</div>`;
+        const tableRows = rows.map(r => {
+            const cost = r.cost ?? null;
+            const costStr = cost === null ? '—' : `$${cost.toFixed(4)}`;
+            const id = String(r[idField] || '—');
+            const navFn = idField === 'session_id'
+                ? `window.app.navigateToLogsBySession('${this._esc(id)}')`
+                : `window.app.navigateToLogsBySession('${this._esc(id)}')`;
+            const idCell = id === '—' ? id
+                : `<a href="#" onclick="${navFn}; return false;" title="${this._esc(id)}">${this._esc(id.slice(0, 24))}${id.length > 24 ? '…' : ''}</a>`;
+            return `<tr>
+                <td>${idCell}</td>
+                <td>${fmt(r.request_count ?? 0)}</td>
+                <td>${fmt(r.input_tokens ?? 0)}</td>
+                <td>${fmt(r.output_tokens ?? 0)}</td>
+                <td>${costStr}</td>
+            </tr>`;
+        }).join('');
+        return `<table class="data-table">
+            <thead><tr>
+                <th>${idLabel}</th><th>Requests</th><th>Input</th><th>Output</th><th>Cost (est.)</th>
+            </tr></thead>
+            <tbody>${tableRows}</tbody>
+        </table>`;
+    }
+
+    _renderErrorRunsTable(errorRate) {
+        const fmt = n => Number(n).toLocaleString();
+        if (!errorRate.length) return `<div class="empty-state-hint">No error data in this window.</div>`;
+        const rows = [...errorRate]
+            .sort((a, b) => (b.error_rate ?? 0) - (a.error_rate ?? 0))
+            .map(r => {
+                const pct = ((r.error_rate ?? 0) * 100).toFixed(1);
+                const cls = (r.error_rate ?? 0) > 0.1 ? 'top-spans-cost-high' : '';
+                return `<tr>
+                    <td>${this._esc(r.model || '—')}</td>
+                    <td>${fmt(r.total_calls ?? 0)}</td>
+                    <td>${fmt(r.error_count ?? 0)}</td>
+                    <td class="${cls}">${pct}%</td>
+                </tr>`;
+            }).join('');
+        return `<table class="data-table">
+            <thead><tr>
+                <th>Model</th><th>Calls</th><th>Errors</th><th>Error rate</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
     }
 
     _buildFinishReasons(reasons) {

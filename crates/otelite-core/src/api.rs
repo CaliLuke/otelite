@@ -512,6 +512,22 @@ pub struct CostSeriesPoint {
     pub cost_source: Option<String>,
 }
 
+/// Sort dimension for top-N span queries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum TopSpanSort {
+    /// By total token count (default — same as before).
+    #[default]
+    TotalTokens,
+    /// By span duration (slowest first).
+    Duration,
+    /// By output/input token ratio (most verbose first).
+    OutputInputRatio,
+    /// By cache efficiency: worst cache-read rate (ascending) first.
+    CacheEfficiency,
+}
+
 /// A single top-N expensive LLM span
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -531,6 +547,12 @@ pub struct TopSpan {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub total_tokens: u64,
+    /// First finish/stop reason for this span (e.g. "max_tokens", "end_turn").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    /// `gen_ai.conversation.id` attribute if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     /// Estimated cost in USD, computed server-side from the pricing database.
     /// `None` when no pricing data matched this row's (model, system).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -542,6 +564,36 @@ pub struct TopSpan {
     /// "no pricing data for claude-foo on bedrock").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_reason: Option<String>,
+}
+
+/// Aggregated cost/token row for a single session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionCostRow {
+    pub session_id: String,
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+}
+
+/// Aggregated cost/token row for a single conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ConversationCostRow {
+    pub conversation_id: String,
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
 }
 
 /// Distribution entry for a single finish reason

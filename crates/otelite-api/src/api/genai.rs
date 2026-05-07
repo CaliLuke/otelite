@@ -7,8 +7,9 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    CostSeriesPoint, ErrorRateByModel, ErrorResponse, FinishReasonCount, LatencyStats,
-    RetrievalStats, RetryStats, TokenUsageResponse, ToolUsage, TopSpan,
+    ConversationCostRow, CostSeriesPoint, ErrorRateByModel, ErrorResponse, FinishReasonCount,
+    LatencyStats, RetrievalStats, RetryStats, SessionCostRow, TokenUsageResponse, ToolUsage,
+    TopSpan, TopSpanSort,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -165,15 +166,29 @@ pub struct TopSpansQuery {
     pub end_time: Option<i64>,
     /// Maximum number of spans to return (default 20, capped at 100)
     pub limit: Option<usize>,
+    /// Sort dimension: total_tokens (default), duration, output_input_ratio, cache_efficiency
+    #[serde(default)]
+    pub sort_by: TopSpanSort,
+    /// When true, return only spans with finish_reason max_tokens or length
+    #[serde(default)]
+    pub truncated_only: bool,
 }
 
-/// Get the top-N most expensive LLM spans by total tokens
+/// Query parameters for top-sessions endpoint
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct TopGroupQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+/// Get the top-N LLM spans by the requested sort dimension
 #[utoipa::path(
     get,
     path = "/api/genai/top_spans",
     params(TopSpansQuery),
     responses(
-        (status = 200, description = "Top expensive spans", body = Vec<TopSpan>),
+        (status = 200, description = "Top spans", body = Vec<TopSpan>),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -186,7 +201,7 @@ pub async fn get_top_spans(
 
     let mut spans = state
         .storage
-        .query_top_spans(query.start_time, query.end_time, limit)
+        .query_top_spans(query.start_time, query.end_time, limit, query.sort_by, query.truncated_only)
         .await
         .map_err(|e| {
             (
@@ -202,6 +217,106 @@ pub async fn get_top_spans(
     enrich_top_spans(&mut spans, &pricing.db);
 
     Ok(Json(spans))
+}
+
+fn enrich_session_rows(rows: &mut [SessionCostRow], db: &PricingDatabase) {
+    for row in rows {
+        let usage = TokenUsage {
+            input: row.input_tokens,
+            output: row.output_tokens,
+            ..Default::default()
+        };
+        let result = db.compute_cost(None, usage, None);
+        row.cost = result.cost;
+        row.cost_source = Some(result.source.as_str().to_string());
+    }
+}
+
+fn enrich_conversation_rows(rows: &mut [ConversationCostRow], db: &PricingDatabase) {
+    for row in rows {
+        let usage = TokenUsage {
+            input: row.input_tokens,
+            output: row.output_tokens,
+            ..Default::default()
+        };
+        let result = db.compute_cost(None, usage, None);
+        row.cost = result.cost;
+        row.cost_source = Some(result.source.as_str().to_string());
+    }
+}
+
+/// Get the top-N sessions by total token usage
+#[utoipa::path(
+    get,
+    path = "/api/genai/top_sessions",
+    params(TopGroupQuery),
+    responses(
+        (status = 200, description = "Top sessions", body = Vec<SessionCostRow>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_top_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<TopGroupQuery>,
+) -> Result<Json<Vec<SessionCostRow>>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+
+    let mut rows = state
+        .storage
+        .query_top_sessions(query.start_time, query.end_time, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query top sessions: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    let pricing = state.pricing.snapshot().await;
+    enrich_session_rows(&mut rows, &pricing.db);
+
+    Ok(Json(rows))
+}
+
+/// Get the top-N conversations (gen_ai.conversation.id) by total token usage
+#[utoipa::path(
+    get,
+    path = "/api/genai/top_conversations",
+    params(TopGroupQuery),
+    responses(
+        (status = 200, description = "Top conversations", body = Vec<ConversationCostRow>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_top_conversations(
+    State(state): State<AppState>,
+    Query(query): Query<TopGroupQuery>,
+) -> Result<Json<Vec<ConversationCostRow>>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+
+    let mut rows = state
+        .storage
+        .query_top_conversations(query.start_time, query.end_time, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query top conversations: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    let pricing = state.pricing.snapshot().await;
+    enrich_conversation_rows(&mut rows, &pricing.db);
+
+    Ok(Json(rows))
 }
 
 /// Query parameters for finish-reason distribution endpoint
