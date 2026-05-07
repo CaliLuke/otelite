@@ -15,7 +15,7 @@ class MetricsView {
         this.metrics = [];
         this.metricNames = [];
         this.selectedMetric = null;
-        this.interval = 60; // 1 minute buckets
+        this.interval = 60; // will be overridden by _chooseBucket() on first open
         this.autoRefreshInterval = null;
         // Time range state — matches logs/traces/usage pattern.
         // trStart/trEnd null + trWindowHours null = "All time".
@@ -174,6 +174,9 @@ class MetricsView {
                 <div id="metric-data-rows"></div>
             </div>
         `;
+
+        this.interval = this._chooseBucket();
+        this._syncBucketSelect();
 
         document.getElementById('interval-select').addEventListener('change', (e) => {
             this.interval = parseInt(e.target.value);
@@ -339,6 +342,22 @@ class MetricsView {
             ctx.textAlign = 'center';
             ctx.fillText(b.label, x + barW / 2 + 1, cssH - 6);
         });
+    }
+
+    _chooseBucket() {
+        const hours = this.trWindowHours;
+        if (hours == null) return 86400;
+        if (hours <= 1) return 60;
+        if (hours <= 6) return 300;
+        if (hours <= 24) return 900;
+        if (hours <= 168) return 3600;
+        return 86400;
+    }
+
+    _syncBucketSelect() {
+        const sel = document.getElementById('interval-select');
+        if (!sel) return;
+        sel.value = String(this.interval);
     }
 
     // Returns {start_time, end_time} in nanoseconds. Either side can be null,
@@ -670,6 +689,8 @@ class MetricsView {
 
     _attachTimeRangeListeners() {
         const reload = () => {
+            this.interval = this._chooseBucket();
+            this._syncBucketSelect();
             if (this.selectedMetric) this.loadTimeseries(this.selectedMetric);
         };
 
@@ -738,6 +759,8 @@ class MetricsView {
         }
         const presetEl = document.getElementById('tr-preset-metrics');
         if (presetEl) presetEl.value = '';
+        this.interval = this._chooseBucket();
+        this._syncBucketSelect();
         this.refreshCurrentValue(this.selectedMetric);
         if (this.selectedMetric) this.loadTimeseries(this.selectedMetric);
     }
