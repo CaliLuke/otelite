@@ -111,6 +111,14 @@ class App {
         v.loadTraces();
     }
 
+    navigateToLogsByPrompt(promptId) {
+        this.switchView('logs');
+        const v = this.views.logs;
+        v.filters.prompt_id = promptId;
+        v.currentPage = 0;
+        v.loadLogs();
+    }
+
     /**
      * Dispatch custom event for view change
      */

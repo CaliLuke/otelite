@@ -42,6 +42,10 @@ pub struct LogsQuery {
     #[serde(default)]
     pub session_id: Option<String>,
 
+    /// Filter by prompt ID (prompt.id attribute)
+    #[serde(default)]
+    pub prompt_id: Option<String>,
+
     /// Maximum number of results (default: 100, max: 1000)
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -105,6 +109,16 @@ pub async fn list_logs(
                 field: "session.id".to_string(),
                 operator: Operator::Equal,
                 value: QueryValue::String(sid.clone()),
+            });
+        }
+    }
+
+    if let Some(ref pid) = params.prompt_id {
+        if !pid.is_empty() {
+            query.predicates.push(QueryPredicate {
+                field: "prompt.id".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String(pid.clone()),
             });
         }
     }

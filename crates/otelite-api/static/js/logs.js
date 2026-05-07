@@ -9,6 +9,61 @@ function formatTs(date) {
            `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}.${ms}`;
 }
 
+// Claude pricing in USD per 1M tokens. Used for best-effort cost estimation.
+// Cache write rates reflect Anthropic's published multipliers: 5m ≈ 1.25x input, 1h ≈ 2x input.
+// Cache read ≈ 0.1x input. Prefixes cover Claude 4.x family; unknown models return null.
+const CLAUDE_PRICING = {
+    'opus':   { input: 15, output: 75, cache_5m: 18.75, cache_1h: 30, cache_read: 1.5 },
+    'sonnet': { input: 3,  output: 15, cache_5m: 3.75,  cache_1h: 6,  cache_read: 0.3 },
+    'haiku':  { input: 1,  output: 5,  cache_5m: 1.25,  cache_1h: 2,  cache_read: 0.1 },
+};
+
+function pricingForModel(model) {
+    if (!model) return null;
+    const m = String(model).toLowerCase();
+    if (m.includes('opus')) return CLAUDE_PRICING.opus;
+    if (m.includes('sonnet')) return CLAUDE_PRICING.sonnet;
+    if (m.includes('haiku')) return CLAUDE_PRICING.haiku;
+    return null;
+}
+
+function computeCost(model, usage) {
+    const p = pricingForModel(model);
+    if (!p || !usage) return null;
+    const c5 = usage.cache_creation?.ephemeral_5m_input_tokens ?? 0;
+    const c1 = usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+    const cc = (usage.cache_creation_input_tokens ?? 0) - c5 - c1;
+    const cr = usage.cache_read_input_tokens ?? 0;
+    const input = usage.input_tokens ?? 0;
+    const output = usage.output_tokens ?? 0;
+    return (
+        input * p.input +
+        output * p.output +
+        c5 * p.cache_5m +
+        c1 * p.cache_1h +
+        Math.max(cc, 0) * p.cache_5m +  // fall back to 5m rate for uncategorised cache_creation
+        cr * p.cache_read
+    ) / 1_000_000;
+}
+
+// Parse an api_response_body log into structured LLM data, returning null for other logs.
+function extractLlmUsage(log) {
+    if (!log || log.body !== 'claude_code.api_response_body') return null;
+    const bodyStr = log.attributes?.body;
+    if (!bodyStr) return null;
+    try {
+        const parsed = JSON.parse(bodyStr);
+        return {
+            model: parsed.model ?? null,
+            usage: parsed.usage ?? null,
+            stop_reason: parsed.stop_reason ?? null,
+            service_tier: parsed.usage?.service_tier ?? null,
+            web_search_requests: parsed.usage?.server_tool_use?.web_search_requests ?? 0,
+            web_fetch_requests: parsed.usage?.server_tool_use?.web_fetch_requests ?? 0,
+        };
+    } catch { return null; }
+}
+
 class LogsView {
     constructor(apiClient) {
         this.apiClient = apiClient;
@@ -22,6 +77,7 @@ class LogsView {
         };
         this.filters.trace_id = null;
         this.filters.session_id = null;
+        this.filters.prompt_id = null;
         this.attrFilters = [];
         this.trStart = null;
         this.trEnd = null;
@@ -322,13 +378,15 @@ class LogsView {
             ? this.logs.filter(log => this._matchesAttrFilters(log))
             : this.logs;
 
+        const summaryHtml = this.renderPromptSummary();
+
         if (displayLogs.length === 0) {
-            container.innerHTML = '<div class="empty-state">No logs found</div>';
+            container.innerHTML = summaryHtml + '<div class="empty-state">No logs found</div>';
             return;
         }
 
         const useLlm = this.llmView && this.hasGenAiData;
-        container.innerHTML = displayLogs.map(log => this.renderLogEntry(log, useLlm)).join('');
+        container.innerHTML = summaryHtml + displayLogs.map(log => this.renderLogEntry(log, useLlm)).join('');
 
         // Attach click handlers for expansion
         container.querySelectorAll('.log-entry').forEach((entry, index) => {
@@ -385,29 +443,20 @@ class LogsView {
         const attrs = log.attributes || {};
         const bodyPreview = this.escapeHtml(log.body.substring(0, 100)) + (log.body.length > 100 ? '...' : '');
 
-        // Detect claude_code.api_response_body logs and extract tokens from JSON body
-        let bodyDerivedModel = null, bodyDerivedInput = null, bodyDerivedOutput = null;
-        if (log.body === 'claude_code.api_response_body' && attrs.body) {
-            try {
-                const parsed = JSON.parse(attrs.body);
-                bodyDerivedModel = parsed.model ?? null;
-                const u = parsed.usage ?? {};
-                bodyDerivedInput = u.input_tokens ?? null;
-                bodyDerivedOutput = u.output_tokens ?? null;
-            } catch {}
-        }
+        // Detect claude_code.api_response_body logs and extract full LLM info from JSON body
+        const llm = extractLlmUsage(log);
 
         let headerCols;
         if (useLlm) {
-            const model = attrs['gen_ai.request.model'] || attrs['gen_ai.response.model'] || bodyDerivedModel || '—';
-            const rawInput = attrs['gen_ai.usage.input_tokens'] ?? bodyDerivedInput;
-            const rawOutput = attrs['gen_ai.usage.output_tokens'] ?? bodyDerivedOutput;
+            const model = attrs['gen_ai.request.model'] || attrs['gen_ai.response.model'] || llm?.model || '—';
+            const rawInput = attrs['gen_ai.usage.input_tokens'] ?? llm?.usage?.input_tokens;
+            const rawOutput = attrs['gen_ai.usage.output_tokens'] ?? llm?.usage?.output_tokens;
             const inputTokens = rawInput != null ? Number(rawInput).toLocaleString() : '—';
             const outputTokens = rawOutput != null ? Number(rawOutput).toLocaleString() : '—';
             const finishReasonsRaw = attrs['gen_ai.response.finish_reasons'];
             const finishReason = finishReasonsRaw != null
                 ? (Array.isArray(finishReasonsRaw) ? finishReasonsRaw.join(', ') : String(finishReasonsRaw))
-                : (attrs['gen_ai.response.finish_reason'] || '—');
+                : (attrs['gen_ai.response.finish_reason'] || llm?.stop_reason || '—');
             headerCols = `
                     <span class="log-timestamp">${formatTs(timestamp)}</span>
                     <span class="log-severity ${severityClass}">${log.severity}</span>
@@ -433,7 +482,9 @@ class LogsView {
                     ${this.renderBodyField(log.body)}
                     ${log.trace_id ? `<div class="log-field"><strong>Trace ID:</strong> <a class="trace-link" onclick="window.app.navigateToTrace('${this.escapeHtml(log.trace_id)}');return false;" href="#" title="View trace">${this.escapeHtml(log.trace_id)}</a></div>` : ''}
                     ${attrs['session.id'] ? `<div class="log-field"><strong>Session:</strong> <a class="trace-link" onclick="window.app.navigateToLogsBySession('${this.escapeHtml(attrs['session.id'])}');return false;" href="#" title="View all logs for this session">${this.escapeHtml(attrs['session.id'])}</a></div>` : ''}
+                    ${attrs['prompt.id'] ? `<div class="log-field"><strong>Prompt:</strong> <a class="trace-link" onclick="window.app.navigateToLogsByPrompt('${this.escapeHtml(attrs['prompt.id'])}');return false;" href="#" title="View all logs for this prompt turn">${this.escapeHtml(attrs['prompt.id'])}</a></div>` : ''}
                     ${log.span_id ? `<div class="log-field"><strong>Span ID:</strong> ${log.span_id}</div>` : ''}
+                    ${llm ? this.renderLlmUsage(llm) : ''}
                     ${Object.keys(attrs).length > 0 ? `
                         <div class="log-field">
                             <strong>Attributes:</strong>
@@ -451,8 +502,124 @@ class LogsView {
         `;
     }
 
+    /**
+     * Render an LLM usage detail panel for claude_code.api_response_body logs.
+     * Shows cache-tier breakdown, server tool usage, stop reason, service tier, estimated cost.
+     */
+    renderLlmUsage(llm) {
+        if (!llm) return '';
+        const u = llm.usage ?? {};
+        const fmt = n => n == null ? '—' : Number(n).toLocaleString();
+        const rows = [];
+        if (llm.model) rows.push(['Model', this.escapeHtml(llm.model)]);
+        if (llm.stop_reason) rows.push(['Stop reason', this.escapeHtml(llm.stop_reason)]);
+        if (llm.service_tier) rows.push(['Service tier', this.escapeHtml(llm.service_tier)]);
+        rows.push(['Input tokens', fmt(u.input_tokens)]);
+        rows.push(['Output tokens', fmt(u.output_tokens)]);
+        const c5 = u.cache_creation?.ephemeral_5m_input_tokens;
+        const c1 = u.cache_creation?.ephemeral_1h_input_tokens;
+        if (u.cache_creation_input_tokens != null || c5 != null || c1 != null) {
+            const parts = [];
+            if (c5 != null) parts.push(`${fmt(c5)} @ 5m`);
+            if (c1 != null) parts.push(`${fmt(c1)} @ 1h`);
+            const label = parts.length > 0 ? parts.join(', ') : fmt(u.cache_creation_input_tokens);
+            rows.push(['Cache write', label]);
+        }
+        if (u.cache_read_input_tokens != null) rows.push(['Cache read', fmt(u.cache_read_input_tokens)]);
+        if (llm.web_search_requests || llm.web_fetch_requests) {
+            const toolParts = [];
+            if (llm.web_search_requests) toolParts.push(`${llm.web_search_requests} web_search`);
+            if (llm.web_fetch_requests) toolParts.push(`${llm.web_fetch_requests} web_fetch`);
+            rows.push(['Server tools', toolParts.join(', ')]);
+        }
+        const cost = computeCost(llm.model, u);
+        if (cost != null) rows.push(['Cost (est.)', `$${cost.toFixed(4)}`]);
+        return `
+            <div class="log-field llm-usage-panel">
+                <strong>LLM Usage:</strong>
+                <div class="llm-usage-grid">
+                    ${rows.map(([k, v]) => `<div class="llm-usage-row"><span class="llm-usage-key">${k}</span><span class="llm-usage-val">${v}</span></div>`).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Render a turn-summary banner aggregating all logs for the filtered prompt.
+     * Shown above the log list only when filters.prompt_id is set.
+     */
+    renderPromptSummary() {
+        if (!this.filters.prompt_id || this.logs.length === 0) return '';
+        const logs = this.logs;
+        const byBody = new Map();
+        for (const l of logs) byBody.set(l.body, (byBody.get(l.body) || 0) + 1);
+        const timestamps = logs.map(l => l.timestamp).filter(t => t != null);
+        const tMin = Math.min(...timestamps);
+        const tMax = Math.max(...timestamps);
+        const durationMs = (tMax - tMin) / 1_000_000;
+
+        // Aggregate LLM usage across api_response_body logs (usually one per prompt, but support multiple)
+        let aggModel = null, aggStop = null, aggTier = null;
+        const agg = { input: 0, output: 0, c5: 0, c1: 0, cc_other: 0, cread: 0, web_search: 0, web_fetch: 0 };
+        let totalCost = 0, haveCost = false;
+        for (const l of logs) {
+            const llm = extractLlmUsage(l);
+            if (!llm) continue;
+            aggModel = aggModel || llm.model;
+            aggStop = aggStop || llm.stop_reason;
+            aggTier = aggTier || llm.service_tier;
+            const u = llm.usage ?? {};
+            agg.input += u.input_tokens ?? 0;
+            agg.output += u.output_tokens ?? 0;
+            const c5 = u.cache_creation?.ephemeral_5m_input_tokens ?? 0;
+            const c1 = u.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+            agg.c5 += c5; agg.c1 += c1;
+            agg.cc_other += Math.max((u.cache_creation_input_tokens ?? 0) - c5 - c1, 0);
+            agg.cread += u.cache_read_input_tokens ?? 0;
+            agg.web_search += llm.web_search_requests ?? 0;
+            agg.web_fetch += llm.web_fetch_requests ?? 0;
+            const c = computeCost(llm.model, u);
+            if (c != null) { totalCost += c; haveCost = true; }
+        }
+
+        const fmt = n => Number(n).toLocaleString();
+        const row = (k, v) => `<div class="prompt-summary-row"><span class="prompt-summary-key">${k}</span><span class="prompt-summary-val">${v}</span></div>`;
+        const bodyBreakdown = Array.from(byBody.entries())
+            .sort((a, b) => b[1] - a[1])
+            .map(([b, n]) => `${n}× ${this.escapeHtml(b)}`)
+            .join(' · ');
+
+        return `
+            <div class="prompt-summary">
+                <div class="prompt-summary-header">
+                    <strong>Prompt turn:</strong> <code>${this.escapeHtml(this.filters.prompt_id)}</code>
+                    <button class="btn btn-secondary btn-sm" onclick="window.app.views.logs.clearPromptFilter();">× Clear</button>
+                </div>
+                <div class="prompt-summary-grid">
+                    ${aggModel ? row('Model', this.escapeHtml(aggModel)) : ''}
+                    ${aggStop ? row('Stop', this.escapeHtml(aggStop)) : ''}
+                    ${aggTier ? row('Tier', this.escapeHtml(aggTier)) : ''}
+                    ${row('Logs', `${logs.length} (${this.escapeHtml(bodyBreakdown)})`)}
+                    ${row('Duration', `${durationMs.toFixed(0)} ms`)}
+                    ${aggModel ? row('Input', fmt(agg.input)) : ''}
+                    ${aggModel ? row('Output', fmt(agg.output)) : ''}
+                    ${aggModel && (agg.c5 || agg.c1 || agg.cc_other) ? row('Cache write', `${fmt(agg.c5)} @ 5m · ${fmt(agg.c1)} @ 1h${agg.cc_other ? ' · ' + fmt(agg.cc_other) + ' other' : ''}`) : ''}
+                    ${aggModel && agg.cread ? row('Cache read', fmt(agg.cread)) : ''}
+                    ${(agg.web_search || agg.web_fetch) ? row('Server tools', `${agg.web_search} web_search · ${agg.web_fetch} web_fetch`) : ''}
+                    ${haveCost ? row('Cost (est.)', `$${totalCost.toFixed(4)}`) : ''}
+                </div>
+            </div>
+        `;
+    }
+
+    clearPromptFilter() {
+        this.filters.prompt_id = null;
+        this.currentPage = 0;
+        this.loadLogs();
+    }
+
     renderAttributeMap(attributes) {
-        const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version', 'session.id']);
+        const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version', 'session.id', 'prompt.id']);
         const entries = Object.entries(attributes).filter(([k]) => !SKIP_ATTRS.has(k));
         if (entries.length === 0) {
             return '';
@@ -690,6 +857,7 @@ class LogsView {
             endTime: null,
             trace_id: null,
             session_id: null,
+            prompt_id: null,
         };
         this.attrFilters = [];
         this._renderAttrChips();

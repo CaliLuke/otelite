@@ -1151,6 +1151,79 @@ body {
     text-decoration: underline;
 }
 
+/* LLM usage panel inside a log detail */
+.llm-usage-panel {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-secondary);
+    border-left: 3px solid var(--accent-color);
+    border-radius: 3px;
+}
+.llm-usage-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.25rem 1rem;
+    margin-top: 0.35rem;
+}
+.llm-usage-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    border-bottom: 1px dotted var(--border-color);
+    padding: 0.15rem 0;
+}
+.llm-usage-key {
+    color: var(--text-secondary);
+    margin-right: 0.5rem;
+}
+.llm-usage-val {
+    font-family: 'Courier New', monospace;
+    color: var(--text-primary);
+}
+
+/* Prompt turn summary banner */
+.prompt-summary {
+    background: var(--bg-secondary);
+    border: 1px solid var(--accent-color);
+    border-radius: 4px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.75rem;
+}
+.prompt-summary-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.95rem;
+}
+.prompt-summary-header code {
+    color: var(--accent-color);
+    font-size: 0.85em;
+}
+.prompt-summary-header button {
+    margin-left: auto;
+}
+.prompt-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.25rem 1rem;
+}
+.prompt-summary-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    padding: 0.2rem 0;
+    border-bottom: 1px dotted var(--border-color);
+}
+.prompt-summary-key {
+    color: var(--text-secondary);
+    margin-right: 0.5rem;
+}
+.prompt-summary-val {
+    font-family: 'Courier New', monospace;
+    color: var(--text-primary);
+}
+
 .json-key {
     color: var(--accent-color);
 }
