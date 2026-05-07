@@ -17,6 +17,7 @@ class UsageView {
         this.trStart = null;
         this.trEnd = null;
         this.trWindowHours = null;
+        this.activeTopNTab = 'cost';
     }
 
     async render() {
@@ -627,38 +628,47 @@ class UsageView {
             cache:     p => this.api.getTopSpans({...p, sort_by: 'cache_efficiency'}),
         };
 
-        document.querySelectorAll('.top-n-tab').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                const tabId = btn.dataset.tab;
-                document.querySelectorAll('.top-n-tab').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                document.querySelectorAll('.top-n-panel').forEach(p => p.hidden = true);
-                const panel = document.getElementById(`top-n-panel-${tabId}`);
-                if (!panel) return;
-                panel.hidden = false;
+        const activateTab = async (tabId) => {
+            document.querySelectorAll('.top-n-tab').forEach(b => b.classList.remove('active'));
+            const btn = document.querySelector(`.top-n-tab[data-tab="${tabId}"]`);
+            if (btn) btn.classList.add('active');
+            document.querySelectorAll('.top-n-panel').forEach(p => p.hidden = true);
+            const panel = document.getElementById(`top-n-panel-${tabId}`);
+            if (!panel) return;
+            panel.hidden = false;
 
-                // Only load if the placeholder is still showing
-                const placeholder = panel.querySelector('.top-n-loading');
-                if (!placeholder || !tabDefs[tabId]) return;
-                placeholder.textContent = 'Loading…';
+            const placeholder = panel.querySelector('.top-n-loading');
+            if (!placeholder || !tabDefs[tabId]) return;
+            placeholder.textContent = 'Loading…';
 
-                try {
-                    const data = await tabDefs[tabId]({ ...params, limit: 20 });
-                    let html;
-                    if (tabId === 'sessions') {
-                        html = this._renderGroupTable(data || [], 'session_id', 'Session ID');
-                    } else if (tabId === 'convs') {
-                        html = this._renderGroupTable(data || [], 'conversation_id', 'Conversation ID');
-                    } else {
-                        const extraCol = {slow: 'duration', truncated: 'finish_reason', verbose: 'ratio', cache: 'cache_rate'}[tabId] || 'cost';
-                        html = this._renderSpanTable(data || [], { extraCol, emptyMsg: 'No matching spans in this window.' });
-                    }
-                    panel.innerHTML = html;
-                } catch (e) {
-                    panel.innerHTML = `<div class="empty-state-hint">Failed to load: ${this._esc(e.message)}</div>`;
+            try {
+                const data = await tabDefs[tabId]({ ...params, limit: 20 });
+                let html;
+                if (tabId === 'sessions') {
+                    html = this._renderGroupTable(data || [], 'session_id', 'Session ID');
+                } else if (tabId === 'convs') {
+                    html = this._renderGroupTable(data || [], 'conversation_id', 'Conversation ID');
+                } else {
+                    const extraCol = {slow: 'duration', truncated: 'finish_reason', verbose: 'ratio', cache: 'cache_rate'}[tabId] || 'cost';
+                    html = this._renderSpanTable(data || [], { extraCol, emptyMsg: 'No matching spans in this window.' });
                 }
+                panel.innerHTML = html;
+            } catch (e) {
+                panel.innerHTML = `<div class="empty-state-hint">Failed to load: ${this._esc(e.message)}</div>`;
+            }
+        };
+
+        document.querySelectorAll('.top-n-tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.activeTopNTab = btn.dataset.tab;
+                activateTab(btn.dataset.tab);
             });
         });
+
+        // Restore the previously active tab (survives 30s auto-refresh)
+        if (this.activeTopNTab && this.activeTopNTab !== 'cost') {
+            activateTab(this.activeTopNTab);
+        }
     }
 
     _renderSpanTable(spans, { extraCol, emptyMsg }) {
@@ -784,25 +794,44 @@ class UsageView {
 
     _buildFinishReasons(reasons) {
         if (!reasons.length) {
-            return `<h3>Finish reasons</h3><div class="empty-state-hint">No finish-reason data in this window.</div>`;
+            return `<h3>Stop reasons</h3><div class="empty-state-hint">No finish-reason data in this window.</div>`;
         }
         const total = reasons.reduce((acc, r) => acc + (r.count || 0), 0);
         const sorted = [...reasons].sort((a, b) => (b.count || 0) - (a.count || 0));
+
+        const LABELS = {
+            end_turn:   'end_turn — completed normally',
+            max_tokens: 'max_tokens — truncated (hit token limit)',
+            length:     'length — truncated (hit token limit)',
+            stop_sequence: 'stop_sequence — stopped by stop token',
+            tool_use:   'tool_use — paused for tool call',
+        };
+
+        const truncatedCount = reasons
+            .filter(r => ['max_tokens','length'].includes(String(r.reason).toLowerCase()))
+            .reduce((acc, r) => acc + (r.count || 0), 0);
+        const truncatedPct = total > 0 ? (truncatedCount / total * 100) : 0;
+        const truncatedBanner = truncatedCount > 0
+            ? `<div class="finish-reason-warning-banner">⚠ ${Number(truncatedCount).toLocaleString()} truncated responses (${truncatedPct.toFixed(1)}%) — context window hit limit</div>`
+            : '';
+
         const rows = sorted.map(r => {
             const count = r.count || 0;
             const pct = total > 0 ? (count / total) * 100 : 0;
             const reason = String(r.reason || 'unknown');
-            const warning = reason.toLowerCase() === 'max_tokens';
+            const warning = ['max_tokens','length'].includes(reason.toLowerCase());
+            const label = LABELS[reason.toLowerCase()] || reason;
             return `
                 <div class="finish-reason-row">
-                    <div class="finish-reason-name">${this._esc(reason)}</div>
+                    <div class="finish-reason-name${warning ? ' warning-text' : ''}">${this._esc(label)}</div>
                     <div class="finish-reason-bar"><div class="finish-reason-fill ${warning ? 'warning' : ''}" style="width:${pct.toFixed(2)}%"></div></div>
                     <div class="finish-reason-count">${Number(count).toLocaleString()} (${pct.toFixed(1)}%)</div>
                 </div>`;
         }).join('');
 
         return `
-            <h3>Finish reasons</h3>
+            <h3>Stop reasons</h3>
+            ${truncatedBanner}
             <div class="finish-reasons-list">${rows}</div>`;
     }
 

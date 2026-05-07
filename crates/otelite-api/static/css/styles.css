@@ -2380,11 +2380,21 @@ body {
     font-size: 0.85rem;
     padding: 0.2rem 0;
 }
-.finish-reason-name { width: 140px; font-family: 'Courier New', monospace; }
+.finish-reason-name { width: 280px; font-family: 'Courier New', monospace; font-size: 0.8rem; }
+.finish-reason-name.warning-text { color: #ef4444; font-weight: 600; }
 .finish-reason-bar { flex: 1; height: 12px; background: var(--border-color); border-radius: 2px; overflow: hidden; }
 .finish-reason-fill { height: 100%; background: var(--accent-color); }
 .finish-reason-fill.warning { background: #ef4444; }
-.finish-reason-count { width: 80px; text-align: right; color: var(--text-secondary); }
+.finish-reason-count { width: 120px; text-align: right; color: var(--text-secondary); }
+.finish-reason-warning-banner {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.4);
+    border-radius: 4px;
+    color: #ef4444;
+    padding: 0.4rem 0.75rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.85rem;
+}
 
 .latency-table td, .tool-usage-table td {
     font-variant-numeric: tabular-nums;
