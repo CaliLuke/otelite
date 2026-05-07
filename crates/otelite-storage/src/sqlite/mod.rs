@@ -311,6 +311,59 @@ impl StorageBackend for SqliteBackend {
         reader::query_finish_reasons(conn, start_time, end_time).map_err(StorageError::from)
     }
 
+    async fn query_latency_stats(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::LatencyStats>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_latency_stats(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
+    async fn query_error_rate(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::ErrorRateByModel>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_error_rate(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
+    async fn query_tool_usage(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<otelite_core::api::ToolUsage>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_tool_usage(conn, start_time, end_time, limit).map_err(StorageError::from)
+    }
+
+    async fn query_retry_stats(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<otelite_core::api::RetryStats> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_retry_stats(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
     async fn close(&mut self) -> Result<()> {
         if let Some(handle) = self.purge_handle.lock().unwrap().take() {
             handle.abort();

@@ -180,6 +180,11 @@ class ApiClient {
         return this.get('/genai/finish_reasons', params);
     }
 
+    async getLatencyStats(params = {}) { return this.get('/genai/latency_stats', params); }
+    async getErrorRate(params = {}) { return this.get('/genai/error_rate', params); }
+    async getToolUsage(params = {}) { return this.get('/genai/tool_usage', params); }
+    async getRetryStats(params = {}) { return this.get('/genai/retry_stats', params); }
+
     /**
      * Check health status
      */

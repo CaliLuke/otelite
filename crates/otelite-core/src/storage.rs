@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::api::{
-    CostSeriesPoint, FinishReasonCount, ModelUsage, SystemUsage, TokenUsageSummary, TopSpan,
+    CostSeriesPoint, ErrorRateByModel, FinishReasonCount, LatencyStats, ModelUsage, RetryStats,
+    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
 };
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
@@ -196,4 +197,33 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<Vec<FinishReasonCount>>;
+
+    /// Latency (and optional TTFT) percentile statistics per model for LLM spans.
+    async fn query_latency_stats(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<LatencyStats>>;
+
+    /// Error rate by model across LLM spans.
+    async fn query_error_rate(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<ErrorRateByModel>>;
+
+    /// Aggregated tool-execution usage counts and durations.
+    async fn query_tool_usage(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ToolUsage>>;
+
+    /// Retry statistics across LLM spans.
+    async fn query_retry_stats(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<RetryStats>;
 }

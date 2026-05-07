@@ -2344,6 +2344,12 @@ body {
 .finish-reason-fill { height: 100%; background: var(--accent-color); }
 .finish-reason-fill.warning { background: #ef4444; }
 .finish-reason-count { width: 80px; text-align: right; color: var(--text-secondary); }
+
+.latency-table td, .tool-usage-table td {
+    font-variant-numeric: tabular-nums;
+}
+.error-rate-list .finish-reason-name { width: 200px; }
+.tool-usage-warn { color: var(--warning-color, #f59e0b); }
 .chat-bubble-role {
     text-transform: uppercase;
     font-weight: 600;

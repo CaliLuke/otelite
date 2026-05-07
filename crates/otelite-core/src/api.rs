@@ -533,3 +533,56 @@ pub struct FinishReasonCount {
     pub reason: String,
     pub count: usize,
 }
+
+/// Latency / TTFT percentile statistics for LLM spans, grouped by model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LatencyStats {
+    pub model: Option<String>,
+    pub count: usize,
+    pub avg_ms: f64,
+    pub p50_ms: i64,
+    pub p95_ms: i64,
+    pub p99_ms: i64,
+    /// TTFT is reported only when any span in the group carried a ttft attribute.
+    pub ttft_count: usize,
+    pub ttft_p50_ms: Option<i64>,
+    pub ttft_p95_ms: Option<i64>,
+    pub ttft_p99_ms: Option<i64>,
+}
+
+/// Error-rate summary for LLM spans grouped by model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ErrorRateByModel {
+    pub model: Option<String>,
+    pub total: usize,
+    pub errors: usize,
+    /// Fraction in the range 0.0..1.0.
+    pub error_rate: f64,
+}
+
+/// Aggregated per-tool usage for tool-execution spans.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ToolUsage {
+    pub tool_name: String,
+    pub count: usize,
+    pub success_count: usize,
+    pub error_count: usize,
+    pub avg_duration_ms: f64,
+    pub total_duration_ms: i64,
+}
+
+/// Retry statistics across LLM spans.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RetryStats {
+    pub total_llm_calls: usize,
+    /// Calls with attempt > 1 (Claude Code) or comparable retry markers.
+    pub retried_calls: usize,
+    /// Sum of (attempt - 1) across all calls — total extra attempts.
+    pub extra_attempts: usize,
+    /// Fraction in the range 0.0..1.0.
+    pub retry_rate: f64,
+}

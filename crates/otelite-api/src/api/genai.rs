@@ -7,7 +7,8 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    CostSeriesPoint, ErrorResponse, FinishReasonCount, TokenUsageResponse, TopSpan,
+    CostSeriesPoint, ErrorRateByModel, ErrorResponse, FinishReasonCount, LatencyStats, RetryStats,
+    TokenUsageResponse, ToolUsage, TopSpan,
 };
 use serde::{Deserialize, Serialize};
 
@@ -204,4 +205,172 @@ pub async fn get_finish_reasons(
         })?;
 
     Ok(Json(rows))
+}
+
+/// Query parameters for latency endpoint
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct LatencyQuery {
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+}
+
+/// Get latency / TTFT percentile statistics per model for LLM spans.
+#[utoipa::path(
+    get,
+    path = "/api/genai/latency",
+    params(LatencyQuery),
+    responses(
+        (status = 200, description = "Latency statistics per model", body = Vec<LatencyStats>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_latency_stats(
+    State(state): State<AppState>,
+    Query(query): Query<LatencyQuery>,
+) -> Result<Json<Vec<LatencyStats>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_latency_stats(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query latency stats: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    Ok(Json(rows))
+}
+
+/// Query parameters for error-rate endpoint
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct ErrorRateQuery {
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+}
+
+/// Get error rate per model across LLM spans.
+#[utoipa::path(
+    get,
+    path = "/api/genai/error_rate",
+    params(ErrorRateQuery),
+    responses(
+        (status = 200, description = "Error rate per model", body = Vec<ErrorRateByModel>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_error_rate(
+    State(state): State<AppState>,
+    Query(query): Query<ErrorRateQuery>,
+) -> Result<Json<Vec<ErrorRateByModel>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_error_rate(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query error rate: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    Ok(Json(rows))
+}
+
+/// Query parameters for tool-usage endpoint
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct ToolUsageQuery {
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+    /// Maximum number of tools to return (default 20, capped at 100)
+    pub limit: Option<usize>,
+}
+
+/// Get aggregated per-tool usage for tool-execution spans.
+#[utoipa::path(
+    get,
+    path = "/api/genai/tool_usage",
+    params(ToolUsageQuery),
+    responses(
+        (status = 200, description = "Tool usage aggregates", body = Vec<ToolUsage>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_tool_usage(
+    State(state): State<AppState>,
+    Query(query): Query<ToolUsageQuery>,
+) -> Result<Json<Vec<ToolUsage>>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+
+    let rows = state
+        .storage
+        .query_tool_usage(query.start_time, query.end_time, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query tool usage: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    Ok(Json(rows))
+}
+
+/// Query parameters for retry-stats endpoint
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct RetryStatsQuery {
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+}
+
+/// Get retry statistics across LLM spans.
+#[utoipa::path(
+    get,
+    path = "/api/genai/retry_stats",
+    params(RetryStatsQuery),
+    responses(
+        (status = 200, description = "Retry statistics", body = RetryStats),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_retry_stats(
+    State(state): State<AppState>,
+    Query(query): Query<RetryStatsQuery>,
+) -> Result<Json<RetryStats>, (StatusCode, Json<ErrorResponse>)> {
+    let stats = state
+        .storage
+        .query_retry_stats(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query retry stats: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    Ok(Json(stats))
 }

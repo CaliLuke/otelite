@@ -197,19 +197,23 @@ class UsageView {
                 params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
             }
             const bucket = this._chooseBucket();
-            const [summary, costSeries, topSpans, finishReasons] = await Promise.all([
+            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats] = await Promise.all([
                 this.api.getTokenUsage(params),
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
                 this.api.getFinishReasons(params),
+                this.api.getLatencyStats(params),
+                this.api.getErrorRate(params),
+                this.api.getToolUsage(params),
+                this.api.getRetryStats(params),
             ]);
-            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket);
+            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats);
         } catch (err) {
             dataContainer.innerHTML = `<div class="empty-state"><p>Failed to load usage data</p><p class="empty-state-hint">${err.message}</p></div>`;
         }
     }
 
-    _buildHtml(data, costSeries, topSpans, finishReasons, bucket) {
+    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats) {
         const { summary, by_model, by_system } = data;
 
         if (summary.total_requests === 0) {
@@ -264,11 +268,15 @@ class UsageView {
                     <div class="gauge-bar"><div class="gauge-fill ${truncPct > 0 ? 'gauge-fill-warning' : ''}" style="width:${truncPct.toFixed(2)}%"></div></div>
                     <div class="gauge-hint">${fmt(truncCount)} / ${fmt(totalCount)} responses hit max_tokens</div>
                 </div>
+                ${this._buildRetryGauge(retryStats)}
             </div>`;
 
         const costChart = this._buildCostChart(costSeries || [], bucket);
         const topSpansSection = this._buildTopSpans(topSpans || []);
         const finishReasonsSection = this._buildFinishReasons(reasons);
+        const latencySection = this._buildLatencyTable(latencyStats || []);
+        const errorRateSection = this._buildErrorRate(errorRate || []);
+        const toolUsageSection = this._buildToolUsage(toolUsage || []);
 
         const modelRows = by_model.map(m => `
             <tr>
@@ -304,7 +312,108 @@ class UsageView {
                 <tbody>${systemRows}</tbody>
             </table>`;
 
-        return summaryCards + costChart + topSpansSection + finishReasonsSection + modelTable + systemTable;
+        return summaryCards + costChart + topSpansSection + finishReasonsSection
+            + latencySection + errorRateSection + toolUsageSection
+            + modelTable + systemTable;
+    }
+
+    _formatDuration(ms) {
+        if (ms == null) return '—';
+        return ms < 10000 ? `${Number(ms).toLocaleString()} ms` : `${(ms / 1000).toFixed(1)} s`;
+    }
+
+    _buildRetryGauge(retryStats) {
+        if (!retryStats || !retryStats.total_llm_calls) return '';
+        const rate = retryStats.retry_rate || 0;
+        const pct = rate * 100;
+        const fmt = n => Number(n).toLocaleString();
+        return `
+                <div class="usage-gauge-card">
+                    <div class="usage-card-label">Retry rate</div>
+                    <div class="usage-card-value">${pct.toFixed(1)}%</div>
+                    <div class="gauge-bar"><div class="gauge-fill ${pct > 0 ? 'gauge-fill-warning' : ''}" style="width:${pct.toFixed(2)}%"></div></div>
+                    <div class="gauge-hint">${fmt(retryStats.retried_calls || 0)} of ${fmt(retryStats.total_llm_calls)} calls retried (${fmt(retryStats.extra_attempts || 0)} extra attempts)</div>
+                </div>`;
+    }
+
+    _buildLatencyTable(latencyStats) {
+        if (!latencyStats.length) {
+            return `<h3>Latency by model</h3><div class="empty-state-hint">No latency data in this window.</div>`;
+        }
+        const fmt = n => Number(n).toLocaleString();
+        const rows = latencyStats.map(s => {
+            const ttftP50 = s.ttft_count > 0 ? this._formatDuration(s.ttft_p50_ms) : '—';
+            const ttftP95 = s.ttft_count > 0 ? this._formatDuration(s.ttft_p95_ms) : '—';
+            return `
+                <tr>
+                    <td>${this._esc(s.model || '—')}</td>
+                    <td>${fmt(s.count || 0)}</td>
+                    <td>${this._esc(this._formatDuration(s.avg_ms))}</td>
+                    <td>${this._esc(this._formatDuration(s.p50_ms))}</td>
+                    <td>${this._esc(this._formatDuration(s.p95_ms))}</td>
+                    <td>${this._esc(this._formatDuration(s.p99_ms))}</td>
+                    <td>${this._esc(ttftP50)}</td>
+                    <td>${this._esc(ttftP95)}</td>
+                </tr>`;
+        }).join('');
+        return `
+            <h3>Latency by model</h3>
+            <table class="data-table latency-table">
+                <thead><tr>
+                    <th>Model</th><th>Calls</th><th>Avg</th><th>P50</th><th>P95</th><th>P99</th><th>TTFT P50</th><th>TTFT P95</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+    }
+
+    _buildErrorRate(errorRate) {
+        if (!errorRate.length || errorRate.every(r => (r.errors || 0) === 0)) {
+            return '';
+        }
+        const sorted = [...errorRate].sort((a, b) => (b.error_rate || 0) - (a.error_rate || 0));
+        const rows = sorted.map(r => {
+            const rate = r.error_rate || 0;
+            const pct = rate * 100;
+            const warning = rate > 0.1;
+            return `
+                <div class="finish-reason-row">
+                    <div class="finish-reason-name">${this._esc(r.model || '—')}</div>
+                    <div class="finish-reason-bar"><div class="finish-reason-fill ${warning ? 'warning' : ''}" style="width:${pct.toFixed(2)}%"></div></div>
+                    <div class="finish-reason-count">${r.errors || 0}/${r.total || 0} (${pct.toFixed(1)}%)</div>
+                </div>`;
+        }).join('');
+        return `
+            <h3>Error rate by model</h3>
+            <div class="finish-reasons-list error-rate-list">${rows}</div>`;
+    }
+
+    _buildToolUsage(toolUsage) {
+        if (!toolUsage.length) {
+            return `<h3>Tool usage</h3><div class="empty-state-hint">No tool-use spans in this window.</div>`;
+        }
+        const fmt = n => Number(n).toLocaleString();
+        const rows = toolUsage.map(t => {
+            const count = t.count || 0;
+            const succ = t.success_count || 0;
+            const rate = count > 0 ? (succ / count) * 100 : 0;
+            const warn = rate < 90;
+            return `
+                <tr class="${warn ? 'tool-usage-warn' : ''}">
+                    <td>${this._esc(t.tool_name || '—')}</td>
+                    <td>${fmt(count)}</td>
+                    <td>${rate.toFixed(1)}%</td>
+                    <td>${fmt(t.error_count || 0)}</td>
+                    <td>${this._esc(this._formatDuration(t.avg_duration_ms))}</td>
+                </tr>`;
+        }).join('');
+        return `
+            <h3>Tool usage</h3>
+            <table class="data-table tool-usage-table">
+                <thead><tr>
+                    <th>Tool</th><th>Calls</th><th>Success rate</th><th>Errors</th><th>Avg duration</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
     }
 
     _buildCostChart(costSeries, bucketSecs) {

@@ -990,6 +990,348 @@ pub fn query_finish_reasons(
     Ok(rows)
 }
 
+/// Latency / TTFT percentile statistics per model for LLM spans.
+///
+/// SQLite has no native percentile, so we fetch raw durations per model into memory
+/// and compute percentiles in Rust after sorting.
+pub fn query_latency_stats(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::LatencyStats>> {
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            {model} AS model,
+            (end_time - start_time) / 1000000 AS duration_ms,
+            COALESCE(
+                CAST(json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"llm.time_to_first_token\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"ttft_ms\"') AS INTEGER)
+            ) AS ttft_ms
+        FROM spans
+        {where_clause}",
+        model = exprs.model,
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare latency_stats query: {}", e))
+    })?;
+
+    struct Row {
+        model: Option<String>,
+        duration_ms: i64,
+        ttft_ms: Option<i64>,
+    }
+
+    let rows: Vec<Row> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(Row {
+                model: row.get::<_, Option<String>>(0)?,
+                duration_ms: row.get::<_, i64>(1)?,
+                ttft_ms: row.get::<_, Option<i64>>(2)?,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute latency_stats query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse latency_stats results: {}", e))
+        })?;
+
+    let mut groups: std::collections::BTreeMap<Option<String>, (Vec<i64>, Vec<i64>)> =
+        std::collections::BTreeMap::new();
+    for r in rows {
+        let entry = groups.entry(r.model).or_default();
+        entry.0.push(r.duration_ms);
+        if let Some(t) = r.ttft_ms {
+            entry.1.push(t);
+        }
+    }
+
+    let mut out = Vec::with_capacity(groups.len());
+    for (model, (mut durations, mut ttfts)) in groups {
+        durations.sort_unstable();
+        ttfts.sort_unstable();
+
+        let count = durations.len();
+        let avg_ms = if count == 0 {
+            0.0
+        } else {
+            durations.iter().sum::<i64>() as f64 / count as f64
+        };
+
+        let ttft_count = ttfts.len();
+        let (ttft_p50, ttft_p95, ttft_p99) = if ttft_count == 0 {
+            (None, None, None)
+        } else {
+            (
+                Some(percentile(&ttfts, 0.50)),
+                Some(percentile(&ttfts, 0.95)),
+                Some(percentile(&ttfts, 0.99)),
+            )
+        };
+
+        out.push(otelite_core::api::LatencyStats {
+            model,
+            count,
+            avg_ms,
+            p50_ms: percentile(&durations, 0.50),
+            p95_ms: percentile(&durations, 0.95),
+            p99_ms: percentile(&durations, 0.99),
+            ttft_count,
+            ttft_p50_ms: ttft_p50,
+            ttft_p95_ms: ttft_p95,
+            ttft_p99_ms: ttft_p99,
+        });
+    }
+
+    out.sort_by_key(|r| std::cmp::Reverse(r.count));
+    Ok(out)
+}
+
+fn percentile(sorted: &[i64], p: f64) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+/// Error rate per model across LLM spans.
+///
+/// The spans table stores status as `status_code INTEGER` (0 = Unset, 1 = Ok, 2 = Error);
+/// any row with status_code = 2 counts as an error.
+pub fn query_error_rate(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::ErrorRateByModel>> {
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            {model} AS model,
+            SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
+            COUNT(*) AS total
+        FROM spans
+        {where_clause}
+        GROUP BY model
+        HAVING model IS NOT NULL
+        ORDER BY errors DESC, total DESC",
+        model = exprs.model,
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare error_rate query: {}", e))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let model: Option<String> = row.get(0)?;
+            let errors: i64 = row.get(1)?;
+            let total: i64 = row.get(2)?;
+            let error_rate = if total > 0 {
+                errors as f64 / total as f64
+            } else {
+                0.0
+            };
+            Ok(otelite_core::api::ErrorRateByModel {
+                model,
+                total: total as usize,
+                errors: errors as usize,
+                error_rate,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute error_rate query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse error_rate results: {}", e))
+        })?;
+
+    Ok(rows)
+}
+
+/// Aggregated per-tool usage from tool-execution spans.
+pub fn query_tool_usage(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: usize,
+) -> Result<Vec<otelite_core::api::ToolUsage>> {
+    let mut where_clause = String::from("WHERE 1=1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            COALESCE(
+                json_extract(attributes, '$.\"gen_ai.tool.name\"'),
+                json_extract(attributes, '$.\"tool.name\"'),
+                json_extract(attributes, '$.\"tool_name\"'),
+                CASE WHEN name LIKE 'claude_code.tool%' AND name != 'claude_code.tool' THEN name ELSE NULL END
+            ) AS tool_name,
+            COUNT(*) AS cnt,
+            SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
+            SUM(CASE WHEN status_code = 1 OR status_code = 0 THEN 1 ELSE 0 END) AS ok_cnt,
+            COALESCE(SUM(end_time - start_time), 0) AS total_duration_ns
+        FROM spans
+        {where_clause}
+        GROUP BY tool_name
+        HAVING tool_name IS NOT NULL
+        ORDER BY cnt DESC
+        LIMIT ?"
+    );
+
+    params.push(Box::new(limit as i64));
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare tool_usage query: {}", e))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let tool_name: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            let errors: i64 = row.get(2)?;
+            let ok_cnt: i64 = row.get(3)?;
+            let total_ns: i64 = row.get(4)?;
+            let total_ms = total_ns / 1_000_000;
+            let avg_ms = if count > 0 {
+                (total_ns as f64 / count as f64) / 1_000_000.0
+            } else {
+                0.0
+            };
+            Ok(otelite_core::api::ToolUsage {
+                tool_name,
+                count: count as usize,
+                success_count: ok_cnt as usize,
+                error_count: errors as usize,
+                avg_duration_ms: avg_ms,
+                total_duration_ms: total_ms,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute tool_usage query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse tool_usage results: {}", e))
+        })?;
+
+    Ok(rows)
+}
+
+/// Retry statistics across LLM spans.
+pub fn query_retry_stats(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<otelite_core::api::RetryStats> {
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            COALESCE(
+                CAST(json_extract(attributes, '$.\"attempt\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"retry_count\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"gen_ai.request.attempt\"') AS INTEGER),
+                1
+            ) AS attempt
+        FROM spans
+        {where_clause}"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare retry_stats query: {}", e))
+    })?;
+
+    let attempts: Vec<i64> = stmt
+        .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute retry_stats query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse retry_stats results: {}", e))
+        })?;
+
+    let total_llm_calls = attempts.len();
+    let mut retried_calls = 0usize;
+    let mut extra_attempts = 0i64;
+    for a in &attempts {
+        let attempt = (*a).max(1);
+        if attempt > 1 {
+            retried_calls += 1;
+            extra_attempts += attempt - 1;
+        }
+    }
+    let retry_rate = if total_llm_calls > 0 {
+        retried_calls as f64 / total_llm_calls as f64
+    } else {
+        0.0
+    };
+
+    Ok(otelite_core::api::RetryStats {
+        total_llm_calls,
+        retried_calls,
+        extra_attempts: extra_attempts as usize,
+        retry_rate,
+    })
+}
+
 /// Return up to 50 distinct resource attribute keys for the given signal table.
 /// `signal` must be one of "logs", "spans", or "metrics".
 pub fn distinct_resource_keys(conn: &Connection, signal: &str) -> Result<Vec<String>> {
