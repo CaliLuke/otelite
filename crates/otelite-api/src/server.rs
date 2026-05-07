@@ -42,6 +42,7 @@ use utoipa::OpenApi;
         crate::api::genai::get_error_rate,
         crate::api::genai::get_tool_usage,
         crate::api::genai::get_retry_stats,
+        crate::api::genai::get_retrieval_stats,
     ),
     components(
         schemas(
@@ -67,6 +68,8 @@ use utoipa::OpenApi;
             otelite_core::api::ErrorRateByModel,
             otelite_core::api::ToolUsage,
             otelite_core::api::RetryStats,
+            otelite_core::api::RetrievalStats,
+            otelite_core::api::TopRetrievalQuery,
             crate::api::health::HealthResponse,
             crate::api::stats::StatsResponse,
             crate::api::admin::PurgeAllResponse,
@@ -81,6 +84,7 @@ use utoipa::OpenApi;
             crate::api::genai::ErrorRateQuery,
             crate::api::genai::ToolUsageQuery,
             crate::api::genai::RetryStatsQuery,
+            crate::api::genai::RetrievalStatsQuery,
         )
     ),
     tags(
@@ -205,10 +209,11 @@ impl DashboardServer {
             .route("/api/genai/cost_series", get(crate::api::genai::get_cost_series))
             .route("/api/genai/top_spans", get(crate::api::genai::get_top_spans))
             .route("/api/genai/finish_reasons", get(crate::api::genai::get_finish_reasons))
-            .route("/api/genai/latency", get(crate::api::genai::get_latency_stats))
+            .route("/api/genai/latency_stats", get(crate::api::genai::get_latency_stats))
             .route("/api/genai/error_rate", get(crate::api::genai::get_error_rate))
             .route("/api/genai/tool_usage", get(crate::api::genai::get_tool_usage))
             .route("/api/genai/retry_stats", get(crate::api::genai::get_retry_stats))
+            .route("/api/genai/retrieval_stats", get(crate::api::genai::get_retrieval_stats))
             // OpenAPI spec endpoint
             .route("/api/openapi.json", get(|| async {
                 axum::Json(ApiDoc::openapi())

@@ -7,8 +7,8 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    CostSeriesPoint, ErrorRateByModel, ErrorResponse, FinishReasonCount, LatencyStats, RetryStats,
-    TokenUsageResponse, ToolUsage, TopSpan,
+    CostSeriesPoint, ErrorRateByModel, ErrorResponse, FinishReasonCount, LatencyStats,
+    RetrievalStats, RetryStats, TokenUsageResponse, ToolUsage, TopSpan,
 };
 use serde::{Deserialize, Serialize};
 
@@ -219,7 +219,7 @@ pub struct LatencyQuery {
 /// Get latency / TTFT percentile statistics per model for LLM spans.
 #[utoipa::path(
     get,
-    path = "/api/genai/latency",
+    path = "/api/genai/latency_stats",
     params(LatencyQuery),
     responses(
         (status = 200, description = "Latency statistics per model", body = Vec<LatencyStats>),
@@ -367,6 +367,56 @@ pub async fn get_retry_stats(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::storage_error(format!(
                     "query retry stats: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    Ok(Json(stats))
+}
+
+/// Query parameters for retrieval-stats endpoint
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct RetrievalStatsQuery {
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+    /// Maximum number of top queries to return (default 5, capped at 20)
+    pub limit: Option<usize>,
+}
+
+/// Get aggregated retrieval / RAG statistics across retriever spans.
+///
+/// Retriever spans are identified by `openinference.span.kind = 'RETRIEVER'` or
+/// the presence of a `retrieval.query` attribute. Returns total counts, average
+/// documents per query, average top-1 document score, and the top-N most-frequent
+/// queries.
+#[utoipa::path(
+    get,
+    path = "/api/genai/retrieval_stats",
+    params(RetrievalStatsQuery),
+    responses(
+        (status = 200, description = "Retrieval statistics", body = RetrievalStats),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_retrieval_stats(
+    State(state): State<AppState>,
+    Query(query): Query<RetrievalStatsQuery>,
+) -> Result<Json<RetrievalStats>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = query.limit.unwrap_or(5).clamp(1, 20);
+
+    let stats = state
+        .storage
+        .query_retrieval_stats(query.start_time, query.end_time, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query retrieval stats: {}",
                     e
                 ))),
             )
