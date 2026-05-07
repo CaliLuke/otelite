@@ -2,6 +2,13 @@
  * Logs View - Display and interact with log records
  */
 
+function formatTs(date) {
+    const p = n => String(n).padStart(2, '0');
+    const ms = String(date.getMilliseconds()).padStart(3, '0');
+    return `${date.getFullYear()}-${p(date.getMonth()+1)}-${p(date.getDate())} ` +
+           `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}.${ms}`;
+}
+
 class LogsView {
     constructor(apiClient) {
         this.apiClient = apiClient;
@@ -380,7 +387,7 @@ class LogsView {
                 ? (Array.isArray(finishReasonsRaw) ? finishReasonsRaw.join(', ') : String(finishReasonsRaw))
                 : (attrs['gen_ai.response.finish_reason'] || '—');
             headerCols = `
-                    <span class="log-timestamp">${timestamp.toISOString()}</span>
+                    <span class="log-timestamp">${formatTs(timestamp)}</span>
                     <span class="log-severity ${severityClass}">${log.severity}</span>
                     <span class="log-col-model" title="${this.escapeHtml(model)}">${this.escapeHtml(String(model))}</span>
                     <span class="log-col-tokens">${this.escapeHtml(inputTokens)}</span>
@@ -389,7 +396,7 @@ class LogsView {
                     <span class="log-body-preview">${bodyPreview}</span>`;
         } else {
             headerCols = `
-                    <span class="log-timestamp">${timestamp.toISOString()}</span>
+                    <span class="log-timestamp">${formatTs(timestamp)}</span>
                     <span class="log-severity ${severityClass}">${log.severity}</span>
                     <span class="log-body-preview">${bodyPreview}</span>
                     ${log.trace_id ? `<span class="log-trace-id" title="Trace ID">${this.escapeHtml(log.trace_id.substring(0, 8))}...</span>` : ''}`;

@@ -2,6 +2,13 @@
  * Traces View - Display and interact with distributed traces
  */
 
+function formatTs(date) {
+    const p = n => String(n).padStart(2, '0');
+    const ms = String(date.getMilliseconds()).padStart(3, '0');
+    return `${date.getFullYear()}-${p(date.getMonth()+1)}-${p(date.getDate())} ` +
+           `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}.${ms}`;
+}
+
 class TracesView {
     constructor(apiClient) {
         this.apiClient = apiClient;
@@ -335,7 +342,7 @@ class TracesView {
         return `
             <div class="trace-entry ${errorClass}" data-trace-id="${trace.trace_id}">
                 <div class="trace-header">
-                    <span class="trace-time">${startTime.toLocaleTimeString()}</span>
+                    <span class="trace-time">${formatTs(startTime)}</span>
                     <span class="trace-name">${this.escapeHtml(trace.root_span_name)}</span>
                     <span class="trace-duration">${duration}ms</span>
                     <span class="trace-spans">${trace.span_count} spans</span>
@@ -398,7 +405,7 @@ class TracesView {
                 </div>
                 <div class="trace-info">
                     <div class="trace-info-item"><strong>Trace ID:</strong> <a class="trace-link" onclick="window.app.navigateToLogs('${this.escapeHtml(trace.trace_id)}');return false;" href="#" title="View logs for this trace"><code>${this.escapeHtml(trace.trace_id)}</code></a></div>
-                    <div class="trace-info-item"><strong>Start:</strong> ${startTime.toISOString()}</div>
+                    <div class="trace-info-item"><strong>Start:</strong> ${formatTs(startTime)}</div>
                     ${trace.service_names.length > 0 ? `<div class="trace-info-item"><strong>Services:</strong> ${this.escapeHtml(trace.service_names.join(', '))}</div>` : ''}
                 </div>
                 <div class="trace-waterfall">
@@ -1109,7 +1116,7 @@ class TracesView {
                 <h5>Info</h5>
                 <div class="span-attrs-grid">
                     <div class="span-attr-row"><span class="span-attr-key">duration</span><span class="span-attr-val">${duration}ms</span></div>
-                    <div class="span-attr-row"><span class="span-attr-key">start</span><span class="span-attr-val">${startTime.toISOString()}</span></div>
+                    <div class="span-attr-row"><span class="span-attr-key">start</span><span class="span-attr-val">${formatTs(startTime)}</span></div>
                     <div class="span-attr-row"><span class="span-attr-key">span_id</span><span class="span-attr-val">${span.span_id}</span></div>
                     <div class="span-attr-row"><span class="span-attr-key">trace_id</span><span class="span-attr-val">${span.trace_id}</span></div>
                     ${parent ? `<div class="span-attr-row"><span class="span-attr-key">parent</span><span class="span-attr-val">${this.escapeHtml(parent.name)}</span></div>` : ''}
