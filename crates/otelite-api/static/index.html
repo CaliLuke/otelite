@@ -182,6 +182,36 @@ with tracer.start_as_current_span("my-operation"):
                         </details>
 
                         <details class="config-example">
+                            <summary><strong>Mellea (IBM generative programs library)</strong></summary>
+                            <pre><code># Install the telemetry extra:
+#   pip install "mellea[telemetry]"
+# Mellea uses the gRPC OTLP exporter → point at otelite's :4317.
+
+export OTEL_SERVICE_NAME=mellea
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+# Tracing — enable application (m.instruct / m.chat / @generative /
+# sampling / requirement validation) and backend (raw LLM calls) scopes.
+export MELLEA_TRACE_APPLICATION=true
+export MELLEA_TRACE_BACKEND=true
+
+# Metrics — mellea.llm.tokens.input / .output counters
+export MELLEA_METRICS_ENABLED=true
+export MELLEA_METRICS_OTLP=true
+
+# Optional: also export logs via OTLP
+export MELLEA_LOGS_OTLP=true
+
+# Optional: console mirror for debugging
+# export MELLEA_TRACE_CONSOLE=true
+
+# Then run your program. Backend spans follow OTel GenAI semconv, so
+# token counts, cost, finish-reasons, and chat bubbles all work on the
+# Usage page and in the trace detail without extra config.</code></pre>
+                            <p class="config-doc-link">Official docs: <a href="https://docs.mellea.ai/evaluation-and-observability/telemetry" target="_blank" rel="noopener">docs.mellea.ai › Evaluation &amp; Observability › Telemetry</a> and <a href="https://docs.mellea.ai/evaluation-and-observability/tracing" target="_blank" rel="noopener">Tracing</a>. Source: <a href="https://github.com/generative-computing/mellea" target="_blank" rel="noopener">generative-computing/mellea</a>.</p>
+                        </details>
+
+                        <details class="config-example">
                             <summary><strong>Python (OpenAI SDK — OpenLLMetry / Traceloop)</strong></summary>
                             <pre><code># pip install opentelemetry-instrumentation-openai
 from opentelemetry.instrumentation.openai import OpenAIInstrumentor
