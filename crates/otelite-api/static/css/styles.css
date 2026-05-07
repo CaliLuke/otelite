@@ -589,6 +589,15 @@ body {
     font-size: 0.85rem;
     color: var(--text-secondary);
     white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.chart-time-range-label {
+    font-family: monospace;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
 }
 
 .metric-chart-area {

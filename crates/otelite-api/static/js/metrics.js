@@ -17,10 +17,11 @@ class MetricsView {
         this.selectedMetric = null;
         this.interval = 60; // 1 minute buckets
         this.autoRefreshInterval = null;
-        this.timeWindowHours = 1;  // how many hours to show
-        this.timeOffsetWindows = 0; // how many windows back in time (0 = now)
+        // Time range state — matches logs/traces/usage pattern.
+        // trStart/trEnd null + trWindowHours null = "All time".
         this.trStart = null;
         this.trEnd = null;
+        this.trWindowHours = 1; // default preset on first load
         this.resourceFilter = '';
     }
 
@@ -39,6 +40,23 @@ class MetricsView {
                 </div>
             </div>
             <div class="filters">
+                <div class="time-range-bar">
+                    <button class="btn-icon" id="tr-prev-metrics" title="Previous window">&#8592;</button>
+                    <input type="text" id="tr-start-metrics" class="filter-input tr-datetime" placeholder="YYYY-MM-DD HH:MM" autocomplete="off">
+                    <span class="tr-sep">–</span>
+                    <input type="text" id="tr-end-metrics" class="filter-input tr-datetime" placeholder="YYYY-MM-DD HH:MM" autocomplete="off">
+                    <button class="btn-icon" id="tr-next-metrics" title="Next window">&#8594;</button>
+                    <button class="btn-icon" id="tr-now-metrics" title="Jump to now">Now</button>
+                    <select id="tr-preset-metrics" class="filter-select tr-preset">
+                        <option value="">All time</option>
+                        <option value="0.25">15 min</option>
+                        <option value="1" selected>1 hr</option>
+                        <option value="6">6 hr</option>
+                        <option value="24">24 hr</option>
+                        <option value="168">7 days</option>
+                        <option value="720">30 days</option>
+                    </select>
+                </div>
                 <datalist id="metrics-resource-keys-list"></datalist>
                 <input type="text" id="metrics-resource-filter" placeholder="Resource filter (e.g., service.name=my-service)" class="filter-input" list="metrics-resource-keys-list">
                 <button id="apply-metrics-resource-filter" class="btn btn-primary">Apply</button>
@@ -145,28 +163,10 @@ class MetricsView {
                             <option value="3600">1 hr</option>
                         </select>
                     </label>
-                    <label>Window:
-                        <select id="window-select" class="filter-select">
-                            <option value="0.25">15 min</option>
-                            <option value="1" selected>1 hr</option>
-                            <option value="6">6 hr</option>
-                            <option value="24">24 hr</option>
-                        </select>
-                    </label>
+                    <span id="chart-time-range" class="chart-time-range-label">—</span>
                 </div>
             </div>
             <div class="metric-chart-area">
-                <div class="chart-time-nav">
-                    <span id="chart-time-range">—</span>
-                    <div class="time-range-bar">
-                        <button class="btn-icon" id="chart-prev" title="Earlier">&#8592;</button>
-                        <input type="datetime-local" id="tr-start-metrics" class="filter-input tr-datetime">
-                        <span class="tr-sep">–</span>
-                        <input type="datetime-local" id="tr-end-metrics" class="filter-input tr-datetime">
-                        <button class="btn-icon" id="chart-next" title="Later">&#8594;</button>
-                        <button class="btn-icon" id="chart-now" title="Jump to now">Now</button>
-                    </div>
-                </div>
                 <canvas id="metrics-chart"></canvas>
             </div>
             <div class="metric-data-table">
@@ -179,74 +179,6 @@ class MetricsView {
             this.interval = parseInt(e.target.value);
             this.loadTimeseries(metricName);
         });
-        document.getElementById('window-select').addEventListener('change', (e) => {
-            this.timeWindowHours = parseFloat(e.target.value);
-            this.timeOffsetWindows = 0;
-            this.trStart = null;
-            this.trEnd = null;
-            this._syncMetricDateInputs();
-            this.refreshCurrentValue(metricName);
-            this.loadTimeseries(metricName);
-        });
-        document.getElementById('tr-start-metrics').addEventListener('change', () => {
-            const startEl = document.getElementById('tr-start-metrics');
-            const endEl = document.getElementById('tr-end-metrics');
-            this.trStart = startEl.value ? new Date(startEl.value) : null;
-            this.trEnd = endEl.value ? new Date(endEl.value) : null;
-            if (this.trStart && this.trEnd) {
-                this.timeWindowHours = (this.trEnd.getTime() - this.trStart.getTime()) / 3600000;
-            }
-            this.timeOffsetWindows = 0;
-            this.refreshCurrentValue(metricName);
-            this.loadTimeseries(metricName);
-        });
-        document.getElementById('tr-end-metrics').addEventListener('change', () => {
-            const startEl = document.getElementById('tr-start-metrics');
-            const endEl = document.getElementById('tr-end-metrics');
-            this.trStart = startEl.value ? new Date(startEl.value) : null;
-            this.trEnd = endEl.value ? new Date(endEl.value) : null;
-            if (this.trStart && this.trEnd) {
-                this.timeWindowHours = (this.trEnd.getTime() - this.trStart.getTime()) / 3600000;
-            }
-            this.timeOffsetWindows = 0;
-            this.refreshCurrentValue(metricName);
-            this.loadTimeseries(metricName);
-        });
-        document.getElementById('chart-prev').addEventListener('click', () => {
-            if (this.trStart) {
-                const shiftMs = this.timeWindowHours * 3600000;
-                this.trStart = new Date(this.trStart.getTime() - shiftMs);
-                this.trEnd = new Date((this.trEnd || new Date()).getTime() - shiftMs);
-                this._syncMetricDateInputs();
-            } else {
-                this.timeOffsetWindows++;
-            }
-            this.loadTimeseries(metricName);
-        });
-        document.getElementById('chart-next').addEventListener('click', () => {
-            if (this.trStart) {
-                const shiftMs = this.timeWindowHours * 3600000;
-                const now = Date.now();
-                let newEnd = (this.trEnd || new Date()).getTime() + shiftMs;
-                if (newEnd > now) newEnd = now;
-                this.trEnd = new Date(newEnd);
-                this.trStart = new Date(newEnd - shiftMs);
-                this._syncMetricDateInputs();
-            } else {
-                if (this.timeOffsetWindows > 0) this.timeOffsetWindows--;
-            }
-            this.loadTimeseries(metricName);
-        });
-        document.getElementById('chart-now').addEventListener('click', () => {
-            if (this.trStart) {
-                this.trEnd = new Date();
-                this.trStart = new Date(this.trEnd.getTime() - this.timeWindowHours * 3600000);
-                this._syncMetricDateInputs();
-            } else {
-                this.timeOffsetWindows = 0;
-            }
-            this.loadTimeseries(metricName);
-        });
 
         this.renderCurrentValue(metricName);
         this.renderDataTable(metricName);
@@ -254,6 +186,7 @@ class MetricsView {
     }
 
     refreshCurrentValue(metricName) {
+        if (!metricName) return;
         const heroEl = document.getElementById('metric-hero-value');
         if (heroEl) heroEl.remove();
         const bucketContainer = document.getElementById('histogram-bucket-container');
@@ -408,6 +341,8 @@ class MetricsView {
         });
     }
 
+    // Returns {start_time, end_time} in nanoseconds. Either side can be null,
+    // which means "All time" — callers should omit that param from the query.
     timeWindow() {
         if (this.trStart) {
             return {
@@ -415,11 +350,14 @@ class MetricsView {
                 end_time: (this.trEnd || new Date()).getTime() * 1_000_000,
             };
         }
-        const windowMs = this.timeWindowHours * 3600 * 1000;
-        const endMs = Date.now() - this.timeOffsetWindows * windowMs;
+        if (this.trWindowHours == null) {
+            return { start_time: null, end_time: null };
+        }
+        const windowMs = this.trWindowHours * 3600 * 1000;
+        const endMs = Date.now();
         const startMs = endMs - windowMs;
         return {
-            start_time: startMs * 1_000_000,   // nanoseconds
+            start_time: startMs * 1_000_000,
             end_time: endMs * 1_000_000,
         };
     }
@@ -486,36 +424,38 @@ class MetricsView {
     async loadTimeseries(metricName) {
         try {
             const { start_time, end_time } = this.timeWindow();
-            const buckets = await this.apiClient.getMetricTimeseries(metricName, {
-                step: this.interval,
-                start_time,
-                end_time,
-            });
+            const params = { step: this.interval };
+            if (start_time != null) params.start_time = start_time;
+            if (end_time != null) params.end_time = end_time;
+            const buckets = await this.apiClient.getMetricTimeseries(metricName, params);
             this._lastBuckets = buckets;
             this.renderChart(metricName, buckets);
             this.attachResizeObserver();
-            // Show the effective window in the date inputs when the user
-            // hasn't pinned an explicit range. Visual only — we don't mutate
-            // trStart/trEnd so the "Window: 1 hr" dropdown stays authoritative.
+
+            // Show the effective window in the top-of-page date inputs when
+            // the user hasn't pinned an explicit range. Visual only — we
+            // don't mutate trStart/trEnd so the preset stays authoritative.
             if (!this.trStart) {
                 const startEl = document.getElementById('tr-start-metrics');
                 const endEl = document.getElementById('tr-end-metrics');
-                if (startEl) startEl.value = this._toDatetimeLocal(new Date(start_time / 1_000_000));
-                if (endEl) endEl.value = this._toDatetimeLocal(new Date(end_time / 1_000_000));
+                if (start_time != null && end_time != null) {
+                    if (startEl) startEl.value = this._toDatetimeLocal(new Date(start_time / 1_000_000));
+                    if (endEl) endEl.value = this._toDatetimeLocal(new Date(end_time / 1_000_000));
+                } else if (buckets.length > 0) {
+                    // "All time" — reflect the observed bucket span.
+                    const first = buckets[0].timestamp;
+                    const last = buckets[buckets.length - 1].timestamp;
+                    if (startEl) startEl.value = this._toDatetimeLocal(new Date(first / 1_000_000));
+                    if (endEl) endEl.value = this._toDatetimeLocal(new Date(last / 1_000_000));
+                }
             }
-            // Update time range label
             const label = document.getElementById('chart-time-range');
             if (label) {
-                const fmt = t => formatTimeOnly(new Date(t / 1_000_000));
-                label.textContent = `${fmt(start_time)} – ${fmt(end_time)}`;
-            }
-            // Disable "next" button when at now
-            const nextBtn = document.getElementById('chart-next');
-            if (nextBtn) {
-                if (this.trStart) {
-                    nextBtn.disabled = this.trEnd && this.trEnd.getTime() >= Date.now() - 1000;
+                if (start_time != null && end_time != null) {
+                    const fmt = t => formatTimeOnly(new Date(t / 1_000_000));
+                    label.textContent = `${fmt(start_time)} – ${fmt(end_time)}`;
                 } else {
-                    nextBtn.disabled = this.timeOffsetWindows === 0;
+                    label.textContent = 'All time';
                 }
             }
         } catch (error) {
@@ -724,7 +664,82 @@ class MetricsView {
             document.getElementById('metrics-sidebar'),
             document.getElementById('metrics-h-handle')
         );
+        this._attachTimeRangeListeners();
         this.loadResourceKeys();
+    }
+
+    _attachTimeRangeListeners() {
+        const reload = () => {
+            if (this.selectedMetric) this.loadTimeseries(this.selectedMetric);
+        };
+
+        document.getElementById('tr-preset-metrics').addEventListener('change', (e) => {
+            const v = e.target.value;
+            this.trStart = null;
+            this.trEnd = null;
+            this.trWindowHours = v === '' ? null : parseFloat(v);
+            this._syncMetricDateInputs();
+            this.refreshCurrentValue(this.selectedMetric);
+            reload();
+        });
+
+        document.getElementById('tr-start-metrics').addEventListener('change', () => this._onDateInputChange());
+        document.getElementById('tr-end-metrics').addEventListener('change', () => this._onDateInputChange());
+
+        document.getElementById('tr-prev-metrics').addEventListener('click', () => {
+            const windowMs = (this.trWindowHours || 1) * 3600000;
+            const endRef = this.trEnd ? this.trEnd.getTime() : Date.now();
+            const newEnd = endRef - windowMs;
+            this.trEnd = new Date(newEnd);
+            this.trStart = new Date(newEnd - windowMs);
+            this._syncMetricDateInputs();
+            document.getElementById('tr-preset-metrics').value = '';
+            reload();
+        });
+
+        document.getElementById('tr-next-metrics').addEventListener('click', () => {
+            const windowMs = (this.trWindowHours || 1) * 3600000;
+            const startRef = this.trEnd ? this.trEnd.getTime() : Date.now();
+            let newEnd = startRef + windowMs;
+            if (newEnd > Date.now()) newEnd = Date.now();
+            this.trEnd = new Date(newEnd);
+            this.trStart = new Date(newEnd - windowMs);
+            this._syncMetricDateInputs();
+            document.getElementById('tr-preset-metrics').value = '';
+            reload();
+        });
+
+        document.getElementById('tr-now-metrics').addEventListener('click', () => {
+            const windowMs = (this.trWindowHours || 1) * 3600000;
+            const now = new Date();
+            this.trEnd = now;
+            this.trStart = new Date(now.getTime() - windowMs);
+            this._syncMetricDateInputs();
+            document.getElementById('tr-preset-metrics').value = '';
+            reload();
+        });
+    }
+
+    _parseDatetimeInput(str) {
+        if (!str) return null;
+        const normalized = str.trim().replace('T', ' ');
+        const m = normalized.match(/^(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?$/);
+        if (!m) return null;
+        return new Date(`${m[1]}T${m[2] || '00:00'}`);
+    }
+
+    _onDateInputChange() {
+        const startEl = document.getElementById('tr-start-metrics');
+        const endEl = document.getElementById('tr-end-metrics');
+        this.trStart = this._parseDatetimeInput(startEl ? startEl.value : '');
+        this.trEnd = this._parseDatetimeInput(endEl ? endEl.value : '');
+        if (this.trStart && this.trEnd) {
+            this.trWindowHours = (this.trEnd.getTime() - this.trStart.getTime()) / 3600000;
+        }
+        const presetEl = document.getElementById('tr-preset-metrics');
+        if (presetEl) presetEl.value = '';
+        this.refreshCurrentValue(this.selectedMetric);
+        if (this.selectedMetric) this.loadTimeseries(this.selectedMetric);
     }
 
     async loadResourceKeys() {
@@ -788,7 +803,7 @@ class MetricsView {
 
     _toDatetimeLocal(date) {
         const pad = n => String(n).padStart(2, '0');
-        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
     }
 
     _syncMetricDateInputs() {
