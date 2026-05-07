@@ -161,6 +161,25 @@ class UsageView {
         if (endEl) endEl.value = this.trEnd ? this._toDatetimeLocal(this.trEnd) : '';
     }
 
+    _prefillDateInputsFromData(costSeries, bucketSecs) {
+        if (this.trStart !== null || this.trEnd !== null) return; // preset already populated via _syncDateInputs
+        const startEl = document.getElementById('tr-start-usage');
+        const endEl = document.getElementById('tr-end-usage');
+        if (!startEl || !endEl) return;
+        if (!Array.isArray(costSeries) || costSeries.length === 0) return;
+        const timestamps = costSeries
+            .map(r => r.timestamp)
+            .filter(t => typeof t === 'number');
+        if (timestamps.length === 0) return;
+        const minMs = Math.min(...timestamps) / 1_000_000;
+        const bucketMs = (bucketSecs || 3600) * 1000;
+        // Last bucket's END is (last-start + bucket). Cap at now so we don't
+        // show an end in the future for bucket sizes that cross now.
+        const maxMs = Math.min(Math.max(...timestamps) / 1_000_000 + bucketMs, Date.now());
+        startEl.value = this._toDatetimeLocal(new Date(minMs));
+        endEl.value = this._toDatetimeLocal(new Date(maxMs));
+    }
+
     _toDatetimeLocal(date) {
         const pad = n => String(n).padStart(2, '0');
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -221,6 +240,12 @@ class UsageView {
                 this.api.getPricingMetadata().catch(() => null),
             ]);
             dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta);
+            // When no explicit range is selected ("All time"), show the user
+            // what effective range the query covered by prefilling the date
+            // inputs from the returned cost-series data. Prefill is visual
+            // only — we don't mutate trStart/trEnd so the preset stays
+            // "All time" until the user actively edits.
+            this._prefillDateInputsFromData(costSeries, bucket);
         } catch (err) {
             dataContainer.innerHTML = `<div class="empty-state"><p>Failed to load usage data</p><p class="empty-state-hint">${err.message}</p></div>`;
         }
@@ -523,26 +548,33 @@ class UsageView {
             return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
         };
 
-        const axisLabels = [];
+        // Axis labels render as HTML below the SVG so the SVG's
+        // preserveAspectRatio="none" (needed to stretch bars across the
+        // container width) doesn't distort the text.
+        let axisHtml = '';
         if (buckets.length > 0) {
-            axisLabels.push(`<text class="cost-chart-axis" x="0" y="${chartHeight + 8}">${this._esc(labelFor(0))}</text>`);
-            if (buckets.length > 2) {
-                const mid = Math.floor(buckets.length / 2);
-                const midX = mid * (barWidth + barGap) + barWidth / 2;
-                axisLabels.push(`<text class="cost-chart-axis" x="${midX.toFixed(3)}" y="${chartHeight + 8}" text-anchor="middle">${this._esc(labelFor(mid))}</text>`);
-            }
-            if (buckets.length > 1) {
-                axisLabels.push(`<text class="cost-chart-axis" x="${width}" y="${chartHeight + 8}" text-anchor="end">${this._esc(labelFor(buckets.length - 1))}</text>`);
-            }
+            const left = this._esc(labelFor(0));
+            const mid = buckets.length > 2
+                ? this._esc(labelFor(Math.floor(buckets.length / 2)))
+                : '';
+            const right = buckets.length > 1
+                ? this._esc(labelFor(buckets.length - 1))
+                : '';
+            axisHtml = `
+                <div class="cost-chart-axis-labels">
+                    <span class="cost-chart-axis-left">${left}</span>
+                    <span class="cost-chart-axis-mid">${mid}</span>
+                    <span class="cost-chart-axis-right">${right}</span>
+                </div>`;
         }
 
         return `
             <h3>Cost over time — total $${total.toFixed(4)} across ${buckets.length} bucket${buckets.length === 1 ? '' : 's'}</h3>
             <div class="cost-chart">
-                <svg class="cost-chart-svg" viewBox="0 -4 ${width} ${chartHeight + 14}" preserveAspectRatio="none">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
                     ${bars}
-                    ${axisLabels.join('')}
                 </svg>
+                ${axisHtml}
             </div>`;
     }
 
@@ -553,8 +585,13 @@ class UsageView {
 
         const fmt = n => Number(n).toLocaleString();
 
+        // Hide optional columns entirely when no row populates them. Claude
+        // Code emits prompt.id only on api_request_body logs (not on spans),
+        // so a column of em-dashes adds noise without signal.
+        const anyPrompt = topSpans.some(r => r.prompt_id);
+        const anySession = topSpans.some(r => r.session_id);
+
         const rows = topSpans.map(row => {
-            // Cost + source are populated server-side (see crates/otelite-api/src/api/genai.rs).
             const cost = row.cost ?? null;
             const costStr = cost === null
                 ? `<span title="${this._esc(row.cost_reason || 'no pricing match')}">—</span>`
@@ -578,8 +615,8 @@ class UsageView {
                 <tr>
                     <td>${this._esc(timeStr)}</td>
                     <td>${this._esc(row.model || '—')}</td>
-                    <td>${sessionCell}</td>
-                    <td>${promptCell}</td>
+                    ${anySession ? `<td>${sessionCell}</td>` : ''}
+                    ${anyPrompt ? `<td>${promptCell}</td>` : ''}
                     <td>${fmt(row.input_tokens ?? 0)}</td>
                     <td>${fmt(row.output_tokens ?? 0)}</td>
                     <td>${fmt(row.cache_read_tokens ?? 0)}</td>
@@ -592,7 +629,9 @@ class UsageView {
             <h3>Top 20 most expensive calls</h3>
             <table class="data-table">
                 <thead><tr>
-                    <th>Time</th><th>Model</th><th>Session</th><th>Prompt</th>
+                    <th>Time</th><th>Model</th>
+                    ${anySession ? '<th>Session</th>' : ''}
+                    ${anyPrompt ? '<th>Prompt</th>' : ''}
                     <th>Input</th><th>Output</th><th>Cache read</th><th>Cost (est.)</th><th>Trace</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
