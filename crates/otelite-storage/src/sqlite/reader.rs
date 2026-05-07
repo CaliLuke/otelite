@@ -948,9 +948,14 @@ pub fn query_finish_reasons(
             UNION ALL
 
             SELECT je.value AS reason
-            FROM spans, json_each(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"')) je
-            WHERE json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"') IS NOT NULL
-            {spans_time_filter}
+            FROM (
+                SELECT json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"') AS arr
+                FROM spans
+                WHERE json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"') IS NOT NULL
+                  AND json_valid(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'))
+                  AND json_type(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"')) = 'array'
+                {spans_time_filter}
+            ) s, json_each(s.arr) je
 
             UNION ALL
 
