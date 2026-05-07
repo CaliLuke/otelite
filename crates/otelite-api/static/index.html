@@ -182,33 +182,12 @@ with tracer.start_as_current_span("my-operation"):
                         </details>
 
                         <details class="config-example">
-                            <summary><strong>Mellea (IBM generative programs library)</strong></summary>
-                            <pre><code># Install the telemetry extra:
-#   pip install "mellea[telemetry]"
-# Mellea uses the gRPC OTLP exporter → point at otelite's :4317.
-
-export OTEL_SERVICE_NAME=mellea
+                            <summary><strong>Mellea — build predictable AI without guesswork</strong></summary>
+                            <pre><code>pip install "mellea[telemetry]"
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-
-# Tracing — enable application (m.instruct / m.chat / @generative /
-# sampling / requirement validation) and backend (raw LLM calls) scopes.
-export MELLEA_TRACE_APPLICATION=true
-export MELLEA_TRACE_BACKEND=true
-
-# Metrics — mellea.llm.tokens.input / .output counters
-export MELLEA_METRICS_ENABLED=true
-export MELLEA_METRICS_OTLP=true
-
-# Optional: also export logs via OTLP
-export MELLEA_LOGS_OTLP=true
-
-# Optional: console mirror for debugging
-# export MELLEA_TRACE_CONSOLE=true
-
-# Then run your program. Backend spans follow OTel GenAI semconv, so
-# token counts, cost, finish-reasons, and chat bubbles all work on the
-# Usage page and in the trace detail without extra config.</code></pre>
-                            <p class="config-doc-link">Official docs: <a href="https://docs.mellea.ai/evaluation-and-observability/telemetry" target="_blank" rel="noopener">docs.mellea.ai › Evaluation &amp; Observability › Telemetry</a> and <a href="https://docs.mellea.ai/evaluation-and-observability/tracing" target="_blank" rel="noopener">Tracing</a>. Source: <a href="https://github.com/generative-computing/mellea" target="_blank" rel="noopener">generative-computing/mellea</a>.</p>
+export MELLEA_TRACE_APPLICATION=true MELLEA_TRACE_BACKEND=true
+export MELLEA_METRICS_ENABLED=true MELLEA_METRICS_OTLP=true</code></pre>
+                            <p class="config-doc-link">Mellea is a Python library for writing generative programs — structured outputs, verifiable requirements, automatic retries. Backend spans follow OTel GenAI semconv so the Usage page and trace waterfall work out of the box. See <a href="https://mellea.ai" target="_blank" rel="noopener">mellea.ai</a> · <a href="https://docs.mellea.ai/evaluation-and-observability/telemetry" target="_blank" rel="noopener">telemetry docs</a> · <a href="https://github.com/generative-computing/mellea" target="_blank" rel="noopener">github.com/generative-computing/mellea</a>.</p>
                         </details>
 
                         <details class="config-example">
