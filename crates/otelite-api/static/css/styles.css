@@ -2082,6 +2082,22 @@ body {
     color: #a5f3fc;
 }
 
+.config-doc-link {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    background-color: var(--bg-tertiary);
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border-color);
+}
+.config-doc-link a {
+    color: var(--accent-color);
+    text-decoration: none;
+}
+.config-doc-link a:hover {
+    text-decoration: underline;
+}
+
 #logs-empty-state h3 {
     font-size: 1.5rem;
     font-weight: 600;
@@ -2274,6 +2290,60 @@ body {
     font-size: 0.75rem;
     margin-bottom: 0.3rem;
 }
+
+/* Usage analytics widgets */
+.usage-gauge-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 0.75rem 1rem;
+    min-width: 180px;
+}
+.gauge-bar {
+    height: 8px;
+    background: var(--border-color);
+    border-radius: 4px;
+    margin: 0.4rem 0;
+    overflow: hidden;
+}
+.gauge-fill {
+    height: 100%;
+    background: var(--accent-color);
+    transition: width 0.3s ease;
+}
+.gauge-fill-warning { background: #ef4444; }
+.gauge-hint {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.cost-chart {
+    margin: 1rem 0;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+.cost-chart-svg { width: 100%; height: 140px; }
+.cost-chart-bar { fill: var(--accent-color); }
+.cost-chart-bar:hover { fill: #8b5cf6; }
+.cost-chart-axis { fill: var(--text-secondary); font-size: 10px; }
+
+.top-spans-cost-high { color: #f59e0b; font-weight: 600; }
+
+.finish-reasons-list { margin-top: 0.5rem; }
+.finish-reason-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    padding: 0.2rem 0;
+}
+.finish-reason-name { width: 140px; font-family: 'Courier New', monospace; }
+.finish-reason-bar { flex: 1; height: 12px; background: var(--border-color); border-radius: 2px; overflow: hidden; }
+.finish-reason-fill { height: 100%; background: var(--accent-color); }
+.finish-reason-fill.warning { background: #ef4444; }
+.finish-reason-count { width: 80px; text-align: right; color: var(--text-secondary); }
 .chat-bubble-role {
     text-transform: uppercase;
     font-weight: 600;

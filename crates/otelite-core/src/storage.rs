@@ -7,7 +7,9 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::api::{ModelUsage, SystemUsage, TokenUsageSummary};
+use crate::api::{
+    CostSeriesPoint, FinishReasonCount, ModelUsage, SystemUsage, TokenUsageSummary, TopSpan,
+};
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
 use crate::telemetry::{LogRecord, Metric, Span};
@@ -169,4 +171,29 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<(TokenUsageSummary, Vec<ModelUsage>, Vec<SystemUsage>)>;
+
+    /// Time-bucketed token usage grouped by model for cost-over-time analysis.
+    ///
+    /// `bucket_ns` is the bucket size in nanoseconds (e.g. 3_600_000_000_000 for 1h).
+    async fn query_cost_series(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_ns: i64,
+    ) -> Result<Vec<CostSeriesPoint>>;
+
+    /// Top-N most expensive LLM spans by total tokens.
+    async fn query_top_spans(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<TopSpan>>;
+
+    /// Finish-reason distribution across LLM spans and Claude Code api_response_body logs.
+    async fn query_finish_reasons(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<FinishReasonCount>>;
 }

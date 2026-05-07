@@ -484,3 +484,52 @@ pub struct SystemUsage {
     /// Number of requests for this system
     pub requests: usize,
 }
+
+/// A single time-bucketed cost/usage data point
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CostSeriesPoint {
+    /// Bucket start timestamp in nanoseconds since Unix epoch
+    pub timestamp: i64,
+    /// Model name (nullable — spans without a model attribute are grouped under null)
+    pub model: Option<String>,
+    /// Input tokens in this bucket
+    pub input_tokens: u64,
+    /// Output tokens in this bucket
+    pub output_tokens: u64,
+    /// Cache creation input tokens (Anthropic prompt caching)
+    pub cache_creation_tokens: u64,
+    /// Cache read input tokens (Anthropic prompt caching)
+    pub cache_read_tokens: u64,
+    /// Number of requests in this bucket
+    pub requests: usize,
+}
+
+/// A single top-N expensive LLM span
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TopSpan {
+    pub trace_id: String,
+    pub span_id: String,
+    /// Span start time (nanoseconds since Unix epoch)
+    pub start_time: i64,
+    /// Span duration in nanoseconds
+    pub duration: i64,
+    pub model: Option<String>,
+    pub system: Option<String>,
+    pub session_id: Option<String>,
+    pub prompt_id: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// Distribution entry for a single finish reason
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct FinishReasonCount {
+    pub reason: String,
+    pub count: usize,
+}

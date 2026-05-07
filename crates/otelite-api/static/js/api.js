@@ -160,6 +160,27 @@ class ApiClient {
     }
 
     /**
+     * Fetch GenAI cost time-series buckets
+     */
+    async getCostSeries(params = {}) {
+        return this.get('/genai/cost_series', params);
+    }
+
+    /**
+     * Fetch top-N most expensive GenAI spans
+     */
+    async getTopSpans(params = {}) {
+        return this.get('/genai/top_spans', params);
+    }
+
+    /**
+     * Fetch GenAI finish-reason distribution
+     */
+    async getFinishReasons(params = {}) {
+        return this.get('/genai/finish_reasons', params);
+    }
+
+    /**
      * Check health status
      */
     async getHealth() {

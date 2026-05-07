@@ -130,13 +130,37 @@
 
                         <details class="config-example">
                             <summary><strong>Claude Code (Environment Variables)</strong></summary>
-                            <pre><code># Set these environment variables before running Claude Code:
+                            <pre><code># Set these environment variables before running Claude Code.
+# Telemetry is off by default — CLAUDE_CODE_ENABLE_TELEMETRY=1 is required.
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 export OTEL_SERVICE_NAME=claude-code
 export OTEL_LOGS_EXPORTER=otlp
 export OTEL_METRICS_EXPORTER=otlp
 
-# Claude Code will automatically send telemetry to Otelite</code></pre>
+# Optional: distributed traces (beta) — interaction / llm_request / tool spans
+export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+export OTEL_TRACES_EXPORTER=otlp
+
+# Optional: include prompt / tool input content in events (off by default)
+# export OTEL_LOG_USER_PROMPTS=1
+# export OTEL_LOG_TOOL_DETAILS=1</code></pre>
+                            <p class="config-doc-link">Official docs: <a href="https://docs.claude.com/en/docs/claude-code/monitoring-usage" target="_blank" rel="noopener">docs.claude.com › Claude Code › Monitoring usage</a> — authoritative list of env vars, metric names, event names, and attributes.</p>
+                        </details>
+
+                        <details class="config-example">
+                            <summary><strong>Claude Agent SDK</strong></summary>
+                            <pre><code># The Agent SDK runs the Claude Code CLI as a child process,
+# so the same env vars apply. Set them before launching your agent:
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=otlp
+# Note: do NOT use OTEL_*_EXPORTER=console under the SDK
+# (console output collides with the SDK's message channel).</code></pre>
+                            <p class="config-doc-link">Official docs: <a href="https://code.claude.com/docs/en/agent-sdk/observability" target="_blank" rel="noopener">code.claude.com › Agent SDK › Observability with OpenTelemetry</a>.</p>
                         </details>
 
                         <details class="config-example">
@@ -154,11 +178,13 @@ trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
 with tracer.start_as_current_span("my-operation"):
     print("Hello from Python!")</code></pre>
+                            <p class="config-doc-link">Official docs: <a href="https://opentelemetry.io/docs/languages/python/" target="_blank" rel="noopener">opentelemetry.io › Python</a>.</p>
                         </details>
 
                         <details class="config-example">
-                            <summary><strong>Python (OpenAI SDK with instrumentation)</strong></summary>
-                            <pre><code>from opentelemetry.instrumentation.openai import OpenAIInstrumentor
+                            <summary><strong>Python (OpenAI SDK — OpenLLMetry / Traceloop)</strong></summary>
+                            <pre><code># pip install opentelemetry-instrumentation-openai
+from opentelemetry.instrumentation.openai import OpenAIInstrumentor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -173,7 +199,54 @@ client = openai.OpenAI()
 response = client.chat.completions.create(
     model="gpt-4",
     messages=[{"role": "user", "content": "Hello!"}]
+)
+# Default: prompts/completions are captured on span attributes.
+# Disable with: export TRACELOOP_TRACE_CONTENT=false</code></pre>
+                            <p class="config-doc-link">Official docs: <a href="https://github.com/traceloop/openllmetry/tree/main/packages/opentelemetry-instrumentation-openai" target="_blank" rel="noopener">traceloop/openllmetry › opentelemetry-instrumentation-openai</a>.</p>
+                        </details>
+
+                        <details class="config-example">
+                            <summary><strong>Python (Anthropic SDK — OpenLLMetry / Traceloop)</strong></summary>
+                            <pre><code># pip install opentelemetry-instrumentation-anthropic
+from opentelemetry.instrumentation.anthropic import AnthropicInstrumentor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+import anthropic
+
+exporter = OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces")
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(exporter))
+AnthropicInstrumentor().instrument()
+
+client = anthropic.Anthropic()
+message = client.messages.create(
+    model="claude-sonnet-4-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}],
 )</code></pre>
+                            <p class="config-doc-link">Official docs: <a href="https://github.com/traceloop/openllmetry/tree/main/packages/opentelemetry-instrumentation-anthropic" target="_blank" rel="noopener">traceloop/openllmetry › opentelemetry-instrumentation-anthropic</a>. OpenLLMetry also covers Bedrock, Cohere, Gemini, Groq, Mistral, Ollama, VertexAI — same pattern; see the <a href="https://github.com/traceloop/openllmetry#%EF%B8%8F-what-do-we-instrument" target="_blank" rel="noopener">full list</a>.</p>
+                        </details>
+
+                        <details class="config-example">
+                            <summary><strong>Python (OpenAI / Anthropic — OpenInference / Arize)</strong></summary>
+                            <pre><code># pip install openinference-instrumentation-openai opentelemetry-sdk \
+#             opentelemetry-exporter-otlp
+from openinference.instrumentation.openai import OpenAIInstrumentor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+import openai
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(
+    OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces")))
+OpenAIInstrumentor().instrument(tracer_provider=provider)
+
+# Swap OpenAIInstrumentor for AnthropicInstrumentor (from
+# openinference.instrumentation.anthropic) for Claude apps, or for
+# LangChainInstrumentor, LlamaIndexInstrumentor, etc.</code></pre>
+                            <p class="config-doc-link">Official docs: <a href="https://github.com/Arize-ai/openinference" target="_blank" rel="noopener">Arize-ai/openinference</a> — covers OpenAI, Anthropic, Bedrock, Mistral, LangChain, LlamaIndex, DSPy, CrewAI, LiteLLM, and more.</p>
                         </details>
 
                         <details class="config-example">

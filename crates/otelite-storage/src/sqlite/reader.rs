@@ -538,6 +538,70 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
     })
 }
 
+/// SQL expressions for extracting token / model / system values from a span's
+/// `attributes` JSON column, shared by all GenAI analytics queries.
+///
+/// Each COALESCE walks a priority-ordered list of attribute names so we pick up
+/// metrics emitted by instrumentations that don't fully follow the OTel GenAI
+/// semantic convention: OTel-standard names first, then older / alternative
+/// spellings (llm.*), then OpenAI's raw API names, then Claude Code's flat names.
+struct TokenExprs {
+    input: &'static str,
+    output: &'static str,
+    cache_creation: &'static str,
+    cache_read: &'static str,
+    model: &'static str,
+    system: &'static str,
+    /// WHERE-clause fragment (starting with "WHERE ...") that selects spans
+    /// carrying any recognised GenAI/LLM provider marker.
+    llm_span_guard: &'static str,
+}
+
+fn token_exprs() -> TokenExprs {
+    TokenExprs {
+        input: "COALESCE(\
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.input_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.prompt_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"llm.usage.prompt_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"llm.token_count.prompt\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"prompt_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"input_tokens\"') AS INTEGER))",
+        output: "COALESCE(\
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.output_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.completion_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"llm.usage.completion_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"llm.token_count.completion\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"completion_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"output_tokens\"') AS INTEGER))",
+        cache_creation: "COALESCE(\
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation.input_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation_input_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"cache_creation_input_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"cache_creation_tokens\"') AS INTEGER))",
+        cache_read: "COALESCE(\
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read.input_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read_input_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"cache_read_input_tokens\"') AS INTEGER), \
+            CAST(json_extract(attributes, '$.\"cache_read_tokens\"') AS INTEGER))",
+        model: "COALESCE(\
+            json_extract(attributes, '$.\"gen_ai.request.model\"'), \
+            json_extract(attributes, '$.\"gen_ai.response.model\"'), \
+            json_extract(attributes, '$.\"llm.request.model\"'), \
+            json_extract(attributes, '$.\"llm.model_name\"'), \
+            json_extract(attributes, '$.\"model\"'))",
+        system: "COALESCE(\
+            json_extract(attributes, '$.\"gen_ai.provider.name\"'), \
+            json_extract(attributes, '$.\"gen_ai.system\"'), \
+            json_extract(attributes, '$.\"llm.system\"'), \
+            json_extract(attributes, '$.\"llm.vendor\"'))",
+        llm_span_guard: "(json_extract(attributes, '$.\"gen_ai.system\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"gen_ai.provider.name\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"llm.system\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"llm.vendor\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"llm.request.model\"') IS NOT NULL)",
+    }
+}
+
 /// Query token usage statistics for GenAI/LLM spans
 ///
 /// Returns aggregated token usage grouped by model and system (provider).
@@ -551,18 +615,9 @@ pub fn query_token_usage(
     Vec<otelite_core::api::ModelUsage>,
     Vec<otelite_core::api::SystemUsage>,
 )> {
+    let exprs = token_exprs();
     // Build WHERE clause for time filtering.
-    // A span is considered an LLM span if it carries any recognised GenAI/LLM provider
-    // marker — covers OTel GenAI semantic conventions (current and deprecated), the
-    // llm.* prefix used by OpenInference / OpenLLMetry, or a raw request model name
-    // (OpenAI SDK instrumentations sometimes set only `llm.request.model`).
-    let mut where_clause = String::from(
-        "WHERE (json_extract(attributes, '$.\"gen_ai.system\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"gen_ai.provider.name\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"llm.system\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"llm.vendor\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"llm.request.model\"') IS NOT NULL)",
-    );
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(start) = start_time {
@@ -574,35 +629,10 @@ pub fn query_token_usage(
         params.push(Box::new(end));
     }
 
-    // Token attribute selectors.
-    // Each COALESCE walks a priority-ordered list of attribute names so we pick up
-    // metrics emitted by instrumentations that don't fully follow the OTel GenAI
-    // semantic convention: OTel-standard names first, then older / alternative
-    // spellings (llm.*), then OpenAI's raw API names, then Claude Code's flat names.
-    let input_expr = "COALESCE(\
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.input_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.prompt_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"llm.usage.prompt_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"llm.token_count.prompt\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"prompt_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"input_tokens\"') AS INTEGER))";
-    let output_expr = "COALESCE(\
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.output_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.completion_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"llm.usage.completion_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"llm.token_count.completion\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"completion_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"output_tokens\"') AS INTEGER))";
-    let cache_creation_expr = "COALESCE(\
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation.input_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation_input_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"cache_creation_input_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"cache_creation_tokens\"') AS INTEGER))";
-    let cache_read_expr = "COALESCE(\
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read.input_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read_input_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"cache_read_input_tokens\"') AS INTEGER), \
-        CAST(json_extract(attributes, '$.\"cache_read_tokens\"') AS INTEGER))";
+    let input_expr = exprs.input;
+    let output_expr = exprs.output;
+    let cache_creation_expr = exprs.cache_creation;
+    let cache_read_expr = exprs.cache_read;
 
     // Query overall summary
     let summary_query = format!(
@@ -631,12 +661,7 @@ pub fn query_token_usage(
         .map_err(|e| StorageError::QueryError(format!("Failed to query token summary: {}", e)))?;
 
     // Query by model — fall back across common model-attribute spellings.
-    let model_expr = "COALESCE(\
-        json_extract(attributes, '$.\"gen_ai.request.model\"'), \
-        json_extract(attributes, '$.\"gen_ai.response.model\"'), \
-        json_extract(attributes, '$.\"llm.request.model\"'), \
-        json_extract(attributes, '$.\"llm.model_name\"'), \
-        json_extract(attributes, '$.\"model\"'))";
+    let model_expr = exprs.model;
     let model_query = format!(
         "SELECT
             {model_expr} as model,
@@ -670,11 +695,7 @@ pub fn query_token_usage(
         .map_err(|e| StorageError::QueryError(format!("Failed to parse model results: {}", e)))?;
 
     // Query by system/provider — accept the OTel-standard names plus llm.* variants.
-    let system_expr = "COALESCE(\
-        json_extract(attributes, '$.\"gen_ai.provider.name\"'), \
-        json_extract(attributes, '$.\"gen_ai.system\"'), \
-        json_extract(attributes, '$.\"llm.system\"'), \
-        json_extract(attributes, '$.\"llm.vendor\"'))";
+    let system_expr = exprs.system;
     let system_query = format!(
         "SELECT
             {system_expr} as system,
@@ -708,6 +729,265 @@ pub fn query_token_usage(
         .map_err(|e| StorageError::QueryError(format!("Failed to parse system results: {}", e)))?;
 
     Ok((summary, by_model, by_system))
+}
+
+/// Time-bucketed token usage grouped by model.
+///
+/// Bucket assignment uses SQLite integer division (floor): `bucket = (start_time / bucket_ns) * bucket_ns`.
+pub fn query_cost_series(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    bucket_ns: i64,
+) -> Result<Vec<otelite_core::api::CostSeriesPoint>> {
+    if bucket_ns <= 0 {
+        return Err(StorageError::QueryError(format!(
+            "bucket_ns must be positive, got {}",
+            bucket_ns
+        )));
+    }
+
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            (start_time / ?) * ? as bucket,
+            {model} as model,
+            COALESCE(SUM({input}), 0),
+            COALESCE(SUM({output}), 0),
+            COALESCE(SUM({cache_creation}), 0),
+            COALESCE(SUM({cache_read}), 0),
+            COUNT(*) as requests
+        FROM spans
+        {where_clause}
+        GROUP BY bucket, model
+        ORDER BY bucket ASC",
+        model = exprs.model,
+        input = exprs.input,
+        output = exprs.output,
+        cache_creation = exprs.cache_creation,
+        cache_read = exprs.cache_read,
+    );
+
+    // bucket_ns parameters (two occurrences) must come first to match the `?` order in SQL.
+    let mut all_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 2);
+    all_params.push(Box::new(bucket_ns));
+    all_params.push(Box::new(bucket_ns));
+    all_params.extend(params);
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare cost_series query: {}", e))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(otelite_core::api::CostSeriesPoint {
+                timestamp: row.get::<_, i64>(0)?,
+                model: row.get::<_, Option<String>>(1)?,
+                input_tokens: row.get::<_, i64>(2)? as u64,
+                output_tokens: row.get::<_, i64>(3)? as u64,
+                cache_creation_tokens: row.get::<_, i64>(4)? as u64,
+                cache_read_tokens: row.get::<_, i64>(5)? as u64,
+                requests: row.get::<_, i64>(6)? as usize,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute cost_series query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse cost_series results: {}", e))
+        })?;
+
+    Ok(rows)
+}
+
+/// Top-N most expensive LLM spans by total tokens.
+pub fn query_top_spans(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: usize,
+) -> Result<Vec<otelite_core::api::TopSpan>> {
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            trace_id,
+            span_id,
+            start_time,
+            (end_time - start_time) as duration,
+            {model} as model,
+            {system} as system,
+            json_extract(attributes, '$.\"session.id\"') as session_id,
+            json_extract(attributes, '$.\"prompt.id\"') as prompt_id,
+            COALESCE({input}, 0) as input_tokens,
+            COALESCE({output}, 0) as output_tokens,
+            COALESCE({cache_creation}, 0) as cache_creation_tokens,
+            COALESCE({cache_read}, 0) as cache_read_tokens,
+            COALESCE({input}, 0) + COALESCE({output}, 0) + COALESCE({cache_creation}, 0) + COALESCE({cache_read}, 0) as total_tokens
+        FROM spans
+        {where_clause}
+        ORDER BY total_tokens DESC
+        LIMIT ?",
+        model = exprs.model,
+        system = exprs.system,
+        input = exprs.input,
+        output = exprs.output,
+        cache_creation = exprs.cache_creation,
+        cache_read = exprs.cache_read,
+    );
+
+    params.push(Box::new(limit as i64));
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare top_spans query: {}", e))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(otelite_core::api::TopSpan {
+                trace_id: row.get(0)?,
+                span_id: row.get(1)?,
+                start_time: row.get::<_, i64>(2)?,
+                duration: row.get::<_, i64>(3)?,
+                model: row.get::<_, Option<String>>(4)?,
+                system: row.get::<_, Option<String>>(5)?,
+                session_id: row.get::<_, Option<String>>(6)?,
+                prompt_id: row.get::<_, Option<String>>(7)?,
+                input_tokens: row.get::<_, i64>(8)? as u64,
+                output_tokens: row.get::<_, i64>(9)? as u64,
+                cache_creation_tokens: row.get::<_, i64>(10)? as u64,
+                cache_read_tokens: row.get::<_, i64>(11)? as u64,
+                total_tokens: row.get::<_, i64>(12)? as u64,
+            })
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to execute top_spans query: {}", e)))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse top_spans results: {}", e))
+        })?;
+
+    Ok(rows)
+}
+
+/// Finish-reason distribution across LLM spans and Claude Code api_response_body logs.
+///
+/// Unions three sources:
+/// 1. OTel plural `gen_ai.response.finish_reasons` (array attribute, unpacked via json_each).
+/// 2. OTel singular `gen_ai.response.finish_reason` (scalar attribute).
+/// 3. Claude Code `stop_reason` embedded in `claude_code.api_response_body` log bodies.
+pub fn query_finish_reasons(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::FinishReasonCount>> {
+    // Time filters are applied per sub-query. We build three fragments so each UNION
+    // branch only references its own table's time column (spans.start_time / logs.timestamp).
+    let mut spans_time_filter = String::new();
+    let mut logs_time_filter = String::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        spans_time_filter.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        spans_time_filter.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+    // The plural (json_each) branch re-uses the same spans time filter, so bind again.
+    if let Some(start) = start_time {
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        params.push(Box::new(end));
+    }
+    if let Some(start) = start_time {
+        logs_time_filter.push_str(" AND timestamp >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        logs_time_filter.push_str(" AND timestamp <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "WITH reasons AS (
+            SELECT json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') AS reason
+            FROM spans
+            WHERE json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') IS NOT NULL
+            {spans_time_filter}
+
+            UNION ALL
+
+            SELECT je.value AS reason
+            FROM spans, json_each(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"')) je
+            WHERE json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"') IS NOT NULL
+            {spans_time_filter}
+
+            UNION ALL
+
+            SELECT json_extract(json_extract(attributes, '$.body'), '$.stop_reason') AS reason
+            FROM logs
+            WHERE body = 'claude_code.api_response_body'
+              AND json_extract(json_extract(attributes, '$.body'), '$.stop_reason') IS NOT NULL
+              {logs_time_filter}
+        )
+        SELECT reason, COUNT(*) as cnt
+        FROM reasons
+        WHERE reason IS NOT NULL
+        GROUP BY reason
+        ORDER BY cnt DESC"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare finish_reasons query: {}", e))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(otelite_core::api::FinishReasonCount {
+                reason: row.get::<_, String>(0)?,
+                count: row.get::<_, i64>(1)? as usize,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute finish_reasons query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse finish_reasons results: {}", e))
+        })?;
+
+    Ok(rows)
 }
 
 /// Return up to 50 distinct resource attribute keys for the given signal table.

@@ -35,6 +35,9 @@ use utoipa::OpenApi;
         crate::api::metrics::get_metric_timeseries,
         crate::api::metrics::export_metrics,
         crate::api::genai::get_token_usage,
+        crate::api::genai::get_cost_series,
+        crate::api::genai::get_top_spans,
+        crate::api::genai::get_finish_reasons,
     ),
     components(
         schemas(
@@ -53,6 +56,9 @@ use utoipa::OpenApi;
             otelite_core::api::TokenUsageSummary,
             otelite_core::api::ModelUsage,
             otelite_core::api::SystemUsage,
+            otelite_core::api::CostSeriesPoint,
+            otelite_core::api::TopSpan,
+            otelite_core::api::FinishReasonCount,
             crate::api::health::HealthResponse,
             crate::api::stats::StatsResponse,
             crate::api::admin::PurgeAllResponse,
@@ -60,6 +66,9 @@ use utoipa::OpenApi;
             crate::api::metrics::TimeBucket,
             crate::api::metrics::TimeseriesQuery,
             crate::api::genai::TokenUsageQuery,
+            crate::api::genai::CostSeriesQuery,
+            crate::api::genai::TopSpansQuery,
+            crate::api::genai::FinishReasonsQuery,
         )
     ),
     tags(
@@ -181,6 +190,9 @@ impl DashboardServer {
             .route("/api/admin/purge", post(crate::api::admin::purge_all))
             // API routes - GenAI
             .route("/api/genai/usage", get(crate::api::get_token_usage))
+            .route("/api/genai/cost_series", get(crate::api::genai::get_cost_series))
+            .route("/api/genai/top_spans", get(crate::api::genai::get_top_spans))
+            .route("/api/genai/finish_reasons", get(crate::api::genai::get_finish_reasons))
             // OpenAPI spec endpoint
             .route("/api/openapi.json", get(|| async {
                 axum::Json(ApiDoc::openapi())

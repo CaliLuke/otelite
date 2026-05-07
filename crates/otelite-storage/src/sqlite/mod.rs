@@ -270,6 +270,47 @@ impl StorageBackend for SqliteBackend {
         reader::query_token_usage(conn, start_time, end_time).map_err(StorageError::from)
     }
 
+    async fn query_cost_series(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_ns: i64,
+    ) -> Result<Vec<otelite_core::api::CostSeriesPoint>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_cost_series(conn, start_time, end_time, bucket_ns).map_err(StorageError::from)
+    }
+
+    async fn query_top_spans(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<otelite_core::api::TopSpan>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_top_spans(conn, start_time, end_time, limit).map_err(StorageError::from)
+    }
+
+    async fn query_finish_reasons(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::FinishReasonCount>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+
+        reader::query_finish_reasons(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
     async fn close(&mut self) -> Result<()> {
         if let Some(handle) = self.purge_handle.lock().unwrap().take() {
             handle.abort();
