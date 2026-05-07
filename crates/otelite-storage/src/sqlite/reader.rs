@@ -939,11 +939,16 @@ pub fn query_finish_reasons(
 
             UNION ALL
 
-            SELECT json_extract(json_extract(attributes, '$.body'), '$.stop_reason') AS reason
-            FROM logs
-            WHERE body = 'claude_code.api_response_body'
-              AND json_extract(json_extract(attributes, '$.body'), '$.stop_reason') IS NOT NULL
-              {logs_time_filter}
+            SELECT json_extract(body_json, '$.stop_reason') AS reason
+            FROM (
+                SELECT json_extract(attributes, '$.body') AS body_json
+                FROM logs
+                WHERE body = 'claude_code.api_response_body'
+                  AND json_extract(attributes, '$.body') IS NOT NULL
+                  AND json_valid(json_extract(attributes, '$.body'))
+                  {logs_time_filter}
+            ) l
+            WHERE json_extract(body_json, '$.stop_reason') IS NOT NULL
         )
         SELECT reason, COUNT(*) as cnt
         FROM reasons

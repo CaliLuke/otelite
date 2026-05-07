@@ -23,6 +23,24 @@ fn insert_span(conn: &Connection, span_id: &str, attributes: &str) {
     .unwrap();
 }
 
+/// Insert a `claude_code.api_response_body` log whose `attributes.body` is an
+/// arbitrary string (may or may not be valid JSON — the test point is that
+/// query_finish_reasons must not error on malformed body JSON).
+fn insert_claude_code_response_log(conn: &Connection, body_value: &str) {
+    // Store the body field as a JSON-encoded string inside the attributes object,
+    // matching how the writer emits these logs.
+    let attrs = format!(
+        r#"{{"body":{}}}"#,
+        serde_json::to_string(body_value).unwrap()
+    );
+    conn.execute(
+        r#"INSERT INTO logs (timestamp, severity_number, body, attributes)
+           VALUES (1000, 9, 'claude_code.api_response_body', ?1)"#,
+        rusqlite::params![attrs],
+    )
+    .unwrap();
+}
+
 #[test]
 fn test_finish_reasons_empty() {
     let conn = setup_test_db();
@@ -92,4 +110,35 @@ fn test_finish_reasons_object_in_plural_field_does_not_error() {
     let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].reason, "stop");
+}
+
+/// Regression: a claude_code.api_response_body log whose body text is truncated
+/// / malformed JSON previously crashed the whole finish_reasons query because
+/// the logs UNION branch calls json_extract on the body string unguarded.
+#[test]
+fn test_finish_reasons_malformed_response_body_is_skipped() {
+    let conn = setup_test_db();
+    // A well-formed log (counts toward the result).
+    insert_claude_code_response_log(
+        &conn,
+        r#"{"stop_reason":"end_turn","model":"claude-sonnet-4"}"#,
+    );
+    // Two malformed / truncated bodies — these must not error out the query.
+    insert_claude_code_response_log(&conn, r#"{"stop_reason":"max_tokens","mod"#);
+    insert_claude_code_response_log(&conn, "not even close to json");
+
+    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].reason, "end_turn");
+    assert_eq!(rows[0].count, 1);
+}
+
+/// Sanity: when the body JSON is well-formed but has no stop_reason, the row
+/// doesn't contribute to finish_reasons counts.
+#[test]
+fn test_finish_reasons_body_without_stop_reason() {
+    let conn = setup_test_db();
+    insert_claude_code_response_log(&conn, r#"{"model":"claude-sonnet-4"}"#);
+    let rows = reader::query_finish_reasons(&conn, None, None).unwrap();
+    assert!(rows.is_empty());
 }
