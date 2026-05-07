@@ -503,6 +503,13 @@ pub struct CostSeriesPoint {
     pub cache_read_tokens: u64,
     /// Number of requests in this bucket
     pub requests: usize,
+    /// Estimated cost in USD for this bucket, computed server-side. `None` when
+    /// no pricing data matched the bucket's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// Origin of the cost figure: "litellm", "fallback", or "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
 }
 
 /// A single top-N expensive LLM span
@@ -524,6 +531,17 @@ pub struct TopSpan {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub total_tokens: u64,
+    /// Estimated cost in USD, computed server-side from the pricing database.
+    /// `None` when no pricing data matched this row's (model, system).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// Origin of the cost figure: "litellm", "fallback", or "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+    /// Human-readable tooltip explaining why cost is None (e.g.
+    /// "no pricing data for claude-foo on bedrock").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_reason: Option<String>,
 }
 
 /// Distribution entry for a single finish reason

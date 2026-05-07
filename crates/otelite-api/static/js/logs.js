@@ -9,43 +9,6 @@ function formatTs(date) {
            `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}.${ms}`;
 }
 
-// Claude pricing in USD per 1M tokens. Used for best-effort cost estimation.
-// Cache write rates reflect Anthropic's published multipliers: 5m ≈ 1.25x input, 1h ≈ 2x input.
-// Cache read ≈ 0.1x input. Prefixes cover Claude 4.x family; unknown models return null.
-const CLAUDE_PRICING = {
-    'opus':   { input: 15, output: 75, cache_5m: 18.75, cache_1h: 30, cache_read: 1.5 },
-    'sonnet': { input: 3,  output: 15, cache_5m: 3.75,  cache_1h: 6,  cache_read: 0.3 },
-    'haiku':  { input: 1,  output: 5,  cache_5m: 1.25,  cache_1h: 2,  cache_read: 0.1 },
-};
-
-function pricingForModel(model) {
-    if (!model) return null;
-    const m = String(model).toLowerCase();
-    if (m.includes('opus')) return CLAUDE_PRICING.opus;
-    if (m.includes('sonnet')) return CLAUDE_PRICING.sonnet;
-    if (m.includes('haiku')) return CLAUDE_PRICING.haiku;
-    return null;
-}
-
-function computeCost(model, usage) {
-    const p = pricingForModel(model);
-    if (!p || !usage) return null;
-    const c5 = usage.cache_creation?.ephemeral_5m_input_tokens ?? 0;
-    const c1 = usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
-    const cc = (usage.cache_creation_input_tokens ?? 0) - c5 - c1;
-    const cr = usage.cache_read_input_tokens ?? 0;
-    const input = usage.input_tokens ?? 0;
-    const output = usage.output_tokens ?? 0;
-    return (
-        input * p.input +
-        output * p.output +
-        c5 * p.cache_5m +
-        c1 * p.cache_1h +
-        Math.max(cc, 0) * p.cache_5m +  // fall back to 5m rate for uncategorised cache_creation
-        cr * p.cache_read
-    ) / 1_000_000;
-}
-
 // Parse an api_response_body log into structured LLM data, returning null for other logs.
 function extractLlmUsage(log) {
     if (!log || log.body !== 'claude_code.api_response_body') return null;
@@ -591,8 +554,8 @@ class LogsView {
             if (llm.web_fetch_requests) toolParts.push(`${llm.web_fetch_requests} web_fetch`);
             rows.push(['Server tools', toolParts.join(', ')]);
         }
-        const cost = computeCost(llm.model, u);
-        if (cost != null) rows.push(['Cost (est.)', `$${cost.toFixed(4)}`]);
+        // Per-span cost is rendered on the Usage page (server-computed with
+        // LiteLLM-sourced rates). We avoid duplicating that math client-side.
         return `
             <div class="log-field llm-usage-panel">
                 <strong>LLM Usage:</strong>
@@ -620,7 +583,6 @@ class LogsView {
         // Aggregate LLM usage across api_response_body logs (usually one per prompt, but support multiple)
         let aggModel = null, aggStop = null, aggTier = null;
         const agg = { input: 0, output: 0, c5: 0, c1: 0, cc_other: 0, cread: 0, web_search: 0, web_fetch: 0 };
-        let totalCost = 0, haveCost = false;
         for (const l of logs) {
             const llm = extractLlmUsage(l);
             if (!llm) continue;
@@ -637,8 +599,6 @@ class LogsView {
             agg.cread += u.cache_read_input_tokens ?? 0;
             agg.web_search += llm.web_search_requests ?? 0;
             agg.web_fetch += llm.web_fetch_requests ?? 0;
-            const c = computeCost(llm.model, u);
-            if (c != null) { totalCost += c; haveCost = true; }
         }
 
         const fmt = n => Number(n).toLocaleString();
@@ -665,7 +625,6 @@ class LogsView {
                     ${aggModel && (agg.c5 || agg.c1 || agg.cc_other) ? row('Cache write', `${fmt(agg.c5)} @ 5m · ${fmt(agg.c1)} @ 1h${agg.cc_other ? ' · ' + fmt(agg.cc_other) + ' other' : ''}`) : ''}
                     ${aggModel && agg.cread ? row('Cache read', fmt(agg.cread)) : ''}
                     ${(agg.web_search || agg.web_fetch) ? row('Server tools', `${agg.web_search} web_search · ${agg.web_fetch} web_fetch`) : ''}
-                    ${haveCost ? row('Cost (est.)', `$${totalCost.toFixed(4)}`) : ''}
                 </div>
             </div>
         `;

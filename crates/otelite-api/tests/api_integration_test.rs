@@ -31,6 +31,7 @@ fn build_test_router(storage: Arc<dyn StorageBackend>) -> Router {
     let state = AppState {
         storage,
         cache: QueryCache::default(),
+        pricing: otelite_api::pricing_cache::PricingCache::new(),
         start_time: Arc::new(Instant::now()),
     };
 

@@ -541,65 +541,38 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
 /// SQL expressions for extracting token / model / system values from a span's
 /// `attributes` JSON column, shared by all GenAI analytics queries.
 ///
-/// Each COALESCE walks a priority-ordered list of attribute names so we pick up
-/// metrics emitted by instrumentations that don't fully follow the OTel GenAI
-/// semantic convention: OTel-standard names first, then older / alternative
-/// spellings (llm.*), then OpenAI's raw API names, then Claude Code's flat names.
+/// The attribute vocabulary lives in [`otelite_core::semconv`]. This struct
+/// projects those lists into SQL COALESCE fragments once per query.
 struct TokenExprs {
-    input: &'static str,
-    output: &'static str,
-    cache_creation: &'static str,
-    cache_read: &'static str,
-    model: &'static str,
-    system: &'static str,
-    /// WHERE-clause fragment (starting with "WHERE ...") that selects spans
-    /// carrying any recognised GenAI/LLM provider marker.
-    llm_span_guard: &'static str,
+    input: String,
+    output: String,
+    cache_creation: String,
+    cache_read: String,
+    model: String,
+    system: String,
+    /// Parenthesised OR-chain identifying LLM spans (also includes the
+    /// OpenInference `openinference.span.kind` clause).
+    llm_span_guard: String,
 }
 
 fn token_exprs() -> TokenExprs {
+    use otelite_core::semconv;
     TokenExprs {
-        input: "COALESCE(\
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.input_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.prompt_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"llm.usage.prompt_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"llm.token_count.prompt\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"prompt_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"input_tokens\"') AS INTEGER))",
-        output: "COALESCE(\
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.output_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.completion_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"llm.usage.completion_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"llm.token_count.completion\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"completion_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"output_tokens\"') AS INTEGER))",
-        cache_creation: "COALESCE(\
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation.input_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation_input_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"cache_creation_input_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"cache_creation_tokens\"') AS INTEGER))",
-        cache_read: "COALESCE(\
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read.input_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read_input_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"cache_read_input_tokens\"') AS INTEGER), \
-            CAST(json_extract(attributes, '$.\"cache_read_tokens\"') AS INTEGER))",
-        model: "COALESCE(\
-            json_extract(attributes, '$.\"gen_ai.request.model\"'), \
-            json_extract(attributes, '$.\"gen_ai.response.model\"'), \
-            json_extract(attributes, '$.\"llm.request.model\"'), \
-            json_extract(attributes, '$.\"llm.model_name\"'), \
-            json_extract(attributes, '$.\"model\"'))",
-        system: "COALESCE(\
-            json_extract(attributes, '$.\"gen_ai.provider.name\"'), \
-            json_extract(attributes, '$.\"gen_ai.system\"'), \
-            json_extract(attributes, '$.\"llm.system\"'), \
-            json_extract(attributes, '$.\"llm.vendor\"'))",
-        llm_span_guard: "(json_extract(attributes, '$.\"gen_ai.system\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"gen_ai.provider.name\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"llm.system\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"llm.vendor\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"llm.request.model\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"openinference.span.kind\"') IN ('LLM', 'EMBEDDING'))",
+        input: semconv::coalesce_extract_cast("attributes", semconv::INPUT_TOKEN_KEYS, "INTEGER"),
+        output: semconv::coalesce_extract_cast("attributes", semconv::OUTPUT_TOKEN_KEYS, "INTEGER"),
+        cache_creation: semconv::coalesce_extract_cast(
+            "attributes",
+            semconv::CACHE_CREATION_TOKEN_KEYS,
+            "INTEGER",
+        ),
+        cache_read: semconv::coalesce_extract_cast(
+            "attributes",
+            semconv::CACHE_READ_TOKEN_KEYS,
+            "INTEGER",
+        ),
+        model: semconv::coalesce_extract("attributes", semconv::MODEL_KEYS),
+        system: semconv::coalesce_extract("attributes", semconv::SYSTEM_KEYS),
+        llm_span_guard: semconv::llm_span_guard("attributes"),
     }
 }
 
@@ -803,6 +776,9 @@ pub fn query_cost_series(
                 cache_creation_tokens: row.get::<_, i64>(4)? as u64,
                 cache_read_tokens: row.get::<_, i64>(5)? as u64,
                 requests: row.get::<_, i64>(6)? as usize,
+                // Cost enrichment happens in the API layer.
+                cost: None,
+                cost_source: None,
             })
         })
         .map_err(|e| {
@@ -886,6 +862,10 @@ pub fn query_top_spans(
                 cache_creation_tokens: row.get::<_, i64>(10)? as u64,
                 cache_read_tokens: row.get::<_, i64>(11)? as u64,
                 total_tokens: row.get::<_, i64>(12)? as u64,
+                // Cost enrichment happens in the API layer.
+                cost: None,
+                cost_source: None,
+                cost_reason: None,
             })
         })
         .map_err(|e| StorageError::QueryError(format!("Failed to execute top_spans query: {}", e)))?

@@ -2,6 +2,7 @@
 
 use crate::cache::LruCache;
 use crate::config::DashboardConfig;
+use crate::pricing_cache::PricingCache;
 use crate::static_files;
 use axum::{
     routing::{get, post},
@@ -43,6 +44,8 @@ use utoipa::OpenApi;
         crate::api::genai::get_tool_usage,
         crate::api::genai::get_retry_stats,
         crate::api::genai::get_retrieval_stats,
+        crate::api::genai::get_pricing_metadata,
+        crate::api::genai::get_agent_framework_defs,
     ),
     components(
         schemas(
@@ -85,6 +88,8 @@ use utoipa::OpenApi;
             crate::api::genai::ToolUsageQuery,
             crate::api::genai::RetryStatsQuery,
             crate::api::genai::RetrievalStatsQuery,
+            crate::api::genai::PricingMetadata,
+            otelite_core::agent_frameworks::AgentFrameworkRecognizer,
         )
     ),
     tags(
@@ -114,6 +119,8 @@ struct ApiDoc;
 pub struct AppState {
     pub storage: Arc<dyn StorageBackend>,
     pub cache: QueryCache,
+    /// LiteLLM pricing database, refreshed periodically in the background.
+    pub pricing: PricingCache,
     /// Time at which the server started (for uptime calculation)
     pub start_time: Arc<Instant>,
 }
@@ -165,9 +172,11 @@ pub struct DashboardServer {
 impl DashboardServer {
     /// Create a new dashboard server
     pub fn new(config: DashboardConfig, storage: Arc<dyn StorageBackend>) -> Self {
+        let pricing = PricingCache::new().spawn_refresher();
         let state = AppState {
             storage,
             cache: QueryCache::new(),
+            pricing,
             start_time: Arc::new(Instant::now()),
         };
 
@@ -214,6 +223,8 @@ impl DashboardServer {
             .route("/api/genai/tool_usage", get(crate::api::genai::get_tool_usage))
             .route("/api/genai/retry_stats", get(crate::api::genai::get_retry_stats))
             .route("/api/genai/retrieval_stats", get(crate::api::genai::get_retrieval_stats))
+            .route("/api/genai/pricing_metadata", get(crate::api::genai::get_pricing_metadata))
+            .route("/api/genai/agent_framework_defs", get(crate::api::genai::get_agent_framework_defs))
             // OpenAPI spec endpoint
             .route("/api/openapi.json", get(|| async {
                 axum::Json(ApiDoc::openapi())

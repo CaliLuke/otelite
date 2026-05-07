@@ -37,6 +37,20 @@ class TracesView {
         this.refreshInterval = null;
         this.collapsedSpans = new Set();
         this.zoomLevel = 1.0;
+        // Agent-framework recognizer definitions, fetched lazily from the
+        // server (see /api/genai/agent_framework_defs). Populated on first
+        // render via _ensureAgentFrameworkDefs().
+        this.agentFrameworkDefs = null;
+    }
+
+    async _ensureAgentFrameworkDefs() {
+        if (this.agentFrameworkDefs !== null) return;
+        try {
+            this.agentFrameworkDefs = await this.apiClient.getAgentFrameworkDefs();
+        } catch {
+            // Fall back to empty list — framework sections simply won't render.
+            this.agentFrameworkDefs = [];
+        }
     }
 
     /**
@@ -336,6 +350,9 @@ class TracesView {
      */
     async loadTraces() {
         try {
+            // Load recognizer defs in parallel with the first trace query.
+            this._ensureAgentFrameworkDefs();
+
             const params = {
                 limit: this.pageSize,
                 offset: this.currentPage * this.pageSize,
@@ -696,6 +713,69 @@ class TracesView {
      * Render GenAI attribute sections (request / response / usage / tool / agent + standalone)
      * before the generic attribute list. Returns '' if no gen_ai.* attrs present.
      */
+    /**
+     * Render framework-specific "Agent orchestration" sections for spans that
+     * carry attributes from agentic frameworks.
+     *
+     * The framework vocabulary (which prefixes/keys/markers belong to each
+     * framework) is defined server-side in `otelite_core::agent_frameworks` and
+     * fetched via `/api/genai/agent_framework_defs`. This keeps the
+     * definitions in one place — the CLI/TUI use the same Rust source directly.
+     *
+     * Presence-gated: if none of a framework's markers (or prefix-matching
+     * keys) are present, the section is omitted.
+     */
+    renderAgentFrameworkSections(attributes) {
+        if (!attributes) return '';
+        const defs = this.agentFrameworkDefs;
+        if (!Array.isArray(defs) || defs.length === 0) return '';
+
+        const attrKeys = Object.keys(attributes);
+
+        const matchesKey = (fw, key) =>
+            (fw.prefixes || []).some(p => key.startsWith(p)) ||
+            (fw.literal_keys || []).includes(key);
+
+        const isPresent = fw => {
+            let prefixHit = false;
+            for (const k of attrKeys) {
+                if ((fw.marker_keys || []).includes(k)) return true;
+                if ((fw.prefixes || []).some(p => k.startsWith(p))) prefixHit = true;
+            }
+            return prefixHit;
+        };
+
+        const renderRow = (k, v) =>
+            `<div class="genai-section-row"><span class="genai-section-key">${this.escapeHtml(
+                k,
+            )}</span><span class="genai-section-val">${this.escapeHtml(String(v))}</span></div>`;
+
+        const cards = defs
+            .map(fw => {
+                if (!isPresent(fw)) return '';
+                const entries = Object.entries(attributes).filter(([k]) => matchesKey(fw, k));
+                if (entries.length === 0) return '';
+                return `<div class="genai-section"><h6>${this.escapeHtml(fw.name)} orchestration</h6><div class="genai-section-grid">${entries
+                    .map(([k, v]) => renderRow(k, v))
+                    .join('')}</div></div>`;
+            })
+            .filter(Boolean);
+
+        return cards.join('');
+    }
+
+    /** Has any recognized agent-framework attribute — used to filter the
+     *  generic attribute list so framework-grouped keys don't appear twice. */
+    _isAgentFrameworkKey(key) {
+        const defs = this.agentFrameworkDefs;
+        if (!Array.isArray(defs)) return false;
+        return defs.some(
+            fw =>
+                (fw.prefixes || []).some(p => key.startsWith(p)) ||
+                (fw.literal_keys || []).includes(key),
+        );
+    }
+
     renderGenAiSections(attributes) {
         if (!attributes) return '';
         const hasGenAi = Object.keys(attributes).some(k => k.startsWith('gen_ai.'));
@@ -1273,7 +1353,16 @@ class TracesView {
             })()}
 
             ${(() => {
-                const nonGenAi = attrEntries.filter(([k]) => !k.startsWith('gen_ai.'));
+                const agentHtml = this.renderAgentFrameworkSections(span.attributes || {});
+                return agentHtml ? `<div class="span-detail-section">${agentHtml}</div>` : '';
+            })()}
+
+            ${(() => {
+                // Exclude keys rendered by GenAI or agent-framework sections
+                // above, so the generic list doesn't duplicate them.
+                const nonGenAi = attrEntries.filter(
+                    ([k]) => !k.startsWith('gen_ai.') && !this._isAgentFrameworkKey(k),
+                );
                 if (nonGenAi.length === 0) return '';
                 return `
                 <div class="span-detail-section">

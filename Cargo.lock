@@ -1973,6 +1973,7 @@ dependencies = [
  "mime_guess",
  "otelite-core",
  "otelite-storage",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

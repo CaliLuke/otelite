@@ -10,7 +10,42 @@ use otelite_core::api::{
     CostSeriesPoint, ErrorRateByModel, ErrorResponse, FinishReasonCount, LatencyStats,
     RetrievalStats, RetryStats, TokenUsageResponse, ToolUsage, TopSpan,
 };
+use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
+
+/// Enrich a batch of TopSpan rows with computed cost fields.
+fn enrich_top_spans(rows: &mut [TopSpan], db: &PricingDatabase) {
+    for row in rows {
+        let usage = TokenUsage {
+            input: row.input_tokens,
+            output: row.output_tokens,
+            cache_creation: row.cache_creation_tokens,
+            cache_read: row.cache_read_tokens,
+        };
+        let result = db.compute_cost(row.model.as_deref(), usage, row.system.as_deref());
+        row.cost = result.cost;
+        row.cost_source = Some(result.source.as_str().to_string());
+        row.cost_reason = result.reason;
+    }
+}
+
+/// Enrich cost-series bucket rows. Cost is computed per-bucket using the
+/// bucket's aggregate token counts and the model that dominates the bucket.
+/// Provider isn't carried at the bucket level so we pass `None` for system —
+/// the fallback table matches on model name alone.
+fn enrich_cost_series(rows: &mut [CostSeriesPoint], db: &PricingDatabase) {
+    for row in rows {
+        let usage = TokenUsage {
+            input: row.input_tokens,
+            output: row.output_tokens,
+            cache_creation: row.cache_creation_tokens,
+            cache_read: row.cache_read_tokens,
+        };
+        let result = db.compute_cost(row.model.as_deref(), usage, None);
+        row.cost = result.cost;
+        row.cost_source = Some(result.source.as_str().to_string());
+    }
+}
 
 /// Query parameters for token usage endpoint
 #[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
@@ -101,7 +136,7 @@ pub async fn get_cost_series(
     }
     let bucket_ns = bucket_seconds.saturating_mul(1_000_000_000);
 
-    let series = state
+    let mut series = state
         .storage
         .query_cost_series(query.start_time, query.end_time, bucket_ns)
         .await
@@ -114,6 +149,9 @@ pub async fn get_cost_series(
                 ))),
             )
         })?;
+
+    let pricing = state.pricing.snapshot().await;
+    enrich_cost_series(&mut series, &pricing.db);
 
     Ok(Json(series))
 }
@@ -146,7 +184,7 @@ pub async fn get_top_spans(
 ) -> Result<Json<Vec<TopSpan>>, (StatusCode, Json<ErrorResponse>)> {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
 
-    let spans = state
+    let mut spans = state
         .storage
         .query_top_spans(query.start_time, query.end_time, limit)
         .await
@@ -159,6 +197,9 @@ pub async fn get_top_spans(
                 ))),
             )
         })?;
+
+    let pricing = state.pricing.snapshot().await;
+    enrich_top_spans(&mut spans, &pricing.db);
 
     Ok(Json(spans))
 }
@@ -423,4 +464,77 @@ pub async fn get_retrieval_stats(
         })?;
 
     Ok(Json(stats))
+}
+
+/// Metadata about the pricing database currently in use by the server.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct PricingMetadata {
+    /// "litellm" when the upstream LiteLLM fetch has succeeded at least once;
+    /// "fallback" when only the hardcoded Claude 4.x table is available.
+    pub source: &'static str,
+    /// Number of entries in the active pricing database (0 for fallback-only).
+    pub entry_count: usize,
+    /// Unix milliseconds of the last successful LiteLLM fetch, if any.
+    pub last_fetched_unix_ms: Option<i64>,
+    /// Unix milliseconds of the last failed LiteLLM fetch, if any.
+    pub last_failed_unix_ms: Option<i64>,
+    /// Date the hardcoded Claude 4.x fallback table was last verified against
+    /// Anthropic's list rates.
+    pub fallback_last_verified: &'static str,
+    /// URL to the LiteLLM source file for attribution / deep-linking.
+    pub source_url: &'static str,
+    /// MIT-license acknowledgement for the LiteLLM data.
+    pub license: &'static str,
+    /// User-facing disclaimer text — safe to render inline.
+    pub disclaimer: &'static str,
+}
+
+/// Return the list of agent-framework recognizers (CrewAI, AutoGen, LangGraph).
+/// The web UI and any other client consumes this to know which attributes to
+/// group under each framework section — keeps the vocabulary in one place.
+#[utoipa::path(
+    get,
+    path = "/api/genai/agent_framework_defs",
+    responses(
+        (status = 200, description = "Agent framework recognizers"),
+    ),
+    tag = "genai"
+)]
+pub async fn get_agent_framework_defs(
+) -> Json<&'static [otelite_core::agent_frameworks::AgentFrameworkRecognizer]> {
+    Json(otelite_core::agent_frameworks::AGENT_FRAMEWORKS)
+}
+
+const PRICING_DISCLAIMER: &str =
+    "Cost figures are best-effort estimates. Per-token rates sourced from the LiteLLM \
+     community pricing database (MIT-licensed, © 2023 Berri AI). When the upstream \
+     fetch is unavailable, a small hand-curated Claude 4.x fallback table is used.";
+
+/// Return metadata describing which pricing database the server is currently
+/// using. The frontend reads this once to render the disclaimer banner and a
+/// source/freshness badge.
+#[utoipa::path(
+    get,
+    path = "/api/genai/pricing_metadata",
+    responses(
+        (status = 200, description = "Pricing metadata", body = PricingMetadata),
+    ),
+    tag = "genai"
+)]
+pub async fn get_pricing_metadata(State(state): State<AppState>) -> Json<PricingMetadata> {
+    let snapshot = state.pricing.snapshot().await;
+    Json(PricingMetadata {
+        source: if snapshot.db.is_litellm() {
+            "litellm"
+        } else {
+            "fallback"
+        },
+        entry_count: snapshot.db.len(),
+        last_fetched_unix_ms: snapshot.last_fetched_unix_ms,
+        last_failed_unix_ms: snapshot.last_failed_unix_ms,
+        fallback_last_verified: otelite_core::pricing::FALLBACK_LAST_VERIFIED,
+        source_url: otelite_core::pricing::LITELLM_SOURCE_URL,
+        license: otelite_core::pricing::LITELLM_LICENSE,
+        disclaimer: PRICING_DISCLAIMER,
+    })
 }

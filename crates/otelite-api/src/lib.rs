@@ -7,6 +7,7 @@
 pub mod api;
 pub mod cache;
 pub mod config;
+pub mod pricing_cache;
 pub mod server;
 pub mod static_files;
 

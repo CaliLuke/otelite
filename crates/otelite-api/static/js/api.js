@@ -185,6 +185,8 @@ class ApiClient {
     async getToolUsage(params = {}) { return this.get('/genai/tool_usage', params); }
     async getRetryStats(params = {}) { return this.get('/genai/retry_stats', params); }
     async getRetrievalStats(params = {}) { return this.get('/genai/retrieval_stats', params); }
+    async getPricingMetadata() { return this.get('/genai/pricing_metadata'); }
+    async getAgentFrameworkDefs() { return this.get('/genai/agent_framework_defs'); }
 
     /**
      * Check health status

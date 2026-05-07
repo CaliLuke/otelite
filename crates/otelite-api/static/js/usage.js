@@ -1,46 +1,13 @@
 // GenAI token usage view
-
-import { api } from './api.js';
+//
+// Costs are computed server-side (see crates/otelite-core/src/pricing.rs). Rows
+// returned by the backend carry `cost`, `cost_source` and optional
+// `cost_reason` fields — this view only renders them.
 
 function formatTs(date) {
     const p = n => String(n).padStart(2, '0');
     return `${date.getFullYear()}-${p(date.getMonth()+1)}-${p(date.getDate())} ` +
            `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
-}
-
-// Claude pricing in USD per 1M tokens. Mirrors CLAUDE_PRICING in logs.js.
-const CLAUDE_PRICING = {
-    'opus':   { input: 15, output: 75, cache_5m: 18.75, cache_1h: 30, cache_read: 1.5 },
-    'sonnet': { input: 3,  output: 15, cache_5m: 3.75,  cache_1h: 6,  cache_read: 0.3 },
-    'haiku':  { input: 1,  output: 5,  cache_5m: 1.25,  cache_1h: 2,  cache_read: 0.1 },
-};
-
-function pricingForModel(model) {
-    if (!model) return null;
-    const m = String(model).toLowerCase();
-    if (m.includes('opus')) return CLAUDE_PRICING.opus;
-    if (m.includes('sonnet')) return CLAUDE_PRICING.sonnet;
-    if (m.includes('haiku')) return CLAUDE_PRICING.haiku;
-    return null;
-}
-
-function computeCost(model, usage) {
-    const p = pricingForModel(model);
-    if (!p || !usage) return null;
-    const c5 = usage.cache_creation?.ephemeral_5m_input_tokens ?? 0;
-    const c1 = usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
-    const cc = (usage.cache_creation_input_tokens ?? 0) - c5 - c1;
-    const cr = usage.cache_read_input_tokens ?? 0;
-    const input = usage.input_tokens ?? 0;
-    const output = usage.output_tokens ?? 0;
-    return (
-        input * p.input +
-        output * p.output +
-        c5 * p.cache_5m +
-        c1 * p.cache_1h +
-        Math.max(cc, 0) * p.cache_5m +
-        cr * p.cache_read
-    ) / 1_000_000;
 }
 
 class UsageView {
@@ -241,7 +208,7 @@ class UsageView {
                 params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
             }
             const bucket = this._chooseBucket();
-            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats] = await Promise.all([
+            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta] = await Promise.all([
                 this.api.getTokenUsage(params),
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
@@ -251,14 +218,15 @@ class UsageView {
                 this.api.getToolUsage(params),
                 this.api.getRetryStats(params),
                 this.api.getRetrievalStats(params).catch(() => null),
+                this.api.getPricingMetadata().catch(() => null),
             ]);
-            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats);
+            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta);
         } catch (err) {
             dataContainer.innerHTML = `<div class="empty-state"><p>Failed to load usage data</p><p class="empty-state-hint">${err.message}</p></div>`;
         }
     }
 
-    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats) {
+    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta) {
         const { summary, by_model, by_system } = data;
 
         if (summary.total_requests === 0) {
@@ -358,7 +326,9 @@ class UsageView {
                 <tbody>${systemRows}</tbody>
             </table>`;
 
-        return summaryCards + costChart + topSpansSection + finishReasonsSection
+        const pricingNotice = this._renderPricingNotice(pricingMeta);
+
+        return pricingNotice + summaryCards + costChart + topSpansSection + finishReasonsSection
             + latencySection + errorRateSection + toolUsageSection + retrievalSection
             + modelTable + systemTable;
     }
@@ -513,16 +483,12 @@ class UsageView {
             return `<h3>Cost over time</h3><div class="empty-state-hint">No cost data in this window.</div>`;
         }
 
-        // Group rows by timestamp bucket, computing cost per row and summing.
+        // Server-enriched: each row has `cost` (null if unknown). Group by
+        // timestamp bucket and sum, tracking per-model breakdown for tooltips.
         const bucketMap = new Map();
         for (const row of costSeries) {
             const ts = row.timestamp;
-            const cost = computeCost(row.model, {
-                input_tokens: row.input_tokens ?? 0,
-                output_tokens: row.output_tokens ?? 0,
-                cache_creation_input_tokens: row.cache_creation_tokens ?? 0,
-                cache_read_input_tokens: row.cache_read_tokens ?? 0,
-            }) ?? 0;
+            const cost = row.cost ?? 0;
             const existing = bucketMap.get(ts) || { timestamp: ts, cost: 0, models: {} };
             existing.cost += cost;
             existing.models[row.model] = (existing.models[row.model] || 0) + cost;
@@ -588,13 +554,11 @@ class UsageView {
         const fmt = n => Number(n).toLocaleString();
 
         const rows = topSpans.map(row => {
-            const cost = computeCost(row.model, {
-                input_tokens: row.input_tokens ?? 0,
-                output_tokens: row.output_tokens ?? 0,
-                cache_creation_input_tokens: row.cache_creation_tokens ?? 0,
-                cache_read_input_tokens: row.cache_read_tokens ?? 0,
-            });
-            const costStr = cost === null ? '—' : `$${cost.toFixed(4)}`;
+            // Cost + source are populated server-side (see crates/otelite-api/src/api/genai.rs).
+            const cost = row.cost ?? null;
+            const costStr = cost === null
+                ? `<span title="${this._esc(row.cost_reason || 'no pricing match')}">—</span>`
+                : `$${cost.toFixed(4)}`;
             const costClass = cost !== null && cost >= 0.01 ? 'top-spans-cost-high' : '';
 
             const tsDate = new Date((row.start_time ?? 0) / 1_000_000);
@@ -666,6 +630,35 @@ class UsageView {
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
+    }
+
+    _renderPricingNotice(meta) {
+        if (!meta) return '';
+        const source = meta.source;
+        const sourceLabel = source === 'litellm'
+            ? `LiteLLM (${meta.entry_count.toLocaleString()} models)`
+            : `hardcoded Claude fallback — last verified ${meta.fallback_last_verified}`;
+        const freshness = source === 'litellm' && meta.last_fetched_unix_ms
+            ? ` · fetched ${this._relativeTime(meta.last_fetched_unix_ms)}`
+            : '';
+        const staleWarning = source !== 'litellm' && meta.last_failed_unix_ms
+            ? ` · <span class="pricing-disclaimer-warn">last LiteLLM fetch failed ${this._relativeTime(meta.last_failed_unix_ms)}</span>`
+            : '';
+        return `
+            <div class="pricing-disclaimer" role="note">
+                <strong>Pricing note:</strong> ${this._esc(meta.disclaimer)}
+                <br>
+                <span>Source: ${this._esc(sourceLabel)}${freshness}${staleWarning}</span>
+                · <a href="${this._esc(meta.source_url)}" target="_blank" rel="noopener">${this._esc(meta.license)}</a>
+            </div>`;
+    }
+
+    _relativeTime(unixMs) {
+        const diffSec = (Date.now() - unixMs) / 1000;
+        if (diffSec < 60) return 'just now';
+        if (diffSec < 3600) return `${Math.round(diffSec / 60)} min ago`;
+        if (diffSec < 86400) return `${Math.round(diffSec / 3600)} h ago`;
+        return `${Math.round(diffSec / 86400)} d ago`;
     }
 }
 

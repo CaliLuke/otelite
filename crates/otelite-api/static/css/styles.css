@@ -2456,3 +2456,31 @@ body {
     margin-top: 0.5rem;
     margin-bottom: 0.25rem;
 }
+
+/* Pricing disclaimer shown at top of the Usage view */
+.pricing-disclaimer {
+    margin-bottom: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--text-secondary);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+.pricing-disclaimer strong {
+    color: var(--text-primary);
+}
+.pricing-disclaimer a {
+    color: var(--accent-color);
+    text-decoration: none;
+}
+.pricing-disclaimer a:hover {
+    text-decoration: underline;
+}
+
+.pricing-disclaimer-warn {
+    color: var(--text-warning, #d97706);
+    font-weight: 500;
+}
