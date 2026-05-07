@@ -78,7 +78,10 @@ class LogsView {
         this.filters.trace_id = null;
         this.filters.session_id = null;
         this.filters.prompt_id = null;
+        this.filters.conversation_id = null;
+        this.filters.model = null;
         this.attrFilters = [];
+        this.observedModels = new Set();
         this.trStart = null;
         this.trEnd = null;
         this.trWindowHours = null;
@@ -147,6 +150,9 @@ class LogsView {
                 <span class="quick-filter-label">Quick:</span>
                 <button id="quick-filter-error-logs" class="btn btn-secondary btn-sm">Errors</button>
                 <button id="llm-view-toggle" class="btn btn-secondary btn-sm hidden">LLM View</button>
+                <select id="model-filter-logs" class="filter-select hidden">
+                    <option value="">All models</option>
+                </select>
                 <span style="width:1px;height:1.2em;background:var(--border-color);display:inline-block;margin:0 0.3rem;"></span>
                 <input type="text" id="attr-key-logs" placeholder="attribute key" class="filter-input attr-filter-key" list="attr-keys-logs-list">
                 <datalist id="attr-keys-logs-list"></datalist>
@@ -269,6 +275,15 @@ class LogsView {
             this._updateLlmToggleButton();
             this.renderLogs();
         });
+
+        const modelSel = document.getElementById('model-filter-logs');
+        if (modelSel) {
+            modelSel.addEventListener('change', (e) => {
+                this.filters.model = e.target.value || null;
+                this.currentPage = 0;
+                this.loadLogs();
+            });
+        }
     }
 
     _syncDateInputs(suffix) {
@@ -341,8 +356,15 @@ class LogsView {
                 params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
             }
 
+            // Server only supports '=' and '!='. Forward those; keep exists/!exists client-side.
+            const serverAttrs = this.attrFilters.filter(f => f.op === '=' || f.op === '!=');
+            if (serverAttrs.length > 0) {
+                params.attrs = JSON.stringify(serverAttrs);
+            }
+
             const response = await this.apiClient.getLogs(params);
             this.logs = response.logs;
+            this._updateObservedModels();
             this.hasGenAiData = this.logs.some(log => {
                 if (log.attributes && Object.keys(log.attributes).some(k => k.startsWith('gen_ai.'))) {
                     return true;
@@ -373,9 +395,10 @@ class LogsView {
         // Populate attr key autocomplete from loaded data
         this._updateAttrKeyDatalist();
 
-        // Apply client-side attribute filters
-        const displayLogs = this.attrFilters.length > 0
-            ? this.logs.filter(log => this._matchesAttrFilters(log))
+        // Server applies '=' and '!='. Only exists/!exists remain client-side.
+        const clientFilters = this.attrFilters.filter(f => f.op === 'exists' || f.op === '!exists');
+        const displayLogs = clientFilters.length > 0
+            ? this.logs.filter(log => this._matchesAttrFilters(log, clientFilters))
             : this.logs;
 
         const summaryHtml = this.renderPromptSummary();
@@ -483,6 +506,7 @@ class LogsView {
                     ${log.trace_id ? `<div class="log-field"><strong>Trace ID:</strong> <a class="trace-link" onclick="window.app.navigateToTrace('${this.escapeHtml(log.trace_id)}');return false;" href="#" title="View trace">${this.escapeHtml(log.trace_id)}</a></div>` : ''}
                     ${attrs['session.id'] ? `<div class="log-field"><strong>Session:</strong> <a class="trace-link" onclick="window.app.navigateToLogsBySession('${this.escapeHtml(attrs['session.id'])}');return false;" href="#" title="View all logs for this session">${this.escapeHtml(attrs['session.id'])}</a></div>` : ''}
                     ${attrs['prompt.id'] ? `<div class="log-field"><strong>Prompt:</strong> <a class="trace-link" onclick="window.app.navigateToLogsByPrompt('${this.escapeHtml(attrs['prompt.id'])}');return false;" href="#" title="View all logs for this prompt turn">${this.escapeHtml(attrs['prompt.id'])}</a></div>` : ''}
+                    ${attrs['gen_ai.conversation.id'] ? `<div class="log-field"><strong>Conversation:</strong> <a class="trace-link" onclick="window.app.navigateToLogsByConversation('${this.escapeHtml(attrs['gen_ai.conversation.id'])}');return false;" href="#" title="View all logs for this conversation">${this.escapeHtml(attrs['gen_ai.conversation.id'])}</a></div>` : ''}
                     ${log.span_id ? `<div class="log-field"><strong>Span ID:</strong> ${log.span_id}</div>` : ''}
                     ${llm ? this.renderLlmUsage(llm) : ''}
                     ${Object.keys(attrs).length > 0 ? `
@@ -619,7 +643,7 @@ class LogsView {
     }
 
     renderAttributeMap(attributes) {
-        const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version', 'session.id', 'prompt.id']);
+        const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version', 'session.id', 'prompt.id', 'gen_ai.conversation.id']);
         const entries = Object.entries(attributes).filter(([k]) => !SKIP_ATTRS.has(k));
         if (entries.length === 0) {
             return '';
@@ -858,6 +882,8 @@ class LogsView {
             trace_id: null,
             session_id: null,
             prompt_id: null,
+            conversation_id: null,
+            model: null,
         };
         this.attrFilters = [];
         this._renderAttrChips();
@@ -868,6 +894,8 @@ class LogsView {
         document.getElementById('resource-filter').value = '';
         document.getElementById('search-logs').value = '';
         document.getElementById('tr-preset-logs').value = '';
+        const modelSel = document.getElementById('model-filter-logs');
+        if (modelSel) modelSel.value = '';
         this._syncDateInputs('logs');
         this.currentPage = 0;
         this.loadLogs();
@@ -1028,10 +1056,10 @@ class LogsView {
     /**
      * Test a single log entry against all active attrFilters
      */
-    _matchesAttrFilters(log) {
+    _matchesAttrFilters(log, filters = this.attrFilters) {
         const attrs = log.attributes || {};
         const resAttrs = (log.resource && log.resource.attributes) ? log.resource.attributes : {};
-        for (const f of this.attrFilters) {
+        for (const f of filters) {
             const val = f.key in attrs ? attrs[f.key] : (f.key in resAttrs ? resAttrs[f.key] : undefined);
             switch (f.op) {
                 case '=':
@@ -1049,6 +1077,37 @@ class LogsView {
             }
         }
         return true;
+    }
+
+    /**
+     * Scan loaded logs for observed models (gen_ai.request.model and api_response_body.model)
+     * and refresh the model-filter dropdown.
+     */
+    _updateObservedModels() {
+        for (const log of this.logs) {
+            const attrs = log.attributes || {};
+            const req = attrs['gen_ai.request.model'];
+            const resp = attrs['gen_ai.response.model'];
+            if (req) this.observedModels.add(String(req));
+            if (resp) this.observedModels.add(String(resp));
+            if (log.body === 'claude_code.api_response_body' && attrs.body) {
+                try {
+                    const parsed = JSON.parse(attrs.body);
+                    if (parsed && parsed.model) this.observedModels.add(String(parsed.model));
+                } catch { /* ignore */ }
+            }
+        }
+        const sel = document.getElementById('model-filter-logs');
+        if (!sel) return;
+        if (this.observedModels.size === 0) {
+            sel.classList.add('hidden');
+            return;
+        }
+        sel.classList.remove('hidden');
+        const current = this.filters.model || '';
+        const sorted = Array.from(this.observedModels).sort();
+        sel.innerHTML = '<option value="">All models</option>' +
+            sorted.map(m => `<option value="${this.escapeHtml(m)}"${m === current ? ' selected' : ''}>${this.escapeHtml(m)}</option>`).join('');
     }
 
     /**

@@ -46,6 +46,19 @@ pub struct LogsQuery {
     #[serde(default)]
     pub prompt_id: Option<String>,
 
+    /// Filter by gen_ai.conversation.id attribute
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+
+    /// Filter by model (matches gen_ai.request.model)
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// JSON-encoded list of attribute filters: [{"key":"x","op":"=","value":"y"}, ...]
+    /// Supported ops: "=" (Equal), "!=" (NotEqual)
+    #[serde(default)]
+    pub attrs: Option<String>,
+
     /// Maximum number of results (default: 100, max: 1000)
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -120,6 +133,53 @@ pub async fn list_logs(
                 operator: Operator::Equal,
                 value: QueryValue::String(pid.clone()),
             });
+        }
+    }
+
+    if let Some(ref cid) = params.conversation_id {
+        if !cid.is_empty() {
+            query.predicates.push(QueryPredicate {
+                field: "gen_ai.conversation.id".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String(cid.clone()),
+            });
+        }
+    }
+
+    if let Some(ref model) = params.model {
+        if !model.is_empty() {
+            query.predicates.push(QueryPredicate {
+                field: "gen_ai.request.model".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String(model.clone()),
+            });
+        }
+    }
+
+    if let Some(ref attrs_json) = params.attrs {
+        if !attrs_json.is_empty() {
+            #[derive(serde::Deserialize)]
+            struct AttrFilter {
+                key: String,
+                op: String,
+                value: Option<String>,
+            }
+            if let Ok(filters) = serde_json::from_str::<Vec<AttrFilter>>(attrs_json) {
+                for f in filters {
+                    let op = match f.op.as_str() {
+                        "=" => Operator::Equal,
+                        "!=" => Operator::NotEqual,
+                        _ => continue,
+                    };
+                    if let Some(v) = f.value {
+                        query.predicates.push(QueryPredicate {
+                            field: f.key,
+                            operator: op,
+                            value: QueryValue::String(v),
+                        });
+                    }
+                }
+            }
         }
     }
 

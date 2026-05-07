@@ -21,9 +21,12 @@ class TracesView {
             search: '',
             startTime: null,
             endTime: null,
-            sessionId: null
+            sessionId: null,
+            conversation_id: null,
+            model: null
         };
         this.attrFilters = [];
+        this.observedModels = new Set();
         this.trStart = null;
         this.trEnd = null;
         this.trWindowHours = null;
@@ -83,6 +86,9 @@ class TracesView {
             <div class="attr-filter-bar" id="attr-filter-bar-traces">
                 <span class="quick-filter-label">Quick:</span>
                 <button id="quick-filter-errors-traces" class="btn btn-secondary btn-sm">Errors only</button>
+                <select id="model-filter-traces" class="filter-select hidden">
+                    <option value="">All models</option>
+                </select>
                 <span style="width:1px;height:1.2em;background:var(--border-color);display:inline-block;margin:0 0.3rem;"></span>
                 <input type="text" id="attr-key-traces" placeholder="attribute key" class="filter-input attr-filter-key" list="attr-keys-traces-list">
                 <datalist id="attr-keys-traces-list"></datalist>
@@ -203,6 +209,15 @@ class TracesView {
             this._renderAttrChips();
             this.renderTraces();
         });
+
+        const modelSel = document.getElementById('model-filter-traces');
+        if (modelSel) {
+            modelSel.addEventListener('change', (e) => {
+                this.filters.model = e.target.value || null;
+                this.currentPage = 0;
+                this.loadTraces();
+            });
+        }
     }
 
     _syncDateInputs(suffix) {
@@ -296,8 +311,18 @@ class TracesView {
                 params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
             }
 
+            // Server only supports '=' and '!=' for attrs. Forward those; keep exists/!exists client-side.
+            // 'error' stays synthetic client-side.
+            const serverAttrs = this.attrFilters.filter(f =>
+                (f.op === '=' || f.op === '!=') && f.key !== 'error'
+            );
+            if (serverAttrs.length > 0) {
+                params.attrs = JSON.stringify(serverAttrs);
+            }
+
             const response = await this.apiClient.getTraces(params);
             this.traces = response.traces;
+            this._updateObservedModels();
             this.renderTraces();
             this.updatePagination(response.total);
         } catch (error) {
@@ -315,9 +340,12 @@ class TracesView {
         // Populate attr key autocomplete from loaded data
         this._updateAttrKeyDatalist();
 
-        // Apply client-side attribute filters
-        const displayTraces = this.attrFilters.length > 0
-            ? this.traces.filter(trace => this._matchesAttrFilters(trace))
+        // Server applies '=' and '!=' (except synthetic 'error'). Remaining filters apply client-side.
+        const clientFilters = this.attrFilters.filter(f =>
+            f.op === 'exists' || f.op === '!exists' || f.key === 'error'
+        );
+        const displayTraces = clientFilters.length > 0
+            ? this.traces.filter(trace => this._matchesAttrFilters(trace, clientFilters))
             : this.traces;
 
         if (displayTraces.length === 0) {
@@ -599,17 +627,13 @@ class TracesView {
 
     renderSpanAttributes(attributes) {
         const SKIP_ATTRS = new Set(['duration_ms', 'otel.scope.name', 'otel.scope.version']);
-        const entries = Object.entries(attributes ?? {}).filter(([k]) => !SKIP_ATTRS.has(k));
+        const entries = Object.entries(attributes ?? {})
+            .filter(([k]) => !SKIP_ATTRS.has(k) && !k.startsWith('gen_ai.'));
         if (entries.length === 0) {
             return '';
         }
 
-        // Check for GenAI attributes
-        const genaiInfo = this.extractGenAiInfo(attributes);
-        const genaiSection = genaiInfo ? this.renderGenAiInfo(genaiInfo) : '';
-
         return `
-            ${genaiSection}
             <div class="span-attributes">
                 ${entries.map(([key, value]) => {
                     if (key === 'session.id') {
@@ -624,6 +648,61 @@ class TracesView {
                 }).join('')}
             </div>
         `;
+    }
+
+    /**
+     * Render GenAI attribute sections (request / response / usage / tool / agent + standalone)
+     * before the generic attribute list. Returns '' if no gen_ai.* attrs present.
+     */
+    renderGenAiSections(attributes) {
+        if (!attributes) return '';
+        const hasGenAi = Object.keys(attributes).some(k => k.startsWith('gen_ai.'));
+        if (!hasGenAi) return '';
+
+        const pick = (prefix, exclude = []) => Object.entries(attributes)
+            .filter(([k]) => k.startsWith(prefix) && !exclude.some(e => k.startsWith(e)))
+            .map(([k, v]) => [k.slice(prefix.length), v]);
+
+        const sections = [
+            { title: 'Request', prefix: 'gen_ai.request.' },
+            { title: 'Response', prefix: 'gen_ai.response.' },
+            { title: 'Usage', prefix: 'gen_ai.usage.' },
+            { title: 'Tool', prefix: 'gen_ai.tool.' },
+            { title: 'Agent', prefix: 'gen_ai.agent.' },
+        ];
+
+        const renderRow = (k, v) => {
+            // Intercept conversation id to add clickable link
+            if (k === 'conversation.id') {
+                return `<div class="genai-section-row"><span class="genai-section-key">${this.escapeHtml(k)}</span><span class="genai-section-val"><a class="trace-link" onclick="window.app.navigateToTracesByConversation('${this.escapeHtml(String(v))}');return false;" href="#">${this.escapeHtml(String(v))}</a></span></div>`;
+            }
+            return `<div class="genai-section-row"><span class="genai-section-key">${this.escapeHtml(k)}</span><span class="genai-section-val">${this.escapeHtml(String(v))}</span></div>`;
+        };
+
+        const sectionsHtml = sections.map(s => {
+            const entries = pick(s.prefix);
+            if (entries.length === 0) return '';
+            return `<div class="genai-section"><h6>GenAI ${s.title}</h6><div class="genai-section-grid">${entries.map(([k, v]) => renderRow(k, v)).join('')}</div></div>`;
+        }).join('');
+
+        // Standalone top-level gen_ai.* keys (operation.name, provider.name, system, conversation.id, agent.id)
+        const op = attributes['gen_ai.operation.name'];
+        const system = attributes['gen_ai.provider.name'] || attributes['gen_ai.system'];
+        const conv = attributes['gen_ai.conversation.id'];
+        const agentId = attributes['gen_ai.agent.id'];
+        const standalone = [];
+        if (op) standalone.push(['operation', op]);
+        if (system) standalone.push(['system', system]);
+        if (conv) standalone.push(['conversation.id', conv]);
+        if (agentId && !Object.keys(attributes).some(k => k.startsWith('gen_ai.agent.'))) {
+            // only add here if not covered by the Agent section
+            standalone.push(['agent.id', agentId]);
+        }
+        const standaloneHtml = standalone.length > 0
+            ? `<div class="genai-section"><h6>GenAI</h6><div class="genai-section-grid">${standalone.map(([k, v]) => renderRow(k, v)).join('')}</div></div>`
+            : '';
+
+        return standaloneHtml + sectionsHtml;
     }
 
     /**
@@ -825,7 +904,9 @@ class TracesView {
             search: '',
             startTime: null,
             endTime: null,
-            sessionId: null
+            sessionId: null,
+            conversation_id: null,
+            model: null
         };
         this.attrFilters = [];
         this._renderAttrChips();
@@ -837,6 +918,8 @@ class TracesView {
         document.getElementById('traces-resource-filter').value = '';
         document.getElementById('search-traces').value = '';
         document.getElementById('tr-preset-traces').value = '';
+        const modelSel = document.getElementById('model-filter-traces');
+        if (modelSel) modelSel.value = '';
         this._syncDateInputs('traces');
         this.currentPage = 0;
         this.loadTraces();
@@ -1142,11 +1225,19 @@ class TracesView {
 
             ${genaiInfo ? `<div class="span-detail-section">${this.renderGenAiInfo(genaiInfo)}</div>` : ''}
 
-            ${attrEntries.length > 0 ? `
+            ${(() => {
+                const sectionsHtml = this.renderGenAiSections(span.attributes || {});
+                return sectionsHtml ? `<div class="span-detail-section">${sectionsHtml}</div>` : '';
+            })()}
+
+            ${(() => {
+                const nonGenAi = attrEntries.filter(([k]) => !k.startsWith('gen_ai.'));
+                if (nonGenAi.length === 0) return '';
+                return `
                 <div class="span-detail-section">
-                    <h5>Attributes (${attrEntries.length})</h5>
+                    <h5>Attributes (${nonGenAi.length})</h5>
                     <div class="span-attrs-grid">
-                        ${attrEntries.map(([k, v]) => {
+                        ${nonGenAi.map(([k, v]) => {
                             const isLong = String(v).length > 80;
                             return `<div class="span-attr-row${isLong ? ' ' : ''}" ${isLong ? 'style="grid-column:1/-1"' : ''}>
                                 <span class="span-attr-key">${this.escapeHtml(k)}</span>
@@ -1154,8 +1245,8 @@ class TracesView {
                             </div>`;
                         }).join('')}
                     </div>
-                </div>
-            ` : ''}
+                </div>`;
+            })()}
 
             ${span.events && span.events.length > 0 ? `
                 <div class="span-detail-section">
@@ -1247,6 +1338,27 @@ class TracesView {
             const eventTime = new Date(event.timestamp / 1000000);
             const offsetMs = ((event.timestamp - spanStartTime) / 1000000).toFixed(2);
 
+            const chatMatch = event.name && event.name.match(/^gen_ai\.(user|assistant|system|tool)\.message$/);
+            const isChoice = event.name === 'gen_ai.choice';
+            if (chatMatch || isChoice) {
+                const role = chatMatch ? chatMatch[1] : 'choice';
+                const attrs = event.attributes || {};
+                let content = attrs.content ?? attrs['gen_ai.event.content'] ?? attrs.message;
+                if (content === undefined || content === null) {
+                    content = JSON.stringify(attrs, null, 2);
+                }
+                const contentStr = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+                return `
+                    <div class="chat-bubble chat-bubble-${role}">
+                        <div class="chat-bubble-header">
+                            <span class="chat-bubble-role">${this.escapeHtml(role)}</span>
+                            <span class="chat-bubble-time">${formatTs(eventTime)} (+${offsetMs}ms)</span>
+                        </div>
+                        <div class="chat-bubble-content">${this.escapeHtml(contentStr)}</div>
+                    </div>
+                `;
+            }
+
             return `
                 <div class="span-event">
                     <div class="span-event-header">
@@ -1327,13 +1439,39 @@ class TracesView {
     }
 
     /**
+     * Scan loaded traces for observed models and refresh the model-filter dropdown.
+     * Trace list payload typically carries trace.models or trace.attributes; fall back to both.
+     */
+    _updateObservedModels() {
+        for (const trace of this.traces) {
+            if (Array.isArray(trace.models)) {
+                for (const m of trace.models) if (m) this.observedModels.add(String(m));
+            }
+            const attrs = trace.attributes || {};
+            if (attrs['gen_ai.request.model']) this.observedModels.add(String(attrs['gen_ai.request.model']));
+            if (attrs['gen_ai.response.model']) this.observedModels.add(String(attrs['gen_ai.response.model']));
+        }
+        const sel = document.getElementById('model-filter-traces');
+        if (!sel) return;
+        if (this.observedModels.size === 0) {
+            sel.classList.add('hidden');
+            return;
+        }
+        sel.classList.remove('hidden');
+        const current = this.filters.model || '';
+        const sorted = Array.from(this.observedModels).sort();
+        sel.innerHTML = '<option value="">All models</option>' +
+            sorted.map(m => `<option value="${this.escapeHtml(m)}"${m === current ? ' selected' : ''}>${this.escapeHtml(m)}</option>`).join('');
+    }
+
+    /**
      * Test a single trace entry against all active attrFilters.
      * Handles the synthetic 'error' key via has_errors, and falls back to
      * trace.attributes for other keys.
      */
-    _matchesAttrFilters(trace) {
+    _matchesAttrFilters(trace, filters = this.attrFilters) {
         const attrs = trace.attributes || {};
-        for (const f of this.attrFilters) {
+        for (const f of filters) {
             // Synthetic 'error' key maps to has_errors boolean
             if (f.key === 'error') {
                 const traceErrStr = String(trace.has_errors);

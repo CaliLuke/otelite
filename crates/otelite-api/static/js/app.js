@@ -119,6 +119,22 @@ class App {
         v.loadLogs();
     }
 
+    navigateToLogsByConversation(conversationId) {
+        this.switchView('logs');
+        const v = this.views.logs;
+        v.filters.conversation_id = conversationId;
+        v.currentPage = 0;
+        v.loadLogs();
+    }
+
+    navigateToTracesByConversation(conversationId) {
+        this.switchView('traces');
+        const v = this.views.traces;
+        v.filters.conversation_id = conversationId;
+        v.currentPage = 0;
+        v.loadTraces();
+    }
+
     /**
      * Dispatch custom event for view change
      */

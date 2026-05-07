@@ -2217,3 +2217,75 @@ body {
 .footer a:hover {
     text-decoration: underline;
 }
+
+/* GenAI organized span-detail sections */
+.genai-section {
+    margin: 0.4rem 0;
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-secondary);
+    border-left: 3px solid #8b5cf6;
+    border-radius: 3px;
+}
+.genai-section h6 {
+    margin: 0 0 0.3rem 0;
+    font-size: 0.8rem;
+    color: #8b5cf6;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.genai-section-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.15rem 1rem;
+}
+.genai-section-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.82rem;
+    padding: 0.1rem 0;
+    border-bottom: 1px dotted var(--border-color);
+}
+.genai-section-key {
+    color: var(--text-secondary);
+}
+.genai-section-val {
+    font-family: 'Courier New', monospace;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+    text-align: right;
+}
+
+/* Chat bubbles in span events timeline */
+.chat-bubble {
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    border-left: 3px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+.chat-bubble-user     { border-left-color: #3b82f6; }
+.chat-bubble-assistant{ border-left-color: #10b981; }
+.chat-bubble-system   { border-left-color: #6b7280; }
+.chat-bubble-tool     { border-left-color: #f59e0b; }
+.chat-bubble-choice   { border-left-color: #8b5cf6; }
+.chat-bubble-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    margin-bottom: 0.3rem;
+}
+.chat-bubble-role {
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+.chat-bubble-time {
+    color: var(--text-secondary);
+    font-family: 'Courier New', monospace;
+}
+.chat-bubble-content {
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    font-family: inherit;
+    color: var(--text-primary);
+}
