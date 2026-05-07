@@ -552,10 +552,16 @@ pub fn query_token_usage(
     Vec<otelite_core::api::SystemUsage>,
 )> {
     // Build WHERE clause for time filtering.
-    // Accept spans that have either gen_ai.provider.name (new) or gen_ai.system (deprecated).
+    // A span is considered an LLM span if it carries any recognised GenAI/LLM provider
+    // marker — covers OTel GenAI semantic conventions (current and deprecated), the
+    // llm.* prefix used by OpenInference / OpenLLMetry, or a raw request model name
+    // (OpenAI SDK instrumentations sometimes set only `llm.request.model`).
     let mut where_clause = String::from(
         "WHERE (json_extract(attributes, '$.\"gen_ai.system\"') IS NOT NULL \
-             OR json_extract(attributes, '$.\"gen_ai.provider.name\"') IS NOT NULL)",
+             OR json_extract(attributes, '$.\"gen_ai.provider.name\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"llm.system\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"llm.vendor\"') IS NOT NULL \
+             OR json_extract(attributes, '$.\"llm.request.model\"') IS NOT NULL)",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -568,17 +574,46 @@ pub fn query_token_usage(
         params.push(Box::new(end));
     }
 
+    // Token attribute selectors.
+    // Each COALESCE walks a priority-ordered list of attribute names so we pick up
+    // metrics emitted by instrumentations that don't fully follow the OTel GenAI
+    // semantic convention: OTel-standard names first, then older / alternative
+    // spellings (llm.*), then OpenAI's raw API names, then Claude Code's flat names.
+    let input_expr = "COALESCE(\
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.input_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.prompt_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"llm.usage.prompt_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"llm.token_count.prompt\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"prompt_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"input_tokens\"') AS INTEGER))";
+    let output_expr = "COALESCE(\
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.output_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.completion_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"llm.usage.completion_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"llm.token_count.completion\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"completion_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"output_tokens\"') AS INTEGER))";
+    let cache_creation_expr = "COALESCE(\
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation.input_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation_input_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"cache_creation_input_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"cache_creation_tokens\"') AS INTEGER))";
+    let cache_read_expr = "COALESCE(\
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read.input_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read_input_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"cache_read_input_tokens\"') AS INTEGER), \
+        CAST(json_extract(attributes, '$.\"cache_read_tokens\"') AS INTEGER))";
+
     // Query overall summary
     let summary_query = format!(
         "SELECT
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.input_tokens\"') AS INTEGER)), 0) as total_input,
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.output_tokens\"') AS INTEGER)), 0) as total_output,
+            COALESCE(SUM({input_expr}), 0) as total_input,
+            COALESCE(SUM({output_expr}), 0) as total_output,
             COUNT(*) as total_requests,
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_creation.input_tokens\"') AS INTEGER)), 0) as cache_creation,
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.cache_read.input_tokens\"') AS INTEGER)), 0) as cache_read
+            COALESCE(SUM({cache_creation_expr}), 0) as cache_creation,
+            COALESCE(SUM({cache_read_expr}), 0) as cache_read
         FROM spans
-        {}",
-        where_clause
+        {where_clause}"
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -595,19 +630,24 @@ pub fn query_token_usage(
         })
         .map_err(|e| StorageError::QueryError(format!("Failed to query token summary: {}", e)))?;
 
-    // Query by model
+    // Query by model — fall back across common model-attribute spellings.
+    let model_expr = "COALESCE(\
+        json_extract(attributes, '$.\"gen_ai.request.model\"'), \
+        json_extract(attributes, '$.\"gen_ai.response.model\"'), \
+        json_extract(attributes, '$.\"llm.request.model\"'), \
+        json_extract(attributes, '$.\"llm.model_name\"'), \
+        json_extract(attributes, '$.\"model\"'))";
     let model_query = format!(
         "SELECT
-            json_extract(attributes, '$.\"gen_ai.request.model\"') as model,
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.input_tokens\"') AS INTEGER)), 0) as input_tokens,
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.output_tokens\"') AS INTEGER)), 0) as output_tokens,
+            {model_expr} as model,
+            COALESCE(SUM({input_expr}), 0) as input_tokens,
+            COALESCE(SUM({output_expr}), 0) as output_tokens,
             COUNT(*) as requests
         FROM spans
-        {}
+        {where_clause}
         GROUP BY model
         HAVING model IS NOT NULL
-        ORDER BY input_tokens + output_tokens DESC",
-        where_clause
+        ORDER BY input_tokens + output_tokens DESC"
     );
 
     let mut stmt = conn
@@ -629,19 +669,23 @@ pub fn query_token_usage(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| StorageError::QueryError(format!("Failed to parse model results: {}", e)))?;
 
-    // Query by system — COALESCE prefers the new gen_ai.provider.name attribute
+    // Query by system/provider — accept the OTel-standard names plus llm.* variants.
+    let system_expr = "COALESCE(\
+        json_extract(attributes, '$.\"gen_ai.provider.name\"'), \
+        json_extract(attributes, '$.\"gen_ai.system\"'), \
+        json_extract(attributes, '$.\"llm.system\"'), \
+        json_extract(attributes, '$.\"llm.vendor\"'))";
     let system_query = format!(
         "SELECT
-            COALESCE(json_extract(attributes, '$.\"gen_ai.provider.name\"'), json_extract(attributes, '$.\"gen_ai.system\"')) as system,
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.input_tokens\"') AS INTEGER)), 0) as input_tokens,
-            COALESCE(SUM(CAST(json_extract(attributes, '$.\"gen_ai.usage.output_tokens\"') AS INTEGER)), 0) as output_tokens,
+            {system_expr} as system,
+            COALESCE(SUM({input_expr}), 0) as input_tokens,
+            COALESCE(SUM({output_expr}), 0) as output_tokens,
             COUNT(*) as requests
         FROM spans
-        {}
+        {where_clause}
         GROUP BY system
         HAVING system IS NOT NULL
-        ORDER BY input_tokens + output_tokens DESC",
-        where_clause
+        ORDER BY input_tokens + output_tokens DESC"
     );
 
     let mut stmt = conn

@@ -1244,8 +1244,8 @@ class TracesView {
      */
     renderSpanEvents(events, spanStartTime) {
         return events.map(event => {
-            const eventTime = new Date(event.time / 1000000);
-            const offsetMs = ((event.time - spanStartTime) / 1000000).toFixed(2);
+            const eventTime = new Date(event.timestamp / 1000000);
+            const offsetMs = ((event.timestamp - spanStartTime) / 1000000).toFixed(2);
 
             return `
                 <div class="span-event">
