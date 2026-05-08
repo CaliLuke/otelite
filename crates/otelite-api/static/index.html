@@ -183,10 +183,12 @@ with tracer.start_as_current_span("my-operation"):
 
                         <details class="config-example">
                             <summary><strong>Mellea — build predictable AI without guesswork</strong></summary>
-                            <pre><code>pip install "mellea[telemetry]"
+                            <pre><code>uv pip install "mellea[telemetry]"
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-export MELLEA_TRACE_APPLICATION=true MELLEA_TRACE_BACKEND=true
-export MELLEA_METRICS_ENABLED=true MELLEA_METRICS_OTLP=true</code></pre>
+export MELLEA_TRACE_APPLICATION=true
+export MELLEA_TRACE_BACKEND=true
+export MELLEA_METRICS_ENABLED=true
+export MELLEA_METRICS_OTLP=true</code></pre>
                             <p class="config-doc-link">Mellea is a Python library for writing generative programs — structured outputs, verifiable requirements, automatic retries. Backend spans follow OTel GenAI semconv so the Usage page and trace waterfall work out of the box. See <a href="https://mellea.ai" target="_blank" rel="noopener">mellea.ai</a> · <a href="https://docs.mellea.ai/evaluation-and-observability/telemetry" target="_blank" rel="noopener">telemetry docs</a> · <a href="https://github.com/generative-computing/mellea" target="_blank" rel="noopener">github.com/generative-computing/mellea</a>.</p>
                         </details>
 
