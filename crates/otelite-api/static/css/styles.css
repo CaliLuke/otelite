@@ -2197,6 +2197,12 @@ body {
 }
 
 /* Usage view */
+#usage-container {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+}
+
 .usage-summary-cards {
     display: flex;
     gap: 1rem;
