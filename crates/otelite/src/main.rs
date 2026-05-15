@@ -346,7 +346,7 @@ enum MetricsCommands {
         #[arg(long)]
         label: Vec<String>,
 
-        /// Maximum number of results
+        /// Maximum number of results (server enforces a cap of 1000)
         #[arg(long, short = 'n', default_value = "50")]
         limit: Option<u32>,
 

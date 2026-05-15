@@ -28,6 +28,9 @@ serde_json = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 
+# Mutex without poison semantics (prevents a single panic from crashing the service)
+parking_lot = "0.12"
+
 # Time handling
 chrono = { workspace = true }
 

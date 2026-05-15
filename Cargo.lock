@@ -2052,6 +2052,7 @@ dependencies = [
  "chrono",
  "dirs",
  "otelite-core",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",

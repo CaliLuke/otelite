@@ -35,7 +35,7 @@ pub struct MetricsQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
-    /// Maximum number of metrics to return
+    /// Maximum number of metrics to return (capped at 1000)
     pub limit: Option<usize>,
     /// Offset for pagination
     pub offset: Option<usize>,
@@ -107,7 +107,7 @@ pub async fn list_metrics(
         params.end_time = Some(end);
     }
     if let Some(limit) = query.limit {
-        params.limit = Some(limit);
+        params.limit = Some(limit.min(1000)); // cap to prevent runaway queries
     }
 
     if let Some(ref sid) = query.session_id {
@@ -201,9 +201,9 @@ pub async fn list_metrics(
         }
     }
 
-    // Apply pagination manually
+    // Apply pagination manually (limit capped at 1000, matching traces endpoint)
     let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(100);
+    let limit = query.limit.unwrap_or(100).min(1000);
 
     let metrics: Vec<_> = metrics.into_iter().skip(offset).take(limit).collect();
 
@@ -313,9 +313,9 @@ pub async fn list_metric_names(
     path = "/api/metrics/aggregate",
     params(AggregateQuery),
     responses(
-        (status = 200, description = "Aggregated metric result", body = AggregateResponse),
+        (status = 200, description = "Aggregated metric result (count=0 if metric exists but no data in the requested window)", body = AggregateResponse),
         (status = 400, description = "Invalid aggregation function", body = ErrorResponse),
-        (status = 404, description = "Metric not found", body = ErrorResponse),
+        (status = 404, description = "Metric name has never been ingested", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "metrics"
@@ -360,10 +360,37 @@ pub async fn aggregate_metrics(
         .collect();
 
     if metrics.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::not_found(format!("Metric '{}'", query.name))),
-        ));
+        // Check whether the metric name has ever been ingested (outside the time window).
+        // 404 = never seen; 200 + zero aggregate = exists but no data in the requested window.
+        let all_params = QueryParams::default();
+        let exists = state
+            .storage
+            .query_metrics(&all_params)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::storage_error(format!(
+                        "check metric existence: {}",
+                        e
+                    ))),
+                )
+            })?
+            .iter()
+            .any(|m| m.name == query.name);
+        if !exists {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!("Metric '{}'", query.name))),
+            ));
+        }
+        return Ok(Json(AggregateResponse {
+            name: query.name,
+            function: query.function,
+            result: 0.0,
+            count: 0,
+            buckets: None,
+        }));
     }
 
     // Perform aggregation based on function

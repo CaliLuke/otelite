@@ -27,6 +27,26 @@ have to work around), not implementation detail.
   a runtime"** — `create_storage` was spinning a fresh tokio runtime inside
   `#[tokio::main]`. Now async, awaited normally.
 
+- **Service no longer crashes on storage mutex poison.** Any panic inside a
+  database operation previously poisoned a `std::sync::Mutex`, causing every
+  subsequent call to fail with a `PoisonError` and terminate the process.
+  Replaced with `parking_lot::Mutex` (no poison semantics) across all 38 call
+  sites in the storage layer.
+- **Retention purge no longer blocks queries.** The nightly purge task
+  previously held the main database connection lock for the entire delete run
+  (potentially millions of rows). It now opens a dedicated connection, so reads
+  and writes continue unaffected during purge.
+- **`GET /api/metrics/aggregate` returns 200 instead of 404 when the time
+  window is empty.** Previously, requesting an aggregate for a metric that
+  exists but has no data in the selected window returned 404, making it
+  impossible to distinguish "unknown metric" from "no data here". Now returns
+  200 with `count: 0, result: 0.0`; 404 is reserved for metric names that
+  have never been ingested.
+- **`GET /api/metrics?limit=N` is now bounded.** Passing an arbitrarily large
+  `?limit=` value could exhaust server memory. Capped at 1000 (matching the
+  traces endpoint). The CLI `--limit` flag and the API field description now
+  document this cap.
+
 ### Added
 
 - **CLI smoke tests** (`crates/otelite/tests/cli_smoke_test.rs`) — every

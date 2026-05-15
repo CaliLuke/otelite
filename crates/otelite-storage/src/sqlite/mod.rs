@@ -7,9 +7,10 @@ use otelite_core::storage::{
     PurgeAllStats, PurgeOptions, QueryParams, Result, StorageBackend, StorageError, StorageStats,
 };
 use otelite_core::telemetry::{LogRecord, Metric, Span};
+use parking_lot::Mutex;
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub mod purge;
 pub mod reader;
@@ -71,17 +72,17 @@ impl StorageBackend for SqliteBackend {
 
         schema::initialize_schema(&conn).map_err(StorageError::from)?;
 
-        *self.conn.lock().unwrap() = Some(conn);
+        *self.conn.lock() = Some(conn);
 
         if self.config.retention_days > 0 {
-            self.start_purge_scheduler();
+            self.start_purge_scheduler(db_path);
         }
 
         Ok(())
     }
 
     async fn write_log(&self, log: &LogRecord) -> Result<()> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::WriteError("Database not initialized".to_string()))?;
@@ -90,7 +91,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn write_span(&self, span: &Span) -> Result<()> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::WriteError("Database not initialized".to_string()))?;
@@ -99,7 +100,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn write_metric(&self, metric: &Metric) -> Result<()> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::WriteError("Database not initialized".to_string()))?;
@@ -108,7 +109,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn query_logs(&self, params: &QueryParams) -> Result<Vec<LogRecord>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -117,7 +118,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn query_spans(&self, params: &QueryParams) -> Result<Vec<Span>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -130,7 +131,7 @@ impl StorageBackend for SqliteBackend {
         params: &QueryParams,
         trace_limit: usize,
     ) -> Result<Vec<Span>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -139,7 +140,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn query_metrics(&self, params: &QueryParams) -> Result<Vec<Metric>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -148,7 +149,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn query_latest_metrics(&self, params: &QueryParams) -> Result<Vec<Metric>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -157,7 +158,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn stats(&self) -> Result<StorageStats> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -172,7 +173,7 @@ impl StorageBackend for SqliteBackend {
             .await
             .map_err(StorageError::from)?;
 
-        let mut conn_guard = self.conn.lock().unwrap();
+        let mut conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_mut()
             .ok_or_else(|| StorageError::WriteError("Database not initialized".to_string()))?;
@@ -209,7 +210,7 @@ impl StorageBackend for SqliteBackend {
             .await
             .map_err(StorageError::from)?;
 
-        let mut conn_guard = self.conn.lock().unwrap();
+        let mut conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_mut()
             .ok_or_else(|| StorageError::WriteError("Database not initialized".to_string()))?;
@@ -245,7 +246,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn distinct_resource_keys(&self, signal: &str) -> Result<Vec<String>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -263,7 +264,7 @@ impl StorageBackend for SqliteBackend {
         Vec<otelite_core::api::ModelUsage>,
         Vec<otelite_core::api::SystemUsage>,
     )> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -278,7 +279,7 @@ impl StorageBackend for SqliteBackend {
         bucket_ns: i64,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::CostSeriesPoint>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -295,7 +296,7 @@ impl StorageBackend for SqliteBackend {
         sort_by: otelite_core::api::TopSpanSort,
         truncated_only: bool,
     ) -> Result<Vec<otelite_core::api::TopSpan>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -310,7 +311,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         limit: usize,
     ) -> Result<Vec<otelite_core::api::SessionCostRow>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -324,7 +325,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         limit: usize,
     ) -> Result<Vec<otelite_core::api::ConversationCostRow>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -339,7 +340,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::FinishReasonCount>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -353,7 +354,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::LatencyStats>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -367,7 +368,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::ErrorRateByModel>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -381,7 +382,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         limit: usize,
     ) -> Result<Vec<otelite_core::api::ToolUsage>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -394,7 +395,7 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<otelite_core::api::RetryStats> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -408,7 +409,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         top_queries_limit: usize,
     ) -> Result<otelite_core::api::RetrievalStats> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -423,7 +424,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::TruncationRateByModel>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -436,7 +437,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::CacheHitRateByModel>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -448,7 +449,7 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<otelite_core::api::RequestParamProfile> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -460,7 +461,7 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<otelite_core::api::ConversationDepthStats> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -473,7 +474,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         bucket_secs: u64,
     ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -487,7 +488,7 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::ErrorTypeBreakdown>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -499,7 +500,7 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<Vec<otelite_core::api::ModelDriftPair>> {
-        let conn_guard = self.conn.lock().unwrap();
+        let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
@@ -507,11 +508,11 @@ impl StorageBackend for SqliteBackend {
     }
 
     async fn close(&mut self) -> Result<()> {
-        if let Some(handle) = self.purge_handle.lock().unwrap().take() {
+        if let Some(handle) = self.purge_handle.lock().take() {
             handle.abort();
         }
 
-        let mut conn_guard = self.conn.lock().unwrap();
+        let mut conn_guard = self.conn.lock();
         if let Some(conn) = conn_guard.take() {
             conn.close()
                 .map_err(|(_, e)| StorageError::DatabaseError(e.to_string()))?;
@@ -521,12 +522,25 @@ impl StorageBackend for SqliteBackend {
 }
 
 impl SqliteBackend {
-    fn start_purge_scheduler(&self) {
-        let conn = self.conn.clone();
+    fn start_purge_scheduler(&self, db_path: PathBuf) {
         let config = self.config.clone();
         let purge_lock = self.purge_lock.clone();
 
         let handle = tokio::spawn(async move {
+            // Dedicated connection: purge never competes with the main conn mutex.
+            let mut conn = match Connection::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("Purge scheduler: failed to open DB connection: {}", e);
+                    return;
+                },
+            };
+            if let Err(e) =
+                conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            {
+                tracing::warn!("Purge scheduler: failed to set WAL mode: {}", e);
+            }
+
             loop {
                 let now = chrono::Local::now();
                 let next_purge = if now.hour() < 2 {
@@ -545,38 +559,35 @@ impl SqliteBackend {
                 tokio::time::sleep(duration).await;
 
                 if let Ok(_guard) = purge_lock.try_lock().await {
-                    let mut conn_guard = conn.lock().unwrap();
-                    if let Some(conn_ref) = conn_guard.as_mut() {
-                        let cutoff = chrono::Utc::now()
-                            - chrono::Duration::days(config.retention_days as i64);
-                        let cutoff_timestamp = cutoff.timestamp_nanos_opt().unwrap_or(0);
+                    let cutoff =
+                        chrono::Utc::now() - chrono::Duration::days(config.retention_days as i64);
+                    let cutoff_timestamp = cutoff.timestamp_nanos_opt().unwrap_or(0);
 
-                        if let Ok(record) = purge::purge_old_data(
-                            conn_ref,
-                            cutoff_timestamp,
-                            10000,
-                            &[
-                                crate::SignalType::Logs,
-                                crate::SignalType::Traces,
-                                crate::SignalType::Metrics,
-                            ],
-                            false,
-                        ) {
-                            tracing::info!(
-                                "Automatic purge completed: {} logs, {} spans, {} metrics deleted",
-                                record.logs_deleted,
-                                record.spans_deleted,
-                                record.metrics_deleted
-                            );
+                    if let Ok(record) = purge::purge_old_data(
+                        &mut conn,
+                        cutoff_timestamp,
+                        10000,
+                        &[
+                            crate::SignalType::Logs,
+                            crate::SignalType::Traces,
+                            crate::SignalType::Metrics,
+                        ],
+                        false,
+                    ) {
+                        tracing::info!(
+                            "Automatic purge completed: {} logs, {} spans, {} metrics deleted",
+                            record.logs_deleted,
+                            record.spans_deleted,
+                            record.metrics_deleted
+                        );
 
-                            let _ = purge::vacuum(conn_ref);
-                        }
+                        let _ = purge::vacuum(&mut conn);
                     }
                 }
             }
         });
 
-        *self.purge_handle.lock().unwrap() = Some(handle);
+        *self.purge_handle.lock() = Some(handle);
     }
 }
 
@@ -591,7 +602,7 @@ mod tests {
         let config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
 
         let backend = SqliteBackend::new(config);
-        assert!(backend.conn.lock().unwrap().is_none());
+        assert!(backend.conn.lock().is_none());
     }
 
     #[tokio::test]
@@ -602,7 +613,7 @@ mod tests {
         let mut backend = SqliteBackend::new(config);
         let result = backend.initialize().await;
         assert!(result.is_ok());
-        assert!(backend.conn.lock().unwrap().is_some());
+        assert!(backend.conn.lock().is_some());
     }
 
     #[tokio::test]
