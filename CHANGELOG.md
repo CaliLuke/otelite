@@ -11,6 +11,10 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Internal
+
+- `.fastembed_cache/` ignored by git (local artifact from RAM/embeddings tooling).
+
 ## [0.1.35] - 2026-05-15
 
 ### Internal
@@ -19,6 +23,19 @@ have to work around), not implementation detail.
   automatically and fails the release if `[Unreleased]` is empty. Stops
   shipped versions from going undocumented (see `scripts/rotate-changelog.sh`,
   `AGENTS.md` → Changelog discipline).
+
+## [0.1.34] - 2026-05-15
+
+### Changed
+
+- **CHANGELOG backfilled** — v0.0.1 through v0.1.32 now have user-facing release
+  notes. Previously most releases shipped with no notes; entries reconstructed
+  from git history, written from the user's perspective.
+
+### Internal
+
+- `AGENTS.md` Definition of Done now requires a `CHANGELOG.md` `[Unreleased]`
+  entry for user-visible changes (gate enforced from v0.1.35 onward).
 
 ## [0.1.33] - 2026-05-15
 

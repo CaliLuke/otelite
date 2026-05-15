@@ -67,3 +67,4 @@ Users/
 # Claude Code local settings (each contributor manages their own)
 .claude/
 .beads/
+.fastembed_cache/
