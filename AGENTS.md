@@ -130,9 +130,38 @@ An issue is complete when ALL of these are true:
 1. Acceptance criteria in the issue are met
 2. All quality gates pass (build, test, clippy, fmt)
 3. New production code has new tests
-4. Changes are committed with a clear message
-5. `git push` succeeded
-6. Issue is commented and closed
+4. **`CHANGELOG.md` `[Unreleased]` section is updated** if the change is user-visible
+   (see "Changelog discipline" below)
+5. Changes are committed with a clear message
+6. `git push` succeeded
+7. Issue is commented and closed
+
+## Changelog discipline
+
+`CHANGELOG.md` is the user-facing record of what otelite can do. Keep it current.
+
+**When to add an entry**: any change a user can observe — new CLI flags, new API
+endpoints, new TUI panels, web UI features, fixed bugs they were hitting, schema
+or behaviour changes. Skip entries for: pure refactors, internal-only test
+changes, CI/release plumbing, dependency bumps with no behaviour change.
+
+**How to write entries**:
+
+- Describe what the user can now *do* (or no longer has to work around), not the
+  implementation. "Add `query_cache_hit_rate`" is bad; "See per-model cache hit
+  rate to spot prompt-caching wins" is good.
+- One bullet per user-visible change. Group related polish under one bullet.
+- Use `### Added` / `### Changed` / `### Fixed` / `### Removed` / `### Internal`
+  per [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+- Flag breaking changes prominently.
+
+**Workflow**:
+
+1. While working on an issue, append entries under `## [Unreleased]` in `CHANGELOG.md`.
+2. At release time, the version-bump commit renames `[Unreleased]` to
+   `[X.Y.Z] - YYYY-MM-DD` and creates a fresh empty `[Unreleased]` block above it.
+3. Never let a release ship with no changelog entry — if one is empty, write a
+   one-line "internal" note explaining why (e.g. "release plumbing only").
 
 ## Session End
 
