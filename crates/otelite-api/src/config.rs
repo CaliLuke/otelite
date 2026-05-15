@@ -26,6 +26,12 @@ pub struct DashboardConfig {
 
     /// Auto-refresh interval in seconds (0 = disabled)
     pub auto_refresh_interval_secs: u64,
+
+    /// OTLP gRPC receiver port (shown in the web UI status popover)
+    pub otlp_grpc_port: u16,
+
+    /// OTLP HTTP receiver port (shown in the web UI status popover)
+    pub otlp_http_port: u16,
 }
 
 impl Default for DashboardConfig {
@@ -38,6 +44,8 @@ impl Default for DashboardConfig {
             default_page_size: 100,
             cache_size_mb: 10,
             auto_refresh_interval_secs: 1,
+            otlp_grpc_port: 4317,
+            otlp_http_port: 4318,
         }
     }
 }
@@ -58,6 +66,13 @@ impl DashboardConfig {
     /// Set storage path
     pub fn with_storage_path(mut self, path: impl Into<String>) -> Self {
         self.storage_path = path.into();
+        self
+    }
+
+    /// Set the OTLP receiver ports (shown in the web UI status popover)
+    pub fn with_otlp_ports(mut self, grpc_port: u16, http_port: u16) -> Self {
+        self.otlp_grpc_port = grpc_port;
+        self.otlp_http_port = http_port;
         self
     }
 }

@@ -90,6 +90,32 @@ fn usage_flag_combinations_parse() {
     }
 }
 
+/// `--since` with an invalid format must be rejected at parse time with a
+/// friendly message, not a panic or a cryptic internal error.
+#[test]
+fn usage_since_invalid_format_rejected() {
+    let invalid_values = ["invalid", "abc", "1x", "24", "h", ""];
+    for val in invalid_values {
+        otelite()
+            .args(["usage", "--since", val, "--help"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("Invalid time duration"));
+    }
+}
+
+/// `--since` with valid formats must be accepted.
+#[test]
+fn usage_since_valid_formats_accepted() {
+    let valid_values = ["1h", "24h", "7d", "30d", "15m", "1d"];
+    for val in valid_values {
+        otelite()
+            .args(["usage", "--since", val, "--help"])
+            .assert()
+            .success();
+    }
+}
+
 /// Global flags must be accepted on any subcommand without panicking.
 #[test]
 fn global_flags_accepted_on_subcommands() {

@@ -8,11 +8,25 @@ use otelite_storage::StorageBackend;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn validate_since(s: &str) -> std::result::Result<String, String> {
+    let (digits, suffix) = s.split_at(s.len().saturating_sub(1));
+    let valid_suffix = matches!(suffix, "h" | "d" | "m");
+    let valid_digits = !digits.is_empty() && digits.parse::<u64>().is_ok();
+    if valid_suffix && valid_digits {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "Invalid time duration '{}'. Use a number followed by 'h' (hours), 'd' (days), or 'm' (minutes), e.g. '1h', '24h', '7d', '30d'",
+            s
+        ))
+    }
+}
+
 /// Display token usage statistics for GenAI/LLM spans
 #[derive(Debug, Args)]
 pub struct UsageCommand {
     /// Time range to query (e.g., "1h", "24h", "7d", "30d")
-    #[arg(long, default_value = "24h")]
+    #[arg(long, default_value = "24h", value_parser = validate_since)]
     pub since: String,
 
     /// Filter by model name (e.g., "gpt-4", "claude-sonnet-4")

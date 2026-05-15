@@ -284,8 +284,8 @@ class App {
             <div class="popover-divider"></div>
             ${statsHtml}
             <div class="popover-divider"></div>
-            <div class="popover-row"><span class="popover-label">gRPC</span><span class="popover-value">:4317</span></div>
-            <div class="popover-row"><span class="popover-label">HTTP</span><span class="popover-value">:4318</span></div>
+            <div class="popover-row"><span class="popover-label">gRPC</span><span class="popover-value">:${health.otlp_grpc_port || 4317}</span></div>
+            <div class="popover-row"><span class="popover-label">HTTP</span><span class="popover-value">:${health.otlp_http_port || 4318}</span></div>
             <div class="popover-divider"></div>
             <div class="popover-row popover-action-row"><button class="popover-danger-btn" onclick="app.clearAllData()">Clear all data</button></div>`;
     }

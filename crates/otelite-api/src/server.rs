@@ -133,6 +133,9 @@ pub struct AppState {
     pub pricing: PricingCache,
     /// Time at which the server started (for uptime calculation)
     pub start_time: Arc<Instant>,
+    /// OTLP receiver ports, populated from DashboardConfig
+    pub otlp_grpc_port: u16,
+    pub otlp_http_port: u16,
 }
 
 /// Cache for query results
@@ -188,6 +191,8 @@ impl DashboardServer {
             cache: QueryCache::new(),
             pricing,
             start_time: Arc::new(Instant::now()),
+            otlp_grpc_port: config.otlp_grpc_port,
+            otlp_http_port: config.otlp_http_port,
         };
 
         Self {

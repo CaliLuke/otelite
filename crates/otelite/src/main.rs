@@ -607,7 +607,8 @@ async fn run_dashboard(addr: SocketAddr, storage_path: Option<PathBuf>) -> Resul
 
     let config = DashboardConfig::default()
         .with_bind_address(addr)
-        .with_storage_path(data_dir_str);
+        .with_storage_path(data_dir_str)
+        .with_otlp_ports(grpc_addr.port(), http_addr.port());
 
     let server = DashboardServer::new(config, storage);
     server

@@ -33,6 +33,8 @@ fn build_test_router(storage: Arc<dyn StorageBackend>) -> Router {
         cache: QueryCache::default(),
         pricing: otelite_api::pricing_cache::PricingCache::new(),
         start_time: Arc::new(Instant::now()),
+        otlp_grpc_port: 4317,
+        otlp_http_port: 4318,
     };
 
     Router::new()

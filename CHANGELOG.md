@@ -15,6 +15,19 @@ have to work around), not implementation detail.
 
 ### Fixed
 
+- **Web: Status popover now shows the actual configured OTLP ports.** Previously
+  the gRPC (`:4317`) and HTTP (`:4318`) values in the status popover were
+  hardcoded strings. They are now read from the `/api/health` response, so if
+  you run `otelite serve` with non-default ports the popover will reflect them.
+- **CLI: `otelite usage --since invalid` now gives a clear error at parse time.**
+  Previously the invalid format was silently accepted by clap and only failed
+  later with a generic message. Now rejected immediately with
+  `"Invalid time duration '…'. Use '1h', '24h', '7d', '30d'"` — before any
+  network or storage work begins. Two smoke tests (`usage_since_invalid_format_rejected`,
+  `usage_since_valid_formats_accepted`) guard this.
+
+### Fixed
+
 - **Web: API errors now surface as readable messages instead of an empty view.**
   Failed fetches (5xx, network errors) now show the server's error detail (e.g.
   "HTTP 500: database not initialized") rather than leaving the panel blank.
