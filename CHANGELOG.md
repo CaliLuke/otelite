@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-05-15
+
 ### Changed
 
 - **Docs catch up with shipped features** — `docs/cli-reference.md` `otelite usage` section
