@@ -70,16 +70,6 @@ pub struct UsageCommand {
     /// Show request→response model pairs (detect silent provider rerouting)
     #[arg(long)]
     pub model_drift: bool,
-
-    /// Output format
-    #[arg(long, value_enum, default_value = "table")]
-    pub format: OutputFormat,
-}
-
-#[derive(Debug, Clone, clap::ValueEnum)]
-pub enum OutputFormat {
-    Table,
-    Json,
 }
 
 // ── serialisable output types (used for --format json) ───────────────────────
@@ -166,7 +156,11 @@ async fn fetch_pricing() -> PricingDatabase {
 
 impl UsageCommand {
     /// Execute the usage command
-    pub async fn execute(&self, storage: Arc<dyn StorageBackend>) -> Result<()> {
+    pub async fn execute(
+        &self,
+        storage: Arc<dyn StorageBackend>,
+        format: crate::config::OutputFormat,
+    ) -> Result<()> {
         let (start_time, end_time) = parse_time_range(&self.since)?;
 
         let (summary, by_model_raw, by_system_raw) = storage
@@ -435,8 +429,9 @@ impl UsageCommand {
             None
         };
 
-        match self.format {
-            OutputFormat::Json => {
+        use crate::config::OutputFormat;
+        match format {
+            OutputFormat::Json | OutputFormat::JsonCompact => {
                 let output = UsageOutput {
                     summary,
                     by_model,
@@ -453,15 +448,17 @@ impl UsageCommand {
                     error_types,
                     model_drift,
                 };
+                let json = if matches!(format, OutputFormat::JsonCompact) {
+                    serde_json::to_string(&output)
+                } else {
+                    serde_json::to_string_pretty(&output)
+                };
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&output).map_err(|e| Error::ApiError(format!(
-                        "JSON serialization failed: {}",
-                        e
-                    )))?
+                    json.map_err(|e| Error::ApiError(format!("JSON serialization failed: {}", e)))?
                 );
             },
-            OutputFormat::Table => {
+            OutputFormat::Pretty => {
                 println!("\n{}", format_header(&self.since));
                 println!();
 

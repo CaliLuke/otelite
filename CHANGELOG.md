@@ -11,6 +11,27 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`otelite usage` no longer panics on every invocation.** A clap flag
+  collision between the global `--format` and a duplicate local one in the
+  `usage` subcommand caused `thread 'main' panicked: Mismatch between
+  definition and access of 'format'` on any `otelite usage ...` call. All the
+  analytics flags shipped in v0.1.33 (`--latency`, `--tools`, `--error-types`,
+  `--model-drift`, etc.) were unreachable from the CLI as a result. Removed
+  the duplicate flag and route through the global `--format` (which now
+  accepts `pretty` / `json` / `json-compact` for `usage` like other commands).
+- **`otelite usage` no longer panics with "Cannot start a runtime from within
+  a runtime"** — `create_storage` was spinning a fresh tokio runtime inside
+  `#[tokio::main]`. Now async, awaited normally.
+
+### Added
+
+- **CLI smoke tests** (`crates/otelite/tests/cli_smoke_test.rs`) — every
+  subcommand and every `usage` flag combination must parse and `--help` must
+  exit 0. These would have caught both regressions above immediately. Runs in
+  ~0.5s in CI.
+
 ## [0.1.37] - 2026-05-15
 
 ### Changed

@@ -490,8 +490,8 @@ async fn run_cli() -> Result<()> {
         Some(Commands::Traces { command }) => handle_traces_command(command, &config).await,
         Some(Commands::Metrics { command }) => handle_metrics_command(command, &config).await,
         Some(Commands::Usage(cmd)) => {
-            let storage = create_storage(&config)?;
-            cmd.execute(storage).await?;
+            let storage = create_storage(&config).await?;
+            cmd.execute(storage, config.format).await?;
             Ok(())
         },
         Some(Commands::Tui {
@@ -513,13 +513,13 @@ async fn run_cli() -> Result<()> {
 }
 
 /// Create storage backend from config
-fn create_storage(_config: &Config) -> Result<Arc<dyn StorageBackend>> {
+async fn create_storage(_config: &Config) -> Result<Arc<dyn StorageBackend>> {
     let storage_config = StorageConfig::default();
 
     let mut storage = SqliteBackend::new(storage_config);
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(storage.initialize())
+    storage
+        .initialize()
+        .await
         .map_err(|e| Error::ApiError(format!("Failed to initialize storage: {}", e)))?;
 
     Ok(Arc::new(storage))
