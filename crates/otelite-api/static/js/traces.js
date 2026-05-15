@@ -374,6 +374,8 @@ class TracesView {
      * Load traces from API
      */
     async loadTraces() {
+        document.getElementById('traces-list').innerHTML =
+            '<div class="loading-state"><span class="spinner-sm"></span> Loading…</div>';
         try {
             // Load recognizer defs in parallel with the first trace query.
             this._ensureAgentFrameworkDefs();
@@ -408,7 +410,7 @@ class TracesView {
             this._prefillDateInputsFromTraces(this.traces);
         } catch (error) {
             console.error('Failed to load traces:', error);
-            this.showError('Failed to load traces');
+            this.showError(`Failed to load traces: ${error.message}`);
         }
     }
 

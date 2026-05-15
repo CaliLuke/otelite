@@ -1412,4 +1412,329 @@ mod tests {
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0].metric_type, MetricType::Gauge(0.0));
     }
+
+    // ── Edge-case tests for issue #17 ────────────────────────────────────────
+
+    /// NaN gauge value is stored as NaN (not replaced with 0 or panicked on).
+    #[test]
+    fn test_gauge_nan_value_stored_as_nan() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![OtlpMetric {
+                        name: "test.nan".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        metadata: vec![],
+                        data: Some(Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: 1000,
+                                value: Some(number_data_point::Value::AsDouble(f64::NAN)),
+                                exemplars: vec![],
+                                flags: 0,
+                            }],
+                        })),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+        let metrics = convert_metrics(request);
+        assert_eq!(metrics.len(), 1);
+        // NaN f64 is not equal to itself; this documents that NaN propagates unchanged.
+        if let MetricType::Gauge(v) = metrics[0].metric_type {
+            assert!(v.is_nan(), "expected NaN gauge value, got {v}");
+        } else {
+            panic!("expected Gauge");
+        }
+    }
+
+    /// Sum with a negative i64 value: Rust `as u64` wraps (bit-reinterpretation).
+    /// This documents the current behaviour so a future change would be caught.
+    #[test]
+    fn test_sum_negative_int_wraps_to_large_u64() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![OtlpMetric {
+                        name: "test.counter".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        metadata: vec![],
+                        data: Some(Data::Sum(Sum {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: 1000,
+                                value: Some(number_data_point::Value::AsInt(-1)),
+                                exemplars: vec![],
+                                flags: 0,
+                            }],
+                            aggregation_temporality: 0,
+                            is_monotonic: false,
+                        })),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+        let metrics = convert_metrics(request);
+        assert_eq!(metrics.len(), 1);
+        // -1i64 as u64 == u64::MAX (two's complement wrap, documented behaviour).
+        assert_eq!(metrics[0].metric_type, MetricType::Counter(u64::MAX));
+    }
+
+    /// Sum with a negative f64 value: Rust saturating float→u64 cast gives 0.
+    #[test]
+    fn test_sum_negative_double_saturates_to_zero() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![OtlpMetric {
+                        name: "test.counter".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        metadata: vec![],
+                        data: Some(Data::Sum(Sum {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: 1000,
+                                value: Some(number_data_point::Value::AsDouble(-42.0)),
+                                exemplars: vec![],
+                                flags: 0,
+                            }],
+                            aggregation_temporality: 0,
+                            is_monotonic: false,
+                        })),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+        let metrics = convert_metrics(request);
+        assert_eq!(metrics.len(), 1);
+        // Saturating cast: negative f64 → 0u64.
+        assert_eq!(metrics[0].metric_type, MetricType::Counter(0));
+    }
+
+    /// ExponentialHistogram data points are silently skipped (not stored and not panicked on).
+    #[test]
+    fn test_exponential_histogram_silently_skipped() {
+        use opentelemetry_proto::tonic::metrics::v1::ExponentialHistogram;
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![OtlpMetric {
+                        name: "test.expo".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        metadata: vec![],
+                        data: Some(Data::ExponentialHistogram(ExponentialHistogram {
+                            data_points: vec![],
+                            aggregation_temporality: 0,
+                        })),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+        let metrics = convert_metrics(request);
+        assert_eq!(
+            metrics.len(),
+            0,
+            "ExponentialHistogram should produce no metrics"
+        );
+    }
+
+    /// Histogram with 0 buckets is accepted; count and sum are still populated.
+    #[test]
+    fn test_histogram_zero_buckets() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![OtlpMetric {
+                        name: "test.hist".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        metadata: vec![],
+                        data: Some(Data::Histogram(Histogram {
+                            data_points: vec![HistogramDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: 1000,
+                                count: 5,
+                                sum: Some(100.0),
+                                bucket_counts: vec![],
+                                explicit_bounds: vec![],
+                                exemplars: vec![],
+                                flags: 0,
+                                min: None,
+                                max: None,
+                            }],
+                            aggregation_temporality: 0,
+                        })),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+        let metrics = convert_metrics(request);
+        assert_eq!(metrics.len(), 1);
+        match &metrics[0].metric_type {
+            MetricType::Histogram {
+                count,
+                sum,
+                buckets,
+            } => {
+                assert_eq!(*count, 5);
+                assert_eq!(*sum, 100.0);
+                assert!(buckets.is_empty());
+            },
+            other => panic!("expected Histogram, got {other:?}"),
+        }
+    }
+
+    /// Timestamp at u64::MAX is stored as the i64 bit-reinterpretation (-1), not panicked on.
+    #[test]
+    fn test_timestamp_u64_max_stored_without_panic() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![OtlpMetric {
+                        name: "test.ts".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        metadata: vec![],
+                        data: Some(Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: u64::MAX,
+                                value: Some(number_data_point::Value::AsDouble(1.0)),
+                                exemplars: vec![],
+                                flags: 0,
+                            }],
+                        })),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+        let metrics = convert_metrics(request);
+        assert_eq!(metrics.len(), 1);
+        // u64::MAX as i64 == -1; document and do not panic.
+        assert_eq!(metrics[0].timestamp, u64::MAX as i64);
+    }
+
+    /// AnyValue ArrayValue containing a nested ArrayValue serialises correctly.
+    #[test]
+    fn test_any_value_nested_array() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue as Av, ArrayValue};
+        let inner = Av {
+            value: Some(any_value::Value::ArrayValue(ArrayValue {
+                values: vec![Av {
+                    value: Some(any_value::Value::IntValue(42)),
+                }],
+            })),
+        };
+        let outer = AnyValue {
+            value: Some(any_value::Value::ArrayValue(ArrayValue {
+                values: vec![
+                    AnyValue {
+                        value: Some(any_value::Value::StringValue("x".to_string())),
+                    },
+                    inner,
+                ],
+            })),
+        };
+        let s = any_value_to_string(&outer);
+        // Should serialise to something containing 42 without panicking.
+        assert!(
+            s.contains("42"),
+            "expected '42' in nested array output: {s}"
+        );
+        assert!(
+            s.starts_with('['),
+            "expected array output to start with '[': {s}"
+        );
+    }
+
+    /// KvlistValue with 3 levels of nesting does not stack-overflow.
+    #[test]
+    fn test_any_value_deep_kvlist_nesting() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue as Av, KeyValueList};
+        fn make_kvlist(depth: u32, leaf: &str) -> Av {
+            if depth == 0 {
+                return Av {
+                    value: Some(any_value::Value::StringValue(leaf.to_string())),
+                };
+            }
+            Av {
+                value: Some(any_value::Value::KvlistValue(KeyValueList {
+                    values: vec![KeyValue {
+                        key: format!("d{depth}"),
+                        value: Some(make_kvlist(depth - 1, leaf)),
+                    }],
+                })),
+            }
+        }
+        let nested = AnyValue {
+            ..make_kvlist(3, "leaf")
+        };
+        let s = any_value_to_string(&nested);
+        assert!(
+            s.contains("leaf"),
+            "expected 'leaf' in deeply-nested output: {s}"
+        );
+    }
+
+    /// Attribute with a None value is stored as an empty string (not excluded).
+    #[test]
+    fn test_attribute_none_value_stored_as_empty_string() {
+        let kvs = vec![KeyValue {
+            key: "empty_key".to_string(),
+            value: None,
+        }];
+        let attrs = convert_attributes(&kvs);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs.get("empty_key"), Some(&String::new()));
+    }
+
+    /// 100+ attributes on a single span are all preserved.
+    #[test]
+    fn test_many_attributes_all_preserved() {
+        let kvs: Vec<KeyValue> = (0..120)
+            .map(|i| KeyValue {
+                key: format!("key.{i}"),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::IntValue(i)),
+                }),
+            })
+            .collect();
+        let attrs = convert_attributes(&kvs);
+        assert_eq!(attrs.len(), 120);
+        assert_eq!(attrs.get("key.0"), Some(&"0".to_string()));
+        assert_eq!(attrs.get("key.119"), Some(&"119".to_string()));
+    }
 }

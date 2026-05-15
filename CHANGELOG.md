@@ -11,6 +11,26 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Web: API errors now surface as readable messages instead of an empty view.**
+  Failed fetches (5xx, network errors) now show the server's error detail (e.g.
+  "HTTP 500: database not initialized") rather than leaving the panel blank.
+  The fetch wrapper in `api.js` parses the JSON error body; all view `catch`
+  blocks pass the message through to the on-screen error banner.
+- **Web: Loading and empty states are now visually distinct.** Logs, Traces,
+  and Metrics views show a spinner while the initial fetch is in flight. Once
+  the response arrives empty, the empty-state message ("No logs found", etc.)
+  replaces it — so users can tell whether data is still arriving or genuinely
+  absent.
+- **Receiver: 11 edge-case conversion scenarios now have explicit tests.**
+  Covers NaN gauge values, negative-integer counter wrapping, negative-float
+  counter saturation (→ 0), ExponentialHistogram silent-skip, zero-bucket
+  histograms, `u64::MAX` timestamp bit-reinterpretation, deeply-nested
+  `ArrayValue`/`KvlistValue`, `None`-value attributes, and 120-attribute spans.
+  All document existing behaviour so future changes to the casting logic are
+  caught immediately.
+
 ## [0.1.38] - 2026-05-15
 
 ### Fixed

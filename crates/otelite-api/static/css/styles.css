@@ -781,6 +781,27 @@ body {
     }
 }
 
+/* Loading State (inline, used by view containers before data arrives) */
+.loading-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    height: 100%;
+    color: var(--text-secondary);
+    padding: 2rem;
+}
+
+.spinner-sm {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent-color);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
 /* Utility Classes */
 .hidden {
     display: none !important;

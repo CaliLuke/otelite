@@ -363,6 +363,8 @@ class LogsView {
      * Load logs from API
      */
     async loadLogs() {
+        document.getElementById('logs-list').innerHTML =
+            '<div class="loading-state"><span class="spinner-sm"></span> Loading…</div>';
         try {
             const params = {
                 limit: this.pageSize,
@@ -402,7 +404,7 @@ class LogsView {
             this._prefillDateInputsFromRows(this.logs, 'timestamp');
         } catch (error) {
             console.error('Failed to load logs:', error);
-            this.showError('Failed to load logs');
+            this.showError(`Failed to load logs: ${error.message}`);
         }
     }
 

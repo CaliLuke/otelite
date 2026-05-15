@@ -79,6 +79,8 @@ class MetricsView {
     }
 
     async loadMetrics() {
+        document.getElementById('metrics-sidebar').innerHTML =
+            '<div class="loading-state"><span class="spinner-sm"></span> Loading…</div>';
         try {
             const params = { limit: 500 };
             if (this.resourceFilter) params.resource = this.resourceFilter;
@@ -96,7 +98,7 @@ class MetricsView {
         } catch (error) {
             console.error('Failed to load metrics:', error);
             document.getElementById('metrics-sidebar').innerHTML =
-                '<div class="empty-state">Failed to load metrics</div>';
+                `<div class="error-message">Failed to load metrics: ${error.message}</div>`;
         }
     }
 
@@ -481,7 +483,7 @@ class MetricsView {
             }
         } catch (error) {
             console.error('Failed to load timeseries:', error);
-            this.showError('Failed to load timeseries data');
+            this.showError(`Failed to load timeseries: ${error.message}`);
         }
     }
 
