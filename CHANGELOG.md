@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-05-15
+
 ### Internal
 
 - `.fastembed_cache/` ignored by git (local artifact from RAM/embeddings tooling).
