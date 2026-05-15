@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-05-15
+
 ### Internal
 
 - Release CI now rotates `CHANGELOG.md` `[Unreleased]` → `[X.Y.Z] - DATE`
