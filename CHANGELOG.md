@@ -11,6 +11,14 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs catch up with shipped features** — `docs/cli-reference.md` `otelite usage` section
+  now lists all 16 flags (was 5) with a panel table and worked examples;
+  `docs/tui-quickstart.md` gains a Usage view section with panel descriptions and the `u` /
+  `r` keybindings; `README.md` GenAI feature blurb surfaces the analytics range (cost, TTFT,
+  error types, tool success, model drift, etc.) instead of just "token counts".
+
 ## [0.1.36] - 2026-05-15
 
 ### Internal

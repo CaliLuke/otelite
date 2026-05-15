@@ -182,22 +182,63 @@ otelite metrics list
 
 ---
 
-## Usage (GenAI/LLM token summary)
+## Usage (GenAI/LLM analytics)
 
 ```bash
 otelite usage --since 24h
 ```
 
-Shows a summary of token consumption across all GenAI/LLM spans received in the time window.
+Shows token consumption, cost, and analytics across all GenAI/LLM spans received in the time
+window. Without flags, you get a token + cost summary. Flags below add per-model breakdowns
+and analytics panels.
 
-Flags:
+### Common flags
 
 ```text
 --since <duration>    Time range: 1h, 24h, 7d, 30d  [default: 24h]
---by-model            Break down by model name
---by-system           Break down by provider (openai, anthropic, …)
 --model <name>        Filter to one model
 --system <name>       Filter to one provider
+--by-model            Break down by model name
+--by-system           Break down by provider (openai, anthropic, …)
+--by-session          Break down by session.id
+--top <N>             Limit to top-N rows (cost / latency)
+--format <fmt>        Output format: table | json  [default: table]
+```
+
+### Analytics panels
+
+Each flag below adds one extra panel to the output. Stack them freely.
+
+```text
+--latency             p50/p95/p99 latency, TTFT p50/p95, derived tok/s, ctx size,
+                      out/in ratio per model
+--truncation          Truncation rate per model (responses ending with finish_reason=length)
+--cache-rate          Prompt-cache hit rate per model — spot prompt-caching wins
+--request-params      Distribution of temperature, top_p, max_tokens per model
+--conv-depth          Conversation depth distribution (turns per session)
+--tools               Per-tool call counts, success rate, errors, avg duration
+--error-types         Error bucketing: rate_limit / timeout / context_length /
+                      content_filter / auth / server_error / unknown
+--model-drift         Request → response model pairs (detect silent provider rerouting)
+```
+
+### Examples
+
+```bash
+# Token + cost summary, broken down per model
+otelite usage --since 24h --by-model
+
+# Full latency picture for the last 7 days, including TTFT
+otelite usage --since 7d --latency
+
+# Why are calls failing?
+otelite usage --since 1h --error-types
+
+# Did the provider serve a different model than I asked for?
+otelite usage --model-drift
+
+# Top 10 most expensive sessions, JSON for piping
+otelite usage --by-session --top 10 --format json | jq
 ```
 
 ---

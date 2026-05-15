@@ -179,15 +179,64 @@ Esc       → clears active filter
 
 ---
 
+## Usage View (`u`)
+
+The Usage tab gives you LLM cost and analytics at a glance. Panels appear only when
+relevant data is present — for example the model-drift panel is hidden if every
+request and response model match.
+
+```text
+ l:Logs   t:Traces   m:Metrics   [u:Usage]      ?:Help   q:Quit
+
+┌ Token & Cost Summary ─────────────────────────────────────────────────────┐
+│ Model               │ Calls │ In tokens │ Out tokens │ Cost ($)           │
+│ claude-3-5-sonnet   │   124 │    98,432 │     12,103 │ 0.4581             │
+│ gpt-4o-mini         │    47 │    21,008 │      3,224 │ 0.0103             │
+└────────────────────────────────────────────────────────────────────────────┘
+┌ Latency ──────────────────────────────────────────────────────────────────┐
+│ Model     │ N │ p50ms │ p95ms │ tok/s p50 │ TTFT p50 │ TTFT p95           │
+│ claude…   │124│   843 │ 2,104 │      78.5 │      210 │      612           │
+└────────────────────────────────────────────────────────────────────────────┘
+┌ Tool Usage ─────────────┐ ┌ Truncation / Cache ───────────────────────────┐
+│ Tool      │ Calls │ OK% │ │ Model     │ Trunc% │ Cache hit%               │
+│ search    │    34 │ 97% │ │ claude…   │   0.8% │     62.1%                │
+└─────────────────────────┘ └────────────────────────────────────────────────┘
+┌ Error Types ───────────┐ ┌ Model Drift ──────────────────────────────────┐
+│ Bucket     │ Type │ Cnt│ │ Request → Response                  │ Count   │
+│ rate_limit │ 429  │  3 │ │ claude-3-5-sonnet → -20241022       │    18   │
+└─────────────────────────┘ └────────────────────────────────────────────────┘
+
+ USAGE  Connected | r: refresh
+```
+
+Panels (top to bottom, all gated on data presence):
+
+- **Token & cost summary** — per model, with cost in $ where pricing is known.
+- **Latency** — p50/p95/p99, derived tok/s, context size, output/input ratio,
+  and **TTFT p50/p95** for streaming providers (`—` if non-streaming).
+- **Tool usage** — call counts, success rate (red < 90%, yellow < 99%, green
+  otherwise), errors, average duration.
+- **Truncation / cache** — side-by-side: % of responses that hit `max_tokens`
+  vs % of input tokens served from prompt cache.
+- **Error types / model drift** — side-by-side: error bucketing (rate_limit,
+  timeout, context_length, content_filter, auth, server_error, unknown) and
+  request→response model pairs that don't match (silent provider rerouting).
+- **Conversation depth** — distribution of turns per session.
+
+Press **`r`** to refresh. The full equivalent CLI is `otelite usage --latency
+--tools --error-types --model-drift --truncation --cache-rate --conv-depth`.
+
+---
+
 ## Keyboard Reference
 
-| Key                    | Action                                     |
-| ---------------------- | ------------------------------------------ |
-| `l` / `t` / `m`        | Switch to Logs / Traces / Metrics view     |
-| `Tab` / `Shift+Tab`    | Cycle to next / previous view              |
-| `↑` / `↓` or `j` / `k` | Navigate items                             |
-| `PgDn` / `PgUp`        | Page through list / scroll detail text     |
-| `Enter`                | Open detail panel                          |
+| Key                    | Action                                          |
+| ---------------------- | ----------------------------------------------- |
+| `l` / `t` / `m` / `u`  | Switch to Logs / Traces / Metrics / Usage view  |
+| `Tab` / `Shift+Tab`    | Cycle to next / previous view                   |
+| `↑` / `↓` or `j` / `k` | Navigate items                                  |
+| `PgDn` / `PgUp`        | Page through list / scroll detail text          |
+| `Enter`                | Open detail panel                               |
 | `Esc`                  | Close detail / clear filter                |
 | `f`                    | Open filter prompt (`key=value` or text)   |
 | `s`                    | Toggle auto-scroll (Logs view)             |

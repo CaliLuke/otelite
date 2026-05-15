@@ -56,7 +56,10 @@ Open `http://localhost:3000` in your browser to view telemetry.
 - **CLI**: Query and export data with `otelite logs`, `otelite traces`, `otelite metrics`, `otelite usage`
 - **Offline import**: Load telemetry from JSONL files with `otelite import` — useful for CI artifacts and air-gapped environments
 - **Single Binary**: Zero runtime dependencies
-- **GenAI/LLM support**: First-class OTel GenAI semconv — token counts, cache hits, tool calls, model routing
+- **GenAI/LLM analytics**: First-class OTel GenAI semconv — cost estimation per provider,
+  latency p50/p95/p99 with TTFT, error type breakdown (rate_limit / timeout / context_length /
+  content_filter / auth / server_error), per-tool success rate, prompt-cache hit rate, model
+  drift detection (silent provider rerouting), conversation depth, output/input ratio
 
 ## Screenshots
 
@@ -75,7 +78,7 @@ Open `http://localhost:3000` in your browser to view telemetry.
 ![Metrics counter](docs/screenshots/metrics-counter.png)
 ![Metrics histogram](docs/screenshots/metrics-histogram.png)
 
-**Usage** — GenAI/LLM token and request summary by model and provider
+**Usage** — GenAI/LLM cost, latency (incl. TTFT), error types, tool success, model drift, and more
 
 ![GenAI usage](docs/screenshots/usage.png)
 
