@@ -237,7 +237,7 @@ class UsageView {
             }
             if (this.modelFilter) params.model = this.modelFilter;
             const bucket = this._chooseBucket();
-            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta] = await Promise.all([
+            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift] = await Promise.all([
                 this.api.getTokenUsage(params),
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
@@ -248,8 +248,15 @@ class UsageView {
                 this.api.getRetryStats(params),
                 this.api.getRetrievalStats(params).catch(() => null),
                 this.api.getPricingMetadata().catch(() => null),
+                this.api.getTruncationRate(params).catch(() => null),
+                this.api.getCacheHitRate(params).catch(() => null),
+                this.api.getRequestParamProfile(params).catch(() => null),
+                this.api.getConversationDepth(params).catch(() => null),
+                this.api.getCallsSeries(params).catch(() => null),
+                this.api.getErrorTypes(params).catch(() => null),
+                this.api.getModelDrift(params).catch(() => null),
             ]);
-            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta);
+            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift);
             this._attachTopNTabHandlers(params);
             this._populateModelDropdown(summary?.by_model || []);
             // When no explicit range is selected ("All time"), show the user
@@ -273,7 +280,7 @@ class UsageView {
             models.map(m => `<option value="${this._esc(m)}"${m === current ? ' selected' : ''}>${this._esc(m)}</option>`).join('');
     }
 
-    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta) {
+    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift) {
         const { summary, by_model, by_system } = data;
 
         if (summary.total_requests === 0) {
@@ -329,15 +336,22 @@ class UsageView {
                     <div class="gauge-hint">${fmt(truncCount)} / ${fmt(totalCount)} responses hit max_tokens</div>
                 </div>
                 ${this._buildRetryGauge(retryStats)}
+                ${this._buildConversationDepthCard(conversationDepth)}
             </div>`;
 
+        const callsChart = this._buildCallsChart(callsSeries || []);
         const costChart = this._buildCostChart(costSeries || [], bucket);
         const topNSection = this._buildTopNSection(topSpans || [], errorRate || []);
         const finishReasonsSection = this._buildFinishReasons(reasons);
+        const truncationRateSection = this._buildTruncationRate(truncationRate || []);
+        const cacheHitRateSection = this._buildCacheHitRate(cacheHitRate || []);
         const latencySection = this._buildLatencyTable(latencyStats || []);
         const errorRateSection = this._buildErrorRate(errorRate || []);
+        const errorTypesSection = this._buildErrorTypes(errorTypes || []);
+        const modelDriftSection = this._buildModelDrift(modelDrift || []);
         const toolUsageSection = this._buildToolUsage(toolUsage || []);
         const retrievalSection = this._buildRetrievalStats(retrievalStats);
+        const requestParamSection = this._buildRequestParamProfile(requestParamProfile);
 
         const modelRows = by_model.map(m => `
             <tr>
@@ -375,9 +389,11 @@ class UsageView {
 
         const pricingNotice = this._renderPricingNotice(pricingMeta);
 
-        return pricingNotice + summaryCards + costChart + topNSection + finishReasonsSection
-            + latencySection + errorRateSection + toolUsageSection + retrievalSection
-            + modelTable + systemTable;
+        return pricingNotice + summaryCards + callsChart + costChart + topNSection
+            + finishReasonsSection + truncationRateSection + cacheHitRateSection
+            + latencySection + errorRateSection + errorTypesSection + modelDriftSection
+            + toolUsageSection + retrievalSection
+            + requestParamSection + modelTable + systemTable;
     }
 
     _buildRetrievalStats(stats) {
@@ -445,6 +461,12 @@ class UsageView {
                 </div>`;
     }
 
+    _formatTokensK(n) {
+        if (n == null) return '—';
+        if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+        return String(n);
+    }
+
     _buildLatencyTable(latencyStats) {
         if (!latencyStats.length) {
             return `<h3>Latency by model</h3><div class="empty-state-hint">No latency data in this window.</div>`;
@@ -453,6 +475,23 @@ class UsageView {
         const rows = latencyStats.map(s => {
             const ttftP50 = s.ttft_count > 0 ? this._formatDuration(s.ttft_p50_ms) : '—';
             const ttftP95 = s.ttft_count > 0 ? this._formatDuration(s.ttft_p95_ms) : '—';
+
+            const tpsP50 = s.derived_tokens_per_sec_p50 != null ? Math.round(s.derived_tokens_per_sec_p50) : null;
+            const tpsP95 = s.derived_tokens_per_sec_p95 != null ? Math.round(s.derived_tokens_per_sec_p95) : null;
+            const tpsP99 = s.derived_tokens_per_sec_p99 != null ? Math.round(s.derived_tokens_per_sec_p99) : null;
+            const tpsCell = (tpsP50 != null && tpsP95 != null && tpsP99 != null)
+                ? `${tpsP50} / ${tpsP95} / ${tpsP99} tok/s`
+                : '—';
+
+            const ctxP50 = this._formatTokensK(s.input_tokens_p50);
+            const ctxP95 = this._formatTokensK(s.input_tokens_p95);
+            const ctxP99 = this._formatTokensK(s.input_tokens_p99);
+            const ctxCell = (s.input_tokens_p50 != null) ? `${ctxP50} / ${ctxP95} / ${ctxP99}` : '—';
+
+            const ratioP50 = s.output_input_ratio_p50 != null ? `${Number(s.output_input_ratio_p50).toFixed(2)}×` : null;
+            const ratioP95 = s.output_input_ratio_p95 != null ? `${Number(s.output_input_ratio_p95).toFixed(2)}×` : null;
+            const ratioCell = (ratioP50 != null && ratioP95 != null) ? `${ratioP50} / ${ratioP95}` : '—';
+
             return `
                 <tr>
                     <td>${this._esc(s.model || '—')}</td>
@@ -463,6 +502,9 @@ class UsageView {
                     <td>${this._esc(this._formatDuration(s.p99_ms))}</td>
                     <td>${this._esc(ttftP50)}</td>
                     <td>${this._esc(ttftP95)}</td>
+                    <td>${this._esc(tpsCell)}</td>
+                    <td>${this._esc(ctxCell)}</td>
+                    <td>${this._esc(ratioCell)}</td>
                 </tr>`;
         }).join('');
         return `
@@ -470,6 +512,9 @@ class UsageView {
             <table class="data-table latency-table">
                 <thead><tr>
                     <th>Model</th><th>Calls</th><th>Avg</th><th>P50</th><th>P95</th><th>P99</th><th>TTFT P50</th><th>TTFT P95</th>
+                    <th title="Derived metric: span duration includes network and queue time, not pure generation throughput">Tok/s derived (p50/p95/p99)</th>
+                    <th>Context (p50/p95/p99)</th>
+                    <th>Out/In ratio (p50/p95)</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
@@ -522,6 +567,60 @@ class UsageView {
                     <th>Tool</th><th>Calls</th><th>Success rate</th><th>Errors</th><th>Avg duration</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
+            </table>`;
+    }
+
+    _buildErrorTypes(rows) {
+        if (!rows || !rows.length) return '';
+        const sorted = [...rows].sort((a, b) => (b.count || 0) - (a.count || 0));
+        const bucketColors = {
+            rate_limit: '#e74c3c',
+            timeout: '#e67e22',
+            context_length: '#f39c12',
+            content_filter: '#9b59b6',
+            auth: '#c0392b',
+            server_error: '#e74c3c',
+            unknown: '#95a5a6',
+        };
+        const tableRows = sorted.map(r => {
+            const color = bucketColors[r.bucket] || '#95a5a6';
+            return `
+                <tr>
+                    <td><span class="bucket-chip" style="background:${color};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.85em">${this._esc(r.bucket)}</span></td>
+                    <td title="${this._esc(r.error_type)}">${this._esc(r.error_type.length > 40 ? r.error_type.slice(0, 40) + '…' : r.error_type)}</td>
+                    <td>${this._esc(r.model || '—')}</td>
+                    <td>${r.count || 0}</td>
+                </tr>`;
+        }).join('');
+        return `
+            <h3>Error type breakdown</h3>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Bucket</th><th>Error Type</th><th>Model</th><th>Count</th>
+                </tr></thead>
+                <tbody>${tableRows}</tbody>
+            </table>`;
+    }
+
+    _buildModelDrift(rows) {
+        if (!rows || !rows.length) return '';
+        const drifted = rows.filter(r => r.differs);
+        if (!drifted.length) {
+            return `<h3>Model drift</h3><p class="empty-state-hint">No model drift detected — request and response models match for all calls.</p>`;
+        }
+        const tableRows = drifted.map(r => `
+            <tr class="drift-warning">
+                <td>${this._esc(r.request_model || '—')}</td>
+                <td>⚠ ${this._esc(r.response_model || '—')}</td>
+                <td>${r.count || 0}</td>
+            </tr>`).join('');
+        return `
+            <h3>Model drift — provider rerouted to a different model</h3>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Requested</th><th>Served</th><th>Count</th>
+                </tr></thead>
+                <tbody>${tableRows}</tbody>
             </table>`;
     }
 
@@ -853,6 +952,179 @@ class UsageView {
             <h3>Stop reasons</h3>
             ${truncatedBanner}
             <div class="finish-reasons-list">${rows}</div>`;
+    }
+
+    _buildTruncationRate(rows) {
+        const meaningful = rows.filter(r => (r.truncated || 0) > 0);
+        if (!meaningful.length) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const tableRows = rows.map(r => {
+            const rate = (r.rate || 0) * 100;
+            let colorClass = 'trunc-rate-green';
+            if (rate >= 5) colorClass = 'trunc-rate-red';
+            else if (rate >= 1) colorClass = 'trunc-rate-yellow';
+            return `
+                <tr>
+                    <td>${this._esc(r.model || '—')}</td>
+                    <td>${fmt(r.total || 0)}</td>
+                    <td>${fmt(r.truncated || 0)}</td>
+                    <td class="${colorClass}">${rate.toFixed(1)}%</td>
+                </tr>`;
+        }).join('');
+        return `
+            <h3>Truncation rate by model</h3>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Model</th><th>Total calls</th><th>Truncated</th><th>Rate</th>
+                </tr></thead>
+                <tbody>${tableRows}</tbody>
+            </table>`;
+    }
+
+    _buildCacheHitRate(rows) {
+        const meaningful = rows.filter(r => (r.total_cache_read_tokens || 0) > 0);
+        if (!meaningful.length) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const tableRows = rows.map(r => {
+            const rate = (r.hit_rate || 0) * 100;
+            let colorClass = 'cache-rate-grey';
+            if (rate >= 20) colorClass = 'cache-rate-green';
+            else if (rate >= 5) colorClass = 'cache-rate-yellow';
+            return `
+                <tr>
+                    <td>${this._esc(r.model || '—')}</td>
+                    <td>${fmt(r.total_input_tokens || 0)}</td>
+                    <td>${fmt(r.total_cache_read_tokens || 0)}</td>
+                    <td>${fmt(r.total_cache_creation_tokens || 0)}</td>
+                    <td class="${colorClass}">${rate.toFixed(1)}%</td>
+                </tr>`;
+        }).join('');
+        return `
+            <h3>Cache hit rate by model</h3>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Model</th><th>Input tokens</th><th>Cache read</th><th>Cache created</th><th>Hit rate</th>
+                </tr></thead>
+                <tbody>${tableRows}</tbody>
+            </table>`;
+    }
+
+    _buildRequestParamProfile(profile) {
+        if (!profile) return '';
+        const tempBuckets = Array.isArray(profile.temperature_buckets) ? profile.temperature_buckets : [];
+        const maxTokBuckets = Array.isArray(profile.max_tokens_buckets) ? profile.max_tokens_buckets : [];
+        const distinctTemps = new Set(tempBuckets.map(b => b.temperature)).size;
+        const distinctMaxToks = new Set(maxTokBuckets.map(b => b.max_tokens)).size;
+        if (distinctTemps <= 1 && distinctMaxToks <= 1) return '';
+
+        const fmt = n => Number(n).toLocaleString();
+
+        const tempRows = tempBuckets.map(b => `
+            <tr>
+                <td>${b.temperature == null ? '<em>not set</em>' : this._esc(String(b.temperature))}</td>
+                <td>${fmt(b.count || 0)}</td>
+            </tr>`).join('');
+
+        const maxTokRows = maxTokBuckets.map(b => `
+            <tr>
+                <td>${b.max_tokens == null ? '<em>not set</em>' : this._esc(String(b.max_tokens))}</td>
+                <td>${fmt(b.count || 0)}</td>
+            </tr>`).join('');
+
+        const tempTable = distinctTemps > 1 ? `
+            <div class="param-profile-table">
+                <h4>Temperature distribution</h4>
+                <table class="data-table">
+                    <thead><tr><th>Temperature</th><th>Count</th></tr></thead>
+                    <tbody>${tempRows}</tbody>
+                </table>
+            </div>` : '';
+
+        const maxTokTable = distinctMaxToks > 1 ? `
+            <div class="param-profile-table">
+                <h4>Max tokens distribution</h4>
+                <table class="data-table">
+                    <thead><tr><th>Max tokens</th><th>Count</th></tr></thead>
+                    <tbody>${maxTokRows}</tbody>
+                </table>
+            </div>` : '';
+
+        return `
+            <h3>Request parameters</h3>
+            <div class="param-profile-container">${tempTable}${maxTokTable}</div>`;
+    }
+
+    _buildConversationDepthCard(depth) {
+        if (!depth || !depth.total_conversations) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const avg = depth.avg_turns != null ? Number(depth.avg_turns).toFixed(1) : '—';
+        return `
+                <div class="usage-card">
+                    <div class="usage-card-label">Conversations</div>
+                    <div class="usage-card-value">${fmt(depth.total_conversations)}</div>
+                    <div class="gauge-hint">avg ${avg} turns · p50 ${depth.p50_turns ?? '—'} · p95 ${depth.p95_turns ?? '—'}</div>
+                </div>`;
+    }
+
+    _buildCallsChart(callsSeries) {
+        if (!Array.isArray(callsSeries) || !callsSeries.length) {
+            return `<h3>Request volume over time</h3><div class="empty-state-hint">No request data in this window.</div>`;
+        }
+
+        // Aggregate across all models per timestamp bucket
+        const bucketMap = new Map();
+        for (const row of callsSeries) {
+            const ts = row.timestamp;
+            bucketMap.set(ts, (bucketMap.get(ts) || 0) + (row.requests || 0));
+        }
+        const buckets = Array.from(bucketMap.entries())
+            .sort((a, b) => a[0] - b[0])
+            .map(([timestamp, requests]) => ({ timestamp, requests }));
+
+        const totalRequests = buckets.reduce((a, b) => a + b.requests, 0);
+        const maxRequests = buckets.reduce((a, b) => Math.max(a, b.requests), 0);
+
+        const width = 100;
+        const barGap = 0.5;
+        const barWidth = buckets.length > 0 ? Math.max((width - barGap * (buckets.length - 1)) / buckets.length, 0.1) : 0;
+        const chartHeight = 100;
+
+        const bars = buckets.map((b, i) => {
+            const h = maxRequests > 0 ? (b.requests / maxRequests) * chartHeight : 0;
+            const x = i * (barWidth + barGap);
+            const y = chartHeight - h;
+            const tsDate = new Date(b.timestamp / 1_000_000);
+            const title = `${formatTs(tsDate)}\n${b.requests.toLocaleString()} requests`;
+            return `<rect class="cost-chart-bar" x="${x.toFixed(3)}" y="${y.toFixed(3)}" width="${barWidth.toFixed(3)}" height="${h.toFixed(3)}"><title>${this._esc(title)}</title></rect>`;
+        }).join('');
+
+        const labelFor = i => {
+            const d = new Date(buckets[i].timestamp / 1_000_000);
+            const pad = n => String(n).padStart(2, '0');
+            return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        };
+
+        let axisHtml = '';
+        if (buckets.length > 0) {
+            const left = this._esc(labelFor(0));
+            const mid = buckets.length > 2 ? this._esc(labelFor(Math.floor(buckets.length / 2))) : '';
+            const right = buckets.length > 1 ? this._esc(labelFor(buckets.length - 1)) : '';
+            axisHtml = `
+                <div class="cost-chart-axis-labels">
+                    <span class="cost-chart-axis-left">${left}</span>
+                    <span class="cost-chart-axis-mid">${mid}</span>
+                    <span class="cost-chart-axis-right">${right}</span>
+                </div>`;
+        }
+
+        return `
+            <h3>Request volume over time — ${totalRequests.toLocaleString()} total across ${buckets.length} bucket${buckets.length === 1 ? '' : 's'}</h3>
+            <div class="cost-chart">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                    ${bars}
+                </svg>
+                ${axisHtml}
+            </div>`;
     }
 
     _esc(str) {

@@ -2407,6 +2407,14 @@ body {
 }
 .error-rate-list .finish-reason-name { width: 200px; }
 .tool-usage-warn { color: var(--warning-color, #f59e0b); }
+.trunc-rate-green { color: #22c55e; }
+.trunc-rate-yellow { color: #f59e0b; }
+.trunc-rate-red { color: #ef4444; font-weight: 600; }
+.cache-rate-green { color: #22c55e; }
+.cache-rate-yellow { color: #f59e0b; }
+.cache-rate-grey { color: var(--text-secondary); }
+.param-profile-container { display: flex; gap: 2rem; flex-wrap: wrap; }
+.param-profile-table { flex: 1; min-width: 200px; }
 .chat-bubble-role {
     text-transform: uppercase;
     font-weight: 600;
@@ -2540,4 +2548,17 @@ body {
 .pricing-disclaimer-warn {
     color: var(--text-warning, #d97706);
     font-weight: 500;
+}
+
+.bucket-chip {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.82em;
+    font-weight: 600;
+    color: #fff;
+}
+
+.drift-warning td {
+    color: var(--warning-color, #f59e0b);
 }

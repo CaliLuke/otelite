@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::api::{
-    ConversationCostRow, CostSeriesPoint, ErrorRateByModel, FinishReasonCount, LatencyStats,
-    ModelUsage, RetrievalStats, RetryStats, SessionCostRow, SystemUsage, TokenUsageSummary,
-    ToolUsage, TopSpan, TopSpanSort,
+    CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
+    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, LatencyStats,
+    ModelDriftPair, ModelUsage, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
+    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
@@ -262,4 +263,57 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         top_queries_limit: usize,
     ) -> Result<RetrievalStats>;
+
+    /// Truncation rate (finish_reason = max_tokens / length) per model.
+    async fn query_truncation_rate(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<TruncationRateByModel>>;
+
+    /// Cache token hit rate per model.
+    async fn query_cache_hit_rate(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<CacheHitRateByModel>>;
+
+    /// Distribution of request parameter settings (temperature, max_tokens).
+    async fn query_request_param_profile(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<RequestParamProfile>;
+
+    /// Turn-count distribution across conversations with a known conversation_id.
+    async fn query_conversation_depth(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<ConversationDepthStats>;
+
+    /// LLM call volume per time bucket (parallel to query_cost_series).
+    async fn query_calls_series(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+    ) -> Result<Vec<CallsSeriesPoint>>;
+
+    /// Per-(model, error_type) breakdown of error spans, bucketed into actionable categories.
+    async fn query_error_types(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<ErrorTypeBreakdown>>;
+
+    /// All observed (request_model, response_model) pairs with a `differs` flag.
+    async fn query_model_drift(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<ModelDriftPair>>;
 }

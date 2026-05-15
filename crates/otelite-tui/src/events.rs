@@ -13,6 +13,8 @@ pub enum AppEvent {
     SwitchToTraces,
     /// Switch to metrics view
     SwitchToMetrics,
+    /// Switch to usage view
+    SwitchToUsage,
     /// Show help screen
     ShowHelp,
     /// Navigate up
@@ -78,6 +80,7 @@ fn handle_key_event(key: KeyEvent) -> AppEvent {
         KeyCode::Char('l') => AppEvent::SwitchToLogs,
         KeyCode::Char('t') => AppEvent::SwitchToTraces,
         KeyCode::Char('m') => AppEvent::SwitchToMetrics,
+        KeyCode::Char('u') => AppEvent::SwitchToUsage,
         KeyCode::Tab => AppEvent::NextView,
         KeyCode::BackTab => AppEvent::PrevView,
 

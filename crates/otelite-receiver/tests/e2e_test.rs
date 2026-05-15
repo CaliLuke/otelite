@@ -21,26 +21,22 @@ use serde_json::Value as JsonValue;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 use tokio::net::TcpListener;
 
-/// Create in-memory storage for testing
-async fn create_test_storage() -> Arc<SqliteBackend> {
-    let unique_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let db_path = format!(
-        ":memory:?cache=shared&mode=memory&name=e2e_test_{}",
-        unique_id
-    );
-
-    let config = StorageConfig::default().with_data_dir(db_path.into());
+/// Create file-backed temp storage for testing.
+///
+/// Returns both the storage backend and the TempDir — the caller must hold the
+/// TempDir for the lifetime of the test or the directory is deleted mid-run.
+async fn create_test_storage() -> (Arc<SqliteBackend>, TempDir) {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
     let mut storage = SqliteBackend::new(config);
     storage
         .initialize()
         .await
         .expect("Failed to initialize storage");
-    Arc::new(storage)
+    (Arc::new(storage), temp_dir)
 }
 
 /// Start dashboard server on a random available port
@@ -73,7 +69,7 @@ async fn start_test_server(
 #[tokio::test]
 async fn test_logs_e2e_flow() {
     // Setup: Create storage and handlers
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let logs_handler = Arc::new(LogsHandler::new(storage.clone() as Arc<dyn StorageBackend>));
 
     // Start dashboard server
@@ -167,7 +163,7 @@ async fn test_logs_e2e_flow() {
 #[tokio::test]
 async fn test_traces_e2e_flow() {
     // Setup
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let traces_handler = Arc::new(TracesHandler::new(
         storage.clone() as Arc<dyn StorageBackend>
     ));
@@ -267,7 +263,7 @@ async fn test_traces_e2e_flow() {
 #[tokio::test]
 async fn test_metrics_e2e_flow() {
     // Setup
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let metrics_handler = Arc::new(MetricsHandler::new(
         storage.clone() as Arc<dyn StorageBackend>
     ));
@@ -360,7 +356,7 @@ async fn test_metrics_e2e_flow() {
 #[tokio::test]
 async fn test_logs_severity_filter() {
     // Setup
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let logs_handler = Arc::new(LogsHandler::new(storage.clone() as Arc<dyn StorageBackend>));
 
     // Start dashboard server

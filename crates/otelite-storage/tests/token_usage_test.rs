@@ -12,7 +12,8 @@ fn setup_test_db() -> Connection {
 #[test]
 fn test_query_token_usage_empty() {
     let conn = setup_test_db();
-    let (summary, by_model, by_system) = reader::query_token_usage(&conn, None, None, None).unwrap();
+    let (summary, by_model, by_system) =
+        reader::query_token_usage(&conn, None, None, None).unwrap();
 
     assert_eq!(summary.total_input_tokens, 0);
     assert_eq!(summary.total_output_tokens, 0);
@@ -55,7 +56,8 @@ fn test_query_token_usage_with_data() {
     )
     .unwrap();
 
-    let (summary, by_model, by_system) = reader::query_token_usage(&conn, None, None, None).unwrap();
+    let (summary, by_model, by_system) =
+        reader::query_token_usage(&conn, None, None, None).unwrap();
 
     // Check summary
     assert_eq!(summary.total_input_tokens, 4500); // 1000 + 2000 + 1500
@@ -111,7 +113,8 @@ fn test_query_token_usage_with_time_filter() {
     .unwrap();
 
     // Query with time filter (only first span)
-    let (summary, by_model, _) = reader::query_token_usage(&conn, Some(0), Some(3000), None).unwrap();
+    let (summary, by_model, _) =
+        reader::query_token_usage(&conn, Some(0), Some(3000), None).unwrap();
 
     assert_eq!(summary.total_input_tokens, 1000);
     assert_eq!(summary.total_output_tokens, 500);
@@ -144,7 +147,8 @@ fn test_query_token_usage_ignores_non_genai_spans() {
     )
     .unwrap();
 
-    let (summary, by_model, by_system) = reader::query_token_usage(&conn, None, None, None).unwrap();
+    let (summary, by_model, by_system) =
+        reader::query_token_usage(&conn, None, None, None).unwrap();
 
     // Should only count the GenAI span
     assert_eq!(summary.total_input_tokens, 1000);
@@ -168,7 +172,8 @@ fn test_query_token_usage_handles_missing_token_fields() {
     )
     .unwrap();
 
-    let (summary, by_model, _by_system) = reader::query_token_usage(&conn, None, None, None).unwrap();
+    let (summary, by_model, _by_system) =
+        reader::query_token_usage(&conn, None, None, None).unwrap();
 
     // Should handle missing fields gracefully (COALESCE to 0)
     assert_eq!(summary.total_input_tokens, 0);

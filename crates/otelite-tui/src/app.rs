@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::api::ApiClient;
 use crate::config::Config;
 use crate::events::{poll_event, AppEvent};
-use crate::state::{LogsState, MetricsState, TracesState};
+use crate::state::{LogsState, MetricsState, TracesState, UsageState};
 use crate::ui;
 
 /// Current view in the TUI
@@ -19,6 +19,7 @@ pub enum View {
     Logs,
     Traces,
     Metrics,
+    Usage,
     Help,
 }
 
@@ -38,6 +39,7 @@ pub struct App {
     logs_state: LogsState,
     traces_state: TracesState,
     metrics_state: MetricsState,
+    usage_state: UsageState,
     last_refresh: Instant,
     /// Whether filter input mode is active
     pub filter_input_active: bool,
@@ -67,6 +69,7 @@ impl App {
             logs_state: LogsState::new(),
             traces_state: TracesState::new(),
             metrics_state: MetricsState::new(),
+            usage_state: UsageState::default(),
             last_refresh: Instant::now(),
             filter_input_active: false,
             filter_input_buffer: String::new(),
@@ -106,19 +109,22 @@ impl App {
             AppEvent::SwitchToLogs => self.current_view = View::Logs,
             AppEvent::SwitchToTraces => self.current_view = View::Traces,
             AppEvent::SwitchToMetrics => self.current_view = View::Metrics,
+            AppEvent::SwitchToUsage => self.current_view = View::Usage,
             AppEvent::ShowHelp => self.current_view = View::Help,
             AppEvent::NextView => {
                 self.current_view = match self.current_view {
                     View::Logs => View::Traces,
                     View::Traces => View::Metrics,
-                    View::Metrics | View::Help => View::Logs,
+                    View::Metrics => View::Usage,
+                    View::Usage | View::Help => View::Logs,
                 };
             },
             AppEvent::PrevView => {
                 self.current_view = match self.current_view {
-                    View::Logs | View::Help => View::Metrics,
+                    View::Logs | View::Help => View::Usage,
                     View::Traces => View::Logs,
                     View::Metrics => View::Traces,
+                    View::Usage => View::Metrics,
                 };
             },
             AppEvent::Filter if matches!(self.current_view, View::Logs | View::Traces) => {
@@ -341,14 +347,14 @@ impl App {
             match self.current_view {
                 View::Logs => self.logs_state.set_filter(key, value),
                 View::Traces => self.traces_state.set_filter(key, value),
-                _ => {},
+                View::Metrics | View::Usage | View::Help => {},
             }
         } else {
             // No `=`: treat as body/name search query
             match self.current_view {
                 View::Logs => self.logs_state.set_search_query(input),
                 View::Traces => self.traces_state.set_search_query(input),
-                _ => {},
+                View::Metrics | View::Usage | View::Help => {},
             }
         }
     }
@@ -398,6 +404,9 @@ impl App {
                         &self.metrics_state,
                         self.api_error.as_deref(),
                     );
+                },
+                View::Usage => {
+                    ui::render_usage_view(f, area, &self.usage_state, self.api_error.as_deref());
                 },
                 View::Help => {
                     ui::render_help_view(f, area, &self.config.version);
@@ -487,6 +496,89 @@ impl App {
                         self.api_error = Some(msg);
                     },
                 }
+            },
+            View::Usage => {
+                self.usage_state.is_loading = true;
+                let mut had_error = false;
+
+                match self.api_client.fetch_token_usage(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.token_usage = Some(resp);
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+                match self.api_client.fetch_latency_stats(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.latency_stats = resp;
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+                match self.api_client.fetch_truncation_rate(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.truncation_rate = resp;
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+                match self.api_client.fetch_cache_hit_rate(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.cache_hit_rate = resp;
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+                match self.api_client.fetch_conversation_depth(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.conversation_depth = Some(resp);
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+                match self.api_client.fetch_tool_usage(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.tool_usage = resp;
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+                match self.api_client.fetch_error_types(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.error_types = resp;
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+                match self.api_client.fetch_model_drift(vec![]).await {
+                    Ok(resp) => {
+                        self.usage_state.model_drift = resp;
+                    },
+                    Err(e) => {
+                        had_error = true;
+                        self.usage_state.set_error(e.to_string());
+                    },
+                }
+
+                if !had_error {
+                    self.usage_state.clear_error();
+                    self.api_error = None;
+                }
+                self.usage_state.is_loading = false;
             },
             View::Help => {
                 // No refresh needed for help view
@@ -747,6 +839,8 @@ mod tests {
         app.handle_event(AppEvent::NextView);
         assert_eq!(app.current_view(), &View::Metrics);
         app.handle_event(AppEvent::NextView);
+        assert_eq!(app.current_view(), &View::Usage);
+        app.handle_event(AppEvent::NextView);
         assert_eq!(app.current_view(), &View::Logs);
     }
 
@@ -756,6 +850,8 @@ mod tests {
         let mut app = App::new(config);
 
         assert_eq!(app.current_view(), &View::Logs);
+        app.handle_event(AppEvent::PrevView);
+        assert_eq!(app.current_view(), &View::Usage);
         app.handle_event(AppEvent::PrevView);
         assert_eq!(app.current_view(), &View::Metrics);
         app.handle_event(AppEvent::PrevView);

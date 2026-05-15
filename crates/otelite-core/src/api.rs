@@ -564,6 +564,10 @@ pub struct TopSpan {
     /// "no pricing data for claude-foo on bedrock").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_reason: Option<String>,
+    /// Derived output token throughput (output_tokens / span_duration_sec).
+    /// Span duration includes network + queue time — not pure generation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_output_tokens_per_sec: Option<f64>,
 }
 
 /// Aggregated cost/token row for a single session.
@@ -619,6 +623,20 @@ pub struct LatencyStats {
     pub ttft_p50_ms: Option<i64>,
     pub ttft_p95_ms: Option<i64>,
     pub ttft_p99_ms: Option<i64>,
+    /// Derived output token throughput (output_tokens / span_duration_sec).
+    /// Span duration includes network + queue time, NOT pure generation time.
+    /// Only set for spans where both output_tokens > 0 and duration > 0.
+    pub derived_tokens_per_sec_p50: Option<f64>,
+    pub derived_tokens_per_sec_p95: Option<f64>,
+    pub derived_tokens_per_sec_p99: Option<f64>,
+    /// Distribution of input token counts (context / prompt size).
+    pub input_tokens_p50: Option<i64>,
+    pub input_tokens_p95: Option<i64>,
+    pub input_tokens_p99: Option<i64>,
+    /// Distribution of output/input token ratio (generation verbosity).
+    pub output_input_ratio_p50: Option<f64>,
+    pub output_input_ratio_p95: Option<f64>,
+    pub output_input_ratio_p99: Option<f64>,
 }
 
 /// Error-rate summary for LLM spans grouped by model.
@@ -676,4 +694,103 @@ pub struct TopRetrievalQuery {
     pub count: usize,
     pub avg_documents: f64,
     pub avg_top_score: Option<f64>,
+}
+
+/// Truncation rate (finish_reason = max_tokens/length) per model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TruncationRateByModel {
+    pub model: Option<String>,
+    pub total: usize,
+    pub truncated: usize,
+    /// Fraction in the range 0.0..1.0.
+    pub rate: f64,
+}
+
+/// Cache token efficiency per model.
+/// `hit_rate` = cache_read_tokens / (cache_read_tokens + input_tokens).
+/// Only set when at least one of the token counts is non-zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CacheHitRateByModel {
+    pub model: Option<String>,
+    pub total_input_tokens: u64,
+    pub total_cache_read_tokens: u64,
+    pub total_cache_creation_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_rate: Option<f64>,
+}
+
+/// Distribution of `gen_ai.request.temperature` values across LLM calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TemperatureBucket {
+    /// Rounded to 2 decimal places. None = attribute not set.
+    pub temperature: Option<f64>,
+    pub count: usize,
+}
+
+/// Distribution of `gen_ai.request.max_tokens` values across LLM calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MaxTokensBucket {
+    /// None = attribute not set.
+    pub max_tokens: Option<i64>,
+    pub count: usize,
+}
+
+/// Distribution of request parameter settings (temperature, max_tokens).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RequestParamProfile {
+    pub temperature_buckets: Vec<TemperatureBucket>,
+    pub max_tokens_buckets: Vec<MaxTokensBucket>,
+}
+
+/// Turn-count distribution across all observed conversations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ConversationDepthStats {
+    pub total_conversations: usize,
+    pub avg_turns: f64,
+    pub p50_turns: i64,
+    pub p95_turns: i64,
+    pub p99_turns: i64,
+}
+
+/// Single time-bucket point for calls-over-time series.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CallsSeriesPoint {
+    /// Bucket start timestamp in nanoseconds since Unix epoch.
+    pub timestamp: i64,
+    /// Model (None = not attributed).
+    pub model: Option<String>,
+    /// Number of LLM calls in this bucket.
+    pub requests: usize,
+}
+
+/// Per-(model, error_type) breakdown of error spans, bucketed into actionable categories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ErrorTypeBreakdown {
+    pub model: Option<String>,
+    /// Raw `error.type` value as observed (or exception.type / HTTP status code).
+    pub error_type: String,
+    /// Coarse actionable bucket: "rate_limit" | "timeout" | "context_length" |
+    /// "content_filter" | "auth" | "server_error" | "unknown"
+    pub bucket: String,
+    pub count: usize,
+}
+
+/// A (request_model → response_model) pair that providers actually served.
+/// `differs == true` means the provider silently rerouted to a different model snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ModelDriftPair {
+    pub request_model: Option<String>,
+    pub response_model: Option<String>,
+    pub count: usize,
+    /// True when both fields are non-null and differ from each other.
+    pub differs: bool,
 }

@@ -1,0 +1,756 @@
+use crate::state::UsageState;
+use crate::ui::render_tab_bar;
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    Frame,
+};
+use std::collections::HashMap;
+
+pub fn render_usage_view(
+    frame: &mut Frame,
+    area: Rect,
+    state: &UsageState,
+    api_error: Option<&str>,
+) {
+    let content_area = if let Some(err) = api_error {
+        let splits = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        let err_line = Line::from(Span::styled(
+            format!(" Error: {} ", err),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Paragraph::new(err_line), splits[0]);
+        splits[1]
+    } else {
+        area
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Tab bar
+            Constraint::Length(4), // Summary cards
+            Constraint::Min(6),    // Main tables (scrollable area)
+            Constraint::Length(1), // Status bar
+        ])
+        .split(content_area);
+
+    render_tab_bar(frame, chunks[0], "Usage");
+    render_summary_cards(frame, chunks[1], state);
+    render_tables(frame, chunks[2], state);
+    render_status_bar(frame, chunks[3], state);
+}
+
+fn render_summary_cards(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+        ])
+        .split(area);
+
+    if let Some(ref usage) = state.token_usage {
+        let summary = &usage.summary;
+        render_card(
+            frame,
+            cols[0],
+            "Requests",
+            &summary.total_requests.to_string(),
+        );
+        render_card(
+            frame,
+            cols[1],
+            "Input Tokens",
+            &fmt_tokens(summary.total_input_tokens),
+        );
+        render_card(
+            frame,
+            cols[2],
+            "Output Tokens",
+            &fmt_tokens(summary.total_output_tokens),
+        );
+        let cache_rate = if summary.total_cache_read_tokens > 0 {
+            let denom = summary.total_cache_read_tokens + summary.total_input_tokens;
+            if denom > 0 {
+                format!(
+                    "{:.0}% cached",
+                    summary.total_cache_read_tokens as f64 / denom as f64 * 100.0
+                )
+            } else {
+                "—".to_string()
+            }
+        } else {
+            "no cache".to_string()
+        };
+        render_card(frame, cols[3], "Cache Read", &cache_rate);
+    } else if state.is_loading {
+        for col in cols.iter() {
+            render_card(frame, *col, "…", "loading");
+        }
+    } else {
+        render_card(frame, cols[0], "Requests", "—");
+        render_card(frame, cols[1], "Input Tokens", "—");
+        render_card(frame, cols[2], "Output Tokens", "—");
+        render_card(frame, cols[3], "Cache Read", "—");
+    }
+}
+
+fn render_card(frame: &mut Frame, area: Rect, label: &str, value: &str) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(label, Style::default().fg(Color::Cyan)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let text = Paragraph::new(Span::styled(
+        value,
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(text, inner);
+}
+
+fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let show_conv = state
+        .conversation_depth
+        .as_ref()
+        .map(|d| d.total_conversations > 0)
+        .unwrap_or(false);
+    let show_trunc = state.truncation_rate.iter().any(|r| r.truncated > 0);
+    let show_cache = state
+        .cache_hit_rate
+        .iter()
+        .any(|r| r.total_cache_read_tokens > 0);
+    let show_tools = !state.tool_usage.is_empty();
+    let show_errors = !state.error_types.is_empty();
+    let show_drift = state.model_drift.iter().any(|p| p.differs);
+
+    let mut constraints = vec![Constraint::Min(5)]; // latency always shown
+    if show_tools {
+        constraints.push(Constraint::Length(6));
+    }
+    if show_trunc || show_cache {
+        constraints.push(Constraint::Length(6));
+    }
+    if show_errors || show_drift {
+        constraints.push(Constraint::Length(6));
+    }
+    if show_conv {
+        constraints.push(Constraint::Length(5));
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    render_latency_table(frame, sections[0], state);
+
+    let mut idx = 1usize;
+    if show_tools {
+        render_tool_usage_table(frame, sections[idx], state);
+        idx += 1;
+    }
+    if show_trunc || show_cache {
+        render_trunc_cache_row(frame, sections[idx], state, show_trunc, show_cache);
+        idx += 1;
+    }
+    if show_errors || show_drift {
+        render_errors_drift_row(frame, sections[idx], state, show_errors, show_drift);
+        idx += 1;
+    }
+    if show_conv {
+        render_conv_depth(frame, sections[idx], state);
+    }
+}
+
+fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Latency by Model (tok/s = derived: span duration ≠ gen time) ");
+
+    if state.latency_stats.is_empty() {
+        let msg = if state.is_loading {
+            "Loading…"
+        } else {
+            "No latency data"
+        };
+        frame.render_widget(Paragraph::new(msg).block(block), area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Model").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("N").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("p50ms").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("p95ms").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("tok/s*p50").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("tok/s*p95").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("ctx p50").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("ctx p95").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("out/in p50").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("TTFT p50").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("TTFT p95").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let rows: Vec<Row> = state
+        .latency_stats
+        .iter()
+        .map(|s| {
+            let model = s.model.as_deref().unwrap_or("(unknown)");
+            let ttft_p50 = if s.ttft_count > 0 {
+                s.ttft_p50_ms.map_or("—".to_string(), |v| v.to_string())
+            } else {
+                "—".to_string()
+            };
+            let ttft_p95 = if s.ttft_count > 0 {
+                s.ttft_p95_ms.map_or("—".to_string(), |v| v.to_string())
+            } else {
+                "—".to_string()
+            };
+            Row::new(vec![
+                Cell::from(truncate(model, 28)),
+                Cell::from(s.count.to_string()),
+                Cell::from(s.p50_ms.to_string()),
+                Cell::from(s.p95_ms.to_string()),
+                Cell::from(
+                    s.derived_tokens_per_sec_p50
+                        .map_or("—".to_string(), |v| format!("{:.0}", v)),
+                ),
+                Cell::from(
+                    s.derived_tokens_per_sec_p95
+                        .map_or("—".to_string(), |v| format!("{:.0}", v)),
+                ),
+                Cell::from(
+                    s.input_tokens_p50
+                        .map_or("—".to_string(), |v| fmt_tokens(v as u64)),
+                ),
+                Cell::from(
+                    s.input_tokens_p95
+                        .map_or("—".to_string(), |v| fmt_tokens(v as u64)),
+                ),
+                Cell::from(
+                    s.output_input_ratio_p50
+                        .map_or("—".to_string(), |v| format!("{:.2}×", v)),
+                ),
+                Cell::from(ttft_p50),
+                Cell::from(ttft_p95),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(20),
+            Constraint::Length(5),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(block);
+
+    frame.render_widget(table, area);
+}
+
+fn render_trunc_cache_row(
+    frame: &mut Frame,
+    area: Rect,
+    state: &UsageState,
+    show_trunc: bool,
+    show_cache: bool,
+) {
+    let (left, right) = if show_trunc && show_cache {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+            .split(area);
+        (Some(cols[0]), Some(cols[1]))
+    } else if show_trunc {
+        (Some(area), None)
+    } else {
+        (None, Some(area))
+    };
+
+    if let Some(a) = left {
+        render_truncation_table(frame, a, state);
+    }
+    if let Some(a) = right {
+        render_cache_table(frame, a, state);
+    }
+}
+
+fn render_truncation_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Truncation Rate ");
+
+    let rows: Vec<Row> = state
+        .truncation_rate
+        .iter()
+        .filter(|r| r.truncated > 0)
+        .map(|r| {
+            let rate_pct = r.rate * 100.0;
+            let color = if rate_pct > 5.0 {
+                Color::Red
+            } else if rate_pct > 1.0 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            Row::new(vec![
+                Cell::from(truncate(r.model.as_deref().unwrap_or("(unknown)"), 22)),
+                Cell::from(r.total.to_string()),
+                Cell::from(format!("{:.1}%", rate_pct)).style(Style::default().fg(color)),
+            ])
+        })
+        .collect();
+
+    if rows.is_empty() {
+        frame.render_widget(Paragraph::new("No truncations").block(block), area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Model").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Total").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Rate").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(10),
+            Constraint::Length(6),
+            Constraint::Length(6),
+        ],
+    )
+    .header(header)
+    .block(block);
+    frame.render_widget(table, area);
+}
+
+fn render_cache_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Cache Hit Rate ");
+
+    let rows: Vec<Row> = state
+        .cache_hit_rate
+        .iter()
+        .filter(|r| r.total_cache_read_tokens > 0)
+        .map(|r| {
+            let hit_pct = r.hit_rate.unwrap_or(0.0) * 100.0;
+            let color = if hit_pct >= 20.0 {
+                Color::Green
+            } else if hit_pct >= 5.0 {
+                Color::Yellow
+            } else {
+                Color::White
+            };
+            Row::new(vec![
+                Cell::from(truncate(r.model.as_deref().unwrap_or("(unknown)"), 22)),
+                Cell::from(fmt_tokens(r.total_input_tokens)),
+                Cell::from(fmt_tokens(r.total_cache_read_tokens)),
+                Cell::from(format!("{:.1}%", hit_pct)).style(Style::default().fg(color)),
+            ])
+        })
+        .collect();
+
+    if rows.is_empty() {
+        frame.render_widget(Paragraph::new("No cache reads").block(block), area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Model").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Input").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("CacheRead").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("HitRate").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(10),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(block);
+    frame.render_widget(table, area);
+}
+
+fn render_conv_depth(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Conversation Depth ");
+
+    if let Some(ref d) = state.conversation_depth {
+        if d.total_conversations > 0 {
+            let text = format!(
+                "  {} conversations  |  avg {:.1} turns  |  p50 {}  |  p95 {}  |  p99 {}",
+                d.total_conversations, d.avg_turns, d.p50_turns, d.p95_turns, d.p99_turns
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(text, Style::default().fg(Color::White))).block(block),
+                area,
+            );
+            return;
+        }
+    }
+    frame.render_widget(
+        Paragraph::new("No conversations with conversation_id observed").block(block),
+        area,
+    );
+}
+
+fn render_tool_usage_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Tool Usage (success rate) ");
+
+    if state.tool_usage.is_empty() {
+        frame.render_widget(Paragraph::new("No tool calls").block(block), area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Tool").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Calls").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Success%").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Errors").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Avg ms").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let rows: Vec<Row> = state
+        .tool_usage
+        .iter()
+        .map(|r| {
+            let success_pct = if r.count > 0 {
+                r.success_count as f64 / r.count as f64 * 100.0
+            } else {
+                0.0
+            };
+            let color = if success_pct < 90.0 {
+                Color::Red
+            } else if success_pct < 99.0 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            Row::new(vec![
+                Cell::from(truncate(&r.tool_name, 24)),
+                Cell::from(r.count.to_string()),
+                Cell::from(format!("{:.1}%", success_pct)).style(Style::default().fg(color)),
+                Cell::from(r.error_count.to_string()),
+                Cell::from(format!("{:.0}", r.avg_duration_ms)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(16),
+            Constraint::Length(6),
+            Constraint::Length(9),
+            Constraint::Length(7),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(block);
+
+    frame.render_widget(table, area);
+}
+
+fn render_errors_drift_row(
+    frame: &mut Frame,
+    area: Rect,
+    state: &UsageState,
+    show_errors: bool,
+    show_drift: bool,
+) {
+    let (left, right) = if show_errors && show_drift {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+            .split(area);
+        (Some(cols[0]), Some(cols[1]))
+    } else if show_errors {
+        (Some(area), None)
+    } else {
+        (None, Some(area))
+    };
+
+    if let Some(a) = left {
+        render_error_types_table(frame, a, state);
+    }
+    if let Some(a) = right {
+        render_model_drift_table(frame, a, state);
+    }
+}
+
+fn render_error_types_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Error Types ");
+
+    if state.error_types.is_empty() {
+        frame.render_widget(Paragraph::new("No errors").block(block), area);
+        return;
+    }
+
+    // Aggregate by bucket for a compact summary
+    let mut bucket_counts: HashMap<&str, usize> = HashMap::new();
+    for r in &state.error_types {
+        *bucket_counts.entry(r.bucket.as_str()).or_insert(0) += r.count;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Bucket").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Cell::from("Type").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Cnt").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let rows: Vec<Row> = state
+        .error_types
+        .iter()
+        .map(|r| {
+            Row::new(vec![
+                Cell::from(r.bucket.as_str()).style(Style::default().fg(Color::Red)),
+                Cell::from(truncate(&r.error_type, 20)),
+                Cell::from(r.count.to_string()).style(Style::default().fg(Color::Yellow)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(14),
+            Constraint::Min(10),
+            Constraint::Length(5),
+        ],
+    )
+    .header(header)
+    .block(block);
+
+    frame.render_widget(table, area);
+}
+
+fn render_model_drift_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Model Drift ");
+
+    let drifted: Vec<_> = state.model_drift.iter().filter(|p| p.differs).collect();
+
+    if drifted.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No drift — request and response models match").block(block),
+            area,
+        );
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Requested").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Served").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("N").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let rows: Vec<Row> = drifted
+        .iter()
+        .map(|r| {
+            let req = r.request_model.as_deref().unwrap_or("(unknown)");
+            let resp = r.response_model.as_deref().unwrap_or("(unknown)");
+            Row::new(vec![
+                Cell::from(truncate(req, 22)),
+                Cell::from(truncate(resp, 22)).style(Style::default().fg(Color::Yellow)),
+                Cell::from(r.count.to_string()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(14),
+            Constraint::Min(14),
+            Constraint::Length(5),
+        ],
+    )
+    .header(header)
+    .block(block);
+
+    frame.render_widget(table, area);
+}
+
+fn render_status_bar(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let text = if let Some(ref e) = state.error {
+        Line::from(Span::styled(
+            format!(" Error: {} | u:Usage r:Refresh q:Quit", e),
+            Style::default().fg(Color::Red),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" u", Style::default().fg(Color::Yellow)),
+            Span::raw(":Usage  "),
+            Span::styled("r", Style::default().fg(Color::Yellow)),
+            Span::raw(":Refresh  "),
+            Span::styled("q", Style::default().fg(Color::Red)),
+            Span::raw(":Quit"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(text), area);
+}
+
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max.saturating_sub(1)])
+    }
+}

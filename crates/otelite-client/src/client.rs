@@ -229,6 +229,126 @@ impl ApiClient {
             Err(_) => Ok(false),
         }
     }
+
+    pub async fn fetch_token_usage(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::TokenUsageResponse> {
+        let url = format!("{}/api/genai/usage", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch token usage: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_latency_stats(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::LatencyStats>> {
+        let url = format!("{}/api/genai/latency_stats", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch latency stats: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_truncation_rate(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::TruncationRateByModel>> {
+        let url = format!("{}/api/genai/truncation_rate", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch truncation rate: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_cache_hit_rate(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::CacheHitRateByModel>> {
+        let url = format!("{}/api/genai/cache_hit_rate", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch cache hit rate: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_conversation_depth(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::ConversationDepthStats> {
+        let url = format!("{}/api/genai/conversation_depth", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch conversation depth: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_tool_usage(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::ToolUsage>> {
+        let url = format!("{}/api/genai/tool_usage", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch tool usage: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_error_types(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::ErrorTypeBreakdown>> {
+        let url = format!("{}/api/genai/error_types", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch error types: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_model_drift(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::ModelDriftPair>> {
+        let url = format!("{}/api/genai/model_drift", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch model drift: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
 }
 
 #[cfg(test)]

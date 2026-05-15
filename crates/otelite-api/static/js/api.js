@@ -189,6 +189,13 @@ class ApiClient {
     async getAgentFrameworkDefs() { return this.get('/genai/agent_framework_defs'); }
     async getTopSessions(params = {}) { return this.get('/genai/top_sessions', params); }
     async getTopConversations(params = {}) { return this.get('/genai/top_conversations', params); }
+    async getTruncationRate(params = {}) { return this.get('/genai/truncation_rate', params); }
+    async getCacheHitRate(params = {}) { return this.get('/genai/cache_hit_rate', params); }
+    async getRequestParamProfile(params = {}) { return this.get('/genai/request_param_profile', params); }
+    async getConversationDepth(params = {}) { return this.get('/genai/conversation_depth', params); }
+    async getCallsSeries(params = {}) { return this.get('/genai/calls_series', { bucket_secs: 3600, ...params }); }
+    async getErrorTypes(params = {})  { return this.get('/genai/error_types', params); }
+    async getModelDrift(params = {})  { return this.get('/genai/model_drift', params); }
 
     /**
      * Check health status

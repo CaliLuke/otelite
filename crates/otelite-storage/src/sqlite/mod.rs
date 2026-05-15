@@ -283,7 +283,8 @@ impl StorageBackend for SqliteBackend {
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
 
-        reader::query_cost_series(conn, start_time, end_time, bucket_ns, model).map_err(StorageError::from)
+        reader::query_cost_series(conn, start_time, end_time, bucket_ns, model)
+            .map_err(StorageError::from)
     }
 
     async fn query_top_spans(
@@ -414,6 +415,95 @@ impl StorageBackend for SqliteBackend {
 
         reader::query_retrieval_stats(conn, start_time, end_time, top_queries_limit)
             .map_err(StorageError::from)
+    }
+
+    async fn query_truncation_rate(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<otelite_core::api::TruncationRateByModel>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_truncation_rate(conn, start_time, end_time, model).map_err(StorageError::from)
+    }
+
+    async fn query_cache_hit_rate(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<otelite_core::api::CacheHitRateByModel>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_cache_hit_rate(conn, start_time, end_time, model).map_err(StorageError::from)
+    }
+
+    async fn query_request_param_profile(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<otelite_core::api::RequestParamProfile> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_request_param_profile(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
+    async fn query_conversation_depth(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<otelite_core::api::ConversationDepthStats> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_conversation_depth(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
+    async fn query_calls_series(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+    ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_calls_series(conn, start_time, end_time, bucket_secs)
+            .map_err(StorageError::from)
+    }
+
+    async fn query_error_types(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<otelite_core::api::ErrorTypeBreakdown>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_error_types(conn, start_time, end_time, model).map_err(StorageError::from)
+    }
+
+    async fn query_model_drift(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::ModelDriftPair>> {
+        let conn_guard = self.conn.lock().unwrap();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_model_drift(conn, start_time, end_time).map_err(StorageError::from)
     }
 
     async fn close(&mut self) -> Result<()> {

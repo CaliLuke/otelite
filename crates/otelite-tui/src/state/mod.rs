@@ -3,10 +3,12 @@ use std::time::{Duration, Instant};
 pub mod logs;
 pub mod metrics;
 pub mod traces;
+pub mod usage;
 
 pub use logs::LogsState;
 pub use metrics::MetricsState;
 pub use traces::TracesState;
+pub use usage::UsageState;
 
 /// Maximum number of items to keep in memory per view
 pub const MAX_ITEMS_IN_MEMORY: usize = 1000;

@@ -7,9 +7,10 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    ConversationCostRow, CostSeriesPoint, ErrorRateByModel, ErrorResponse, FinishReasonCount,
-    LatencyStats, RetrievalStats, RetryStats, SessionCostRow, TokenUsageResponse, ToolUsage,
-    TopSpan, TopSpanSort,
+    CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
+    CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown, FinishReasonCount,
+    LatencyStats, ModelDriftPair, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
+    TokenUsageResponse, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,11 @@ fn enrich_top_spans(rows: &mut [TopSpan], db: &PricingDatabase) {
         row.cost = result.cost;
         row.cost_source = Some(result.source.as_str().to_string());
         row.cost_reason = result.reason;
+        let duration_ms = row.duration / 1_000_000;
+        if row.output_tokens > 0 && duration_ms > 0 {
+            row.derived_output_tokens_per_sec =
+                Some(row.output_tokens as f64 / (duration_ms as f64 / 1000.0));
+        }
     }
 }
 
@@ -143,7 +149,12 @@ pub async fn get_cost_series(
 
     let mut series = state
         .storage
-        .query_cost_series(query.start_time, query.end_time, bucket_ns, query.model.as_deref())
+        .query_cost_series(
+            query.start_time,
+            query.end_time,
+            bucket_ns,
+            query.model.as_deref(),
+        )
         .await
         .map_err(|e| {
             (
@@ -205,7 +216,13 @@ pub async fn get_top_spans(
 
     let mut spans = state
         .storage
-        .query_top_spans(query.start_time, query.end_time, limit, query.sort_by, query.truncated_only)
+        .query_top_spans(
+            query.start_time,
+            query.end_time,
+            limit,
+            query.sort_by,
+            query.truncated_only,
+        )
         .await
         .map_err(|e| {
             (
@@ -662,4 +679,247 @@ pub async fn get_pricing_metadata(State(state): State<AppState>) -> Json<Pricing
         license: otelite_core::pricing::LITELLM_LICENSE,
         disclaimer: PRICING_DISCLAIMER,
     })
+}
+
+/// Query parameters shared by the new per-model analytics endpoints.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct ModelAnalyticsQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    pub model: Option<String>,
+}
+
+/// Query parameters for time-series endpoints.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct TimeSeriesQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    /// Bucket size in seconds (default 3600 = 1 hour).
+    pub bucket_secs: Option<u64>,
+}
+
+/// Query parameters for endpoints that only filter by time.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct TimeRangeQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+}
+
+/// Truncation rate (finish_reason = max_tokens / length) per model.
+#[utoipa::path(
+    get,
+    path = "/api/genai/truncation_rate",
+    params(ModelAnalyticsQuery),
+    responses(
+        (status = 200, description = "Truncation rate by model", body = Vec<TruncationRateByModel>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_truncation_rate(
+    State(state): State<AppState>,
+    Query(query): Query<ModelAnalyticsQuery>,
+) -> Result<Json<Vec<TruncationRateByModel>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_truncation_rate(query.start_time, query.end_time, query.model.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query truncation rate: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// Cache token hit rate per model.
+#[utoipa::path(
+    get,
+    path = "/api/genai/cache_hit_rate",
+    params(ModelAnalyticsQuery),
+    responses(
+        (status = 200, description = "Cache hit rate by model", body = Vec<CacheHitRateByModel>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_cache_hit_rate(
+    State(state): State<AppState>,
+    Query(query): Query<ModelAnalyticsQuery>,
+) -> Result<Json<Vec<CacheHitRateByModel>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_cache_hit_rate(query.start_time, query.end_time, query.model.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query cache hit rate: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// Distribution of request parameter settings (temperature, max_tokens).
+#[utoipa::path(
+    get,
+    path = "/api/genai/request_param_profile",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Request parameter profile", body = RequestParamProfile),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_request_param_profile(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<RequestParamProfile>, (StatusCode, Json<ErrorResponse>)> {
+    let profile = state
+        .storage
+        .query_request_param_profile(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query request param profile: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(profile))
+}
+
+/// Turn-count distribution across conversations.
+#[utoipa::path(
+    get,
+    path = "/api/genai/conversation_depth",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Conversation depth statistics", body = ConversationDepthStats),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_conversation_depth(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<ConversationDepthStats>, (StatusCode, Json<ErrorResponse>)> {
+    let stats = state
+        .storage
+        .query_conversation_depth(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query conversation depth: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(stats))
+}
+
+/// LLM call volume over time (parallel to cost_series).
+#[utoipa::path(
+    get,
+    path = "/api/genai/calls_series",
+    params(TimeSeriesQuery),
+    responses(
+        (status = 200, description = "Calls per time bucket", body = Vec<CallsSeriesPoint>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_calls_series(
+    State(state): State<AppState>,
+    Query(query): Query<TimeSeriesQuery>,
+) -> Result<Json<Vec<CallsSeriesPoint>>, (StatusCode, Json<ErrorResponse>)> {
+    let bucket_secs = query.bucket_secs.unwrap_or(3600).clamp(60, 86400);
+    let rows = state
+        .storage
+        .query_calls_series(query.start_time, query.end_time, bucket_secs)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query calls series: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// Per-(model, error_type) breakdown of error spans, bucketed into actionable categories.
+#[utoipa::path(
+    get,
+    path = "/api/genai/error_types",
+    params(ModelAnalyticsQuery),
+    responses(
+        (status = 200, description = "Error type breakdown per model", body = Vec<ErrorTypeBreakdown>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_error_types(
+    State(state): State<AppState>,
+    Query(query): Query<ModelAnalyticsQuery>,
+) -> Result<Json<Vec<ErrorTypeBreakdown>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_error_types(query.start_time, query.end_time, query.model.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query error types: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// All observed (request_model → response_model) pairs with a `differs` flag.
+/// `differs == true` indicates silent provider rerouting.
+#[utoipa::path(
+    get,
+    path = "/api/genai/model_drift",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Request→response model pairs", body = Vec<ModelDriftPair>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_model_drift(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<Vec<ModelDriftPair>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_model_drift(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query model drift: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
 }

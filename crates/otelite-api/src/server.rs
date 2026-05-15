@@ -48,6 +48,13 @@ use utoipa::OpenApi;
         crate::api::genai::get_retrieval_stats,
         crate::api::genai::get_pricing_metadata,
         crate::api::genai::get_agent_framework_defs,
+        crate::api::genai::get_truncation_rate,
+        crate::api::genai::get_cache_hit_rate,
+        crate::api::genai::get_request_param_profile,
+        crate::api::genai::get_conversation_depth,
+        crate::api::genai::get_calls_series,
+        crate::api::genai::get_error_types,
+        crate::api::genai::get_model_drift,
     ),
     components(
         schemas(
@@ -230,6 +237,13 @@ impl DashboardServer {
             .route("/api/genai/retrieval_stats", get(crate::api::genai::get_retrieval_stats))
             .route("/api/genai/pricing_metadata", get(crate::api::genai::get_pricing_metadata))
             .route("/api/genai/agent_framework_defs", get(crate::api::genai::get_agent_framework_defs))
+            .route("/api/genai/truncation_rate", get(crate::api::genai::get_truncation_rate))
+            .route("/api/genai/cache_hit_rate", get(crate::api::genai::get_cache_hit_rate))
+            .route("/api/genai/request_param_profile", get(crate::api::genai::get_request_param_profile))
+            .route("/api/genai/conversation_depth", get(crate::api::genai::get_conversation_depth))
+            .route("/api/genai/calls_series", get(crate::api::genai::get_calls_series))
+            .route("/api/genai/error_types", get(crate::api::genai::get_error_types))
+            .route("/api/genai/model_drift", get(crate::api::genai::get_model_drift))
             // OpenAPI spec endpoint
             .route("/api/openapi.json", get(|| async {
                 axum::Json(ApiDoc::openapi())
