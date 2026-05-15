@@ -158,10 +158,18 @@ changes, CI/release plumbing, dependency bumps with no behaviour change.
 **Workflow**:
 
 1. While working on an issue, append entries under `## [Unreleased]` in `CHANGELOG.md`.
-2. At release time, the version-bump commit renames `[Unreleased]` to
-   `[X.Y.Z] - YYYY-MM-DD` and creates a fresh empty `[Unreleased]` block above it.
-3. Never let a release ship with no changelog entry — if one is empty, write a
-   one-line "internal" note explaining why (e.g. "release plumbing only").
+2. At release time, the bump-and-tag CI workflow runs `scripts/rotate-changelog.sh`
+   which rotates `[Unreleased]` → `[X.Y.Z] - YYYY-MM-DD` and prepends a fresh empty
+   `[Unreleased]` block. The script **fails the release** if `[Unreleased]` is empty.
+3. For pure-plumbing pushes with no user impact, add an `### Internal` bullet
+   (e.g. "CI workflow tweak — no user-visible change"). This satisfies the gate
+   without inventing fake user-facing copy.
+
+You can dry-run the rotation locally:
+
+```bash
+scripts/rotate-changelog.sh 0.1.99 2026-05-15  # writes to CHANGELOG.md — git restore after
+```
 
 ## Session End
 

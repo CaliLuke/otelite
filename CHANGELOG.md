@@ -11,6 +11,13 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Internal
+
+- Release CI now rotates `CHANGELOG.md` `[Unreleased]` → `[X.Y.Z] - DATE`
+  automatically and fails the release if `[Unreleased]` is empty. Stops
+  shipped versions from going undocumented (see `scripts/rotate-changelog.sh`,
+  `AGENTS.md` → Changelog discipline).
+
 ## [0.1.33] - 2026-05-15
 
 ### Added

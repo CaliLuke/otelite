@@ -78,9 +78,15 @@ jobs:
       - name: Update Cargo.lock
         run: cargo metadata --format-version 1 > /dev/null
 
+      - name: Rotate CHANGELOG [Unreleased] → [X.Y.Z]
+        # Fails if [Unreleased] is empty — every release must ship with notes.
+        # See AGENTS.md → Changelog discipline.
+        run: |
+          ./scripts/rotate-changelog.sh "${{ steps.bump.outputs.new }}"
+
       - name: Commit, tag, and push
         run: |
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore: release v${{ steps.bump.outputs.new }}"
           git tag "v${{ steps.bump.outputs.new }}"
           git push origin main "v${{ steps.bump.outputs.new }}"
