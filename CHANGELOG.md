@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.39] - 2026-05-15
+
 ### Fixed
 
 - **Web: API errors now surface as readable messages instead of an empty view.**
