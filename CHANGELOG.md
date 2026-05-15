@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-05-15
+
 ### Fixed
 
 - **`otelite usage` no longer panics on every invocation.** A clap flag
