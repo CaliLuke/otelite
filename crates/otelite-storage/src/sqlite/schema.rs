@@ -8,8 +8,10 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     // Enable WAL mode for better concurrency
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
-    // Set synchronous mode to NORMAL for better performance
-    conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+    // FULL: fsync each WAL frame before commit. Prevents DB corruption on OS crash
+    // at the cost of slightly higher write latency. NORMAL is faster but can corrupt
+    // the DB on power loss or OS crash during a WAL checkpoint.
+    conn.execute_batch("PRAGMA synchronous=FULL;")?;
 
     // Create logs table
     conn.execute_batch(

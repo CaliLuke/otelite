@@ -65,7 +65,7 @@ impl StorageBackend for SqliteBackend {
             StorageError::InitializationError(format!("Failed to open database: {}", e))
         })?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
             .map_err(|e| {
                 StorageError::InitializationError(format!("Failed to configure SQLite: {}", e))
             })?;
@@ -536,7 +536,7 @@ impl SqliteBackend {
                 },
             };
             if let Err(e) =
-                conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+                conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
             {
                 tracing::warn!("Purge scheduler: failed to set WAL mode: {}", e);
             }
@@ -580,8 +580,12 @@ impl SqliteBackend {
                             record.spans_deleted,
                             record.metrics_deleted
                         );
-
-                        let _ = purge::vacuum(&mut conn);
+                        // VACUUM requires exclusive access and cannot run while the main
+                        // connection is open. Run a passive checkpoint instead to keep
+                        // the WAL from growing unboundedly after bulk deletes.
+                        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+                            tracing::warn!("Purge scheduler: WAL checkpoint failed: {}", e);
+                        }
                     }
                 }
             }
