@@ -236,11 +236,14 @@ enum LogsCommands {
     },
     /// Show a single log entry by ID
     #[command(
-        after_help = "Examples:\n  otelite logs show log-12345\n  otelite logs show log-12345 --format json"
+        after_help = "Examples:\n  otelite logs show log-12345\n  otelite logs show log-12345 --format json\n  otelite logs show log-12345 --full > body.json"
     )]
     Show {
         /// Log ID
         id: String,
+        /// Print raw body only (useful for piping large bodies: otelite logs show <id> --full | jq .)
+        #[arg(long)]
+        full: bool,
     },
     /// Export log entries to file or stdout
     #[command(
@@ -656,8 +659,8 @@ async fn handle_logs_command(command: LogsCommands, config: &Config) -> Result<(
         LogsCommands::Search { query, limit } => {
             logs::handle_search(&client, config, &query, limit, None).await?;
         },
-        LogsCommands::Show { id } => {
-            logs::handle_show(&client, config, &id).await?;
+        LogsCommands::Show { id, full } => {
+            logs::handle_show(&client, config, &id, full).await?;
         },
         LogsCommands::Export {
             format,

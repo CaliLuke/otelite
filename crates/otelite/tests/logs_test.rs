@@ -251,7 +251,7 @@ async fn test_logs_show_command() {
     let config = create_test_config(server.url(), otelite::config::OutputFormat::Json);
 
     let result =
-        otelite::commands::logs::handle_show(&client, &config, "1705315800000000000").await;
+        otelite::commands::logs::handle_show(&client, &config, "1705315800000000000", false).await;
 
     mock.assert_async().await;
     assert!(result.is_ok());
@@ -273,7 +273,8 @@ async fn test_logs_show_not_found() {
     let client = create_test_client(server.url()).await;
     let config = create_test_config(server.url(), otelite::config::OutputFormat::Json);
 
-    let result = otelite::commands::logs::handle_show(&client, &config, "9999999999999999").await;
+    let result =
+        otelite::commands::logs::handle_show(&client, &config, "9999999999999999", false).await;
 
     mock.assert_async().await;
     assert!(result.is_err());

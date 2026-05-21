@@ -87,11 +87,38 @@ pub struct LogEntry {
     pub severity: String,
     pub severity_text: Option<String>,
     pub body: String,
+    /// Total byte length of the original body (populated when body may be truncated in list view).
+    #[serde(default)]
+    pub body_length: usize,
+    /// True when the body was truncated to fit list-view limits. Full body available via GET /api/logs/:id.
+    #[serde(default)]
+    pub body_truncated: bool,
     #[serde(default)]
     pub attributes: HashMap<String, String>,
     pub resource: Option<Resource>,
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
+}
+
+impl LogEntry {
+    /// Truncate body to `max_bytes` and set `body_truncated`/`body_length` accordingly.
+    pub fn truncate_body(mut self, max_bytes: usize) -> Self {
+        let original_len = self.body.len();
+        self.body_length = original_len;
+        if original_len > max_bytes {
+            // Truncate at a char boundary.
+            let cut = self
+                .body
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i < max_bytes)
+                .last()
+                .unwrap_or(0);
+            self.body.truncate(cut);
+            self.body_truncated = true;
+        }
+        self
+    }
 }
 
 /// Resource information
@@ -233,11 +260,14 @@ pub struct Quantile {
 
 impl From<crate::telemetry::LogRecord> for LogEntry {
     fn from(log: crate::telemetry::LogRecord) -> Self {
+        let body_length = log.body.len();
         Self {
             timestamp: log.timestamp,
             severity: log.severity.as_str().to_string(),
             severity_text: Some(log.severity.as_str().to_string()),
             body: log.body,
+            body_length,
+            body_truncated: false,
             attributes: log.attributes,
             resource: log.resource.map(Resource::from),
             trace_id: log.trace_id,

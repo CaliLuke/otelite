@@ -108,11 +108,22 @@ pub async fn handle_search(
 }
 
 /// Handle the `logs show` command
-pub async fn handle_show(client: &ApiClient, config: &Config, id: &str) -> Result<LogEntry> {
+pub async fn handle_show(
+    client: &ApiClient,
+    config: &Config,
+    id: &str,
+    full: bool,
+) -> Result<LogEntry> {
     let timestamp: i64 = id
         .parse()
         .map_err(|_| crate::error::Error::ApiError(format!("Invalid timestamp: {}", id)))?;
     let log = client.fetch_log_by_id(timestamp).await?;
+
+    if full {
+        // Raw body only — suitable for piping to jq or saving to a file.
+        print!("{}", log.body);
+        return Ok(log);
+    }
 
     // Output based on format
     match config.format {
@@ -275,6 +286,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         });
 
@@ -293,6 +308,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
             LogEntry {
@@ -303,6 +322,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
             LogEntry {
@@ -313,6 +336,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
             LogEntry {
@@ -323,6 +350,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
             LogEntry {
@@ -333,6 +364,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
         ]

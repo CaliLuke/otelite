@@ -290,6 +290,8 @@ mod tests {
             severity: severity.to_string(),
             severity_text: None,
             body: body.to_string(),
+            body_length: body.len(),
+            body_truncated: false,
             attributes: HashMap::new(),
             resource: Some(Resource {
                 attributes: HashMap::new(),

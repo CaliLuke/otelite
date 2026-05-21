@@ -129,7 +129,19 @@ pub fn print_log_details(log: &LogEntry, config: &Config) -> io::Result<()> {
         severity_color, log.severity, reset
     )
     .unwrap();
-    writeln!(output, "Body:      {}", log.body).unwrap();
+    if log.body_truncated {
+        writeln!(
+            output,
+            "Body ({} bytes, truncated at list view limit — showing full body):",
+            log.body_length
+        )
+        .unwrap();
+    } else if log.body_length > 1024 {
+        writeln!(output, "Body ({} bytes):", log.body_length).unwrap();
+    } else {
+        write!(output, "Body:      ").unwrap();
+    }
+    writeln!(output, "{}", log.body).unwrap();
 
     if let Some(trace_id) = &log.trace_id {
         writeln!(output, "Trace ID:  {}", trace_id).unwrap();
@@ -478,6 +490,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         };
         // Should not panic
@@ -496,6 +512,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
             LogEntry {
@@ -506,6 +526,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
             LogEntry {
@@ -516,6 +540,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
         ];
@@ -542,6 +570,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             }];
             // Should not panic for any severity level
@@ -564,6 +596,10 @@ mod tests {
             attributes,
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         };
         // Should not panic and should display attributes
@@ -582,6 +618,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         }];
         // Should not panic and should truncate long messages

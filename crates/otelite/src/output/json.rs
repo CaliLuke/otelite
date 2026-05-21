@@ -194,6 +194,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         }];
         let result = print_logs_json(&logs);
@@ -210,6 +214,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         };
         let result = print_log_json(&log);
@@ -260,6 +268,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         };
         let json = serde_json::to_string(&log).unwrap();
@@ -279,6 +291,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
             LogEntry {
@@ -289,6 +305,10 @@ mod tests {
                 attributes: HashMap::new(),
                 resource: None,
                 trace_id: None,
+                body_length: 0,
+
+                body_truncated: false,
+
                 span_id: None,
             },
         ];
@@ -310,6 +330,10 @@ mod tests {
             attributes,
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         };
         let result = print_log_json(&log);
@@ -326,6 +350,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         }];
 
@@ -356,6 +384,10 @@ mod tests {
             attributes: HashMap::new(),
             resource: None,
             trace_id: None,
+            body_length: 0,
+
+            body_truncated: false,
+
             span_id: None,
         };
         let result = print_log_json(&log);

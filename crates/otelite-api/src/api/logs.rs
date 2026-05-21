@@ -209,8 +209,12 @@ pub async fn list_logs(
         .take(limit)
         .collect();
 
-    // Convert to API format
-    let log_entries: Vec<LogEntry> = paginated_logs.into_iter().map(LogEntry::from).collect();
+    // Convert to API format, truncating bodies so list responses stay small.
+    const MAX_LIST_BODY: usize = 512;
+    let log_entries: Vec<LogEntry> = paginated_logs
+        .into_iter()
+        .map(|r| LogEntry::from(r).truncate_body(MAX_LIST_BODY))
+        .collect();
 
     let response = LogsResponse {
         logs: log_entries,
