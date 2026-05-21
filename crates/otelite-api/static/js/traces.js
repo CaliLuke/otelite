@@ -899,7 +899,8 @@ class TracesView {
             <div class="span-attributes">
                 ${entries.map(([key, value]) => {
                     if (key === 'session.id') {
-                        return `<div class="attribute-item"><span class="attribute-key">session.id</span><span class="attribute-value"><a class="trace-link" onclick="window.app.navigateToTracesBySession('${this.escapeHtml(String(value))}');return false;" href="#">${this.escapeHtml(String(value))}</a></span></div>`;
+                        const sv = this.escapeHtml(String(value));
+                        return `<div class="attribute-item"><span class="attribute-key">session.id</span><span class="attribute-value"><a class="trace-link" onclick="window.app.navigateToTracesBySession('${sv}');return false;" href="#">${sv}</a> <button class="btn btn-secondary btn-sm" style="margin-left:0.4rem;padding:0.1rem 0.4rem;font-size:0.78rem;" onclick="window.app.views.traces.openSessionDiagnoseModal('${sv}');return false;">Session Report</button></span></div>`;
                     }
                     return `
                     <div class="attribute-item">
