@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-05-21
+
 ### Fixed
 
 - **Storage: database no longer corrupts on OS crash or power loss.** SQLite was
