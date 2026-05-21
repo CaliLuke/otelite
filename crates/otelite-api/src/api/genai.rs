@@ -9,8 +9,9 @@ use axum::{
 use otelite_core::api::{
     CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
     CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown, FinishReasonCount,
-    LatencyStats, ModelDriftPair, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
-    TokenUsageResponse, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile, RetrievalStats,
+    RetryStats, SessionCostRow, TokenUsageResponse, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -698,6 +699,17 @@ pub struct TimeSeriesQuery {
     pub bucket_secs: Option<u64>,
 }
 
+/// Query parameters for time-series endpoints that also accept a model filter.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct ModelTimeSeriesQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    /// Bucket size in seconds (default 3600 = 1 hour).
+    pub bucket_secs: Option<u64>,
+    /// Optional model filter (e.g. "claude-opus-4-7").
+    pub model: Option<String>,
+}
+
 /// Query parameters for endpoints that only filter by time.
 #[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct TimeRangeQuery {
@@ -827,6 +839,43 @@ pub async fn get_conversation_depth(
             )
         })?;
     Ok(Json(stats))
+}
+
+/// LLM span latency (min/avg/p95/max + TTFT) per time bucket, grouped by model.
+#[utoipa::path(
+    get,
+    path = "/api/genai/latency_series",
+    params(ModelTimeSeriesQuery),
+    responses(
+        (status = 200, description = "Latency stats per time bucket", body = Vec<LatencySeriesPoint>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_latency_series(
+    State(state): State<AppState>,
+    Query(query): Query<ModelTimeSeriesQuery>,
+) -> Result<Json<Vec<LatencySeriesPoint>>, (StatusCode, Json<ErrorResponse>)> {
+    let bucket_secs = query.bucket_secs.unwrap_or(3600).clamp(60, 86400);
+    let rows = state
+        .storage
+        .query_latency_series(
+            query.start_time,
+            query.end_time,
+            bucket_secs,
+            query.model.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query latency series: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
 }
 
 /// LLM call volume over time (parallel to cost_series).

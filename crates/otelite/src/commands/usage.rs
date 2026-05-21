@@ -57,6 +57,14 @@ pub struct UsageCommand {
     #[arg(long)]
     pub latency: bool,
 
+    /// Show latency trend over time (min/avg/p95/max per time bucket, grouped by model)
+    #[arg(long)]
+    pub latency_series: bool,
+
+    /// Bucket size in seconds for time-series views (default 3600 = 1 hour)
+    #[arg(long, default_value = "3600")]
+    pub bucket_secs: u64,
+
     /// Show per-model truncation rate (finish_reason = max_tokens / length)
     #[arg(long)]
     pub truncation: bool,
@@ -143,6 +151,8 @@ struct UsageOutput {
     error_types: Option<Vec<otelite_core::api::ErrorTypeBreakdown>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_drift: Option<Vec<otelite_core::api::ModelDriftPair>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_series: Option<Vec<otelite_core::api::LatencySeriesPoint>>,
 }
 
 // ── pricing fetch ─────────────────────────────────────────────────────────────
@@ -300,6 +310,26 @@ impl UsageCommand {
         } else {
             None
         };
+
+        // --latency-series
+        let latency_series: Option<Vec<otelite_core::api::LatencySeriesPoint>> =
+            if self.latency_series {
+                Some(
+                    storage
+                        .query_latency_series(
+                            Some(start_time),
+                            Some(end_time),
+                            self.bucket_secs,
+                            self.model.as_deref(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            Error::ApiError(format!("Failed to query latency series: {}", e))
+                        })?,
+                )
+            } else {
+                None
+            };
 
         // --truncation
         let truncation_rate: Option<Vec<otelite_core::api::TruncationRateByModel>> =
@@ -461,6 +491,7 @@ impl UsageCommand {
                     tool_usage,
                     error_types,
                     model_drift,
+                    latency_series,
                 };
                 let json = if matches!(format, OutputFormat::JsonCompact) {
                     serde_json::to_string(&output)
@@ -539,6 +570,11 @@ impl UsageCommand {
 
                 if let Some(ref rows) = model_drift {
                     display_model_drift(rows);
+                    println!();
+                }
+
+                if let Some(ref points) = latency_series {
+                    display_latency_series(points);
                     println!();
                 }
 
@@ -865,6 +901,66 @@ fn display_latency_stats(stats: &[otelite_core::api::LatencyStats]) {
     }
 
     println!("Latency Stats by Model (* = derived, span duration includes network+queue time):");
+    println!("{}", table);
+}
+
+fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
+    use chrono::{DateTime, Local, Utc};
+
+    if points.is_empty() {
+        println!("Latency Trend: no data in range");
+        return;
+    }
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+
+    table.set_header(vec![
+        Cell::new("Bucket").fg(Color::Cyan),
+        Cell::new("Model").fg(Color::Cyan),
+        Cell::new("N").fg(Color::Cyan),
+        Cell::new("Err").fg(Color::Red),
+        Cell::new("min ms").fg(Color::Green),
+        Cell::new("avg ms").fg(Color::Yellow),
+        Cell::new("p95 ms").fg(Color::Yellow),
+        Cell::new("max ms").fg(Color::Red),
+        Cell::new("TTFT avg").fg(Color::Cyan),
+        Cell::new("TTFT p95").fg(Color::Cyan),
+    ]);
+
+    for p in points {
+        let dt = DateTime::<Utc>::from_timestamp_nanos(p.timestamp);
+        let bucket_str = dt.with_timezone(&Local).format("%m-%d %H:%M").to_string();
+        let model = p.model.as_deref().unwrap_or("(unknown)");
+        let err_str = if p.error_count > 0 {
+            format!("{}", p.error_count)
+        } else {
+            "—".to_string()
+        };
+        let ttft_avg = p
+            .avg_ttft_ms
+            .map_or("—".to_string(), |v| format!("{:.0}ms", v));
+        let ttft_p95 = p
+            .p95_ttft_ms
+            .map_or("—".to_string(), |v| format!("{}ms", v));
+
+        table.add_row(vec![
+            &bucket_str,
+            model,
+            &p.count.to_string(),
+            &err_str,
+            &format!("{}", p.min_ms),
+            &format!("{:.0}", p.avg_ms),
+            &format!("{}", p.p95_ms),
+            &format!("{}", p.max_ms),
+            &ttft_avg,
+            &ttft_p95,
+        ]);
+    }
+
+    println!("Latency Trend (per bucket × model):");
     println!("{}", table);
 }
 

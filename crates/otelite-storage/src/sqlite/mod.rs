@@ -468,6 +468,21 @@ impl StorageBackend for SqliteBackend {
         reader::query_conversation_depth(conn, start_time, end_time).map_err(StorageError::from)
     }
 
+    async fn query_latency_series(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+        model: Option<&str>,
+    ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
+        let conn_guard = self.conn.lock();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_latency_series(conn, start_time, end_time, bucket_secs, model)
+            .map_err(StorageError::from)
+    }
+
     async fn query_calls_series(
         &self,
         start_time: Option<i64>,

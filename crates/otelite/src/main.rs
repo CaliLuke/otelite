@@ -269,7 +269,7 @@ enum LogsCommands {
 enum TracesCommands {
     /// List recent distributed traces
     #[command(
-        after_help = "Examples:\n  otelite traces list --status ERROR --min-duration 1s\n  otelite traces list --query 'duration > 500ms AND status = \"ERROR\"'\n  otelite traces list --since 24h --limit 20"
+        after_help = "Examples:\n  otelite traces list --status ERROR --min-duration 1s\n  otelite traces list --model claude-opus-4-7 --status ERROR\n  otelite traces list --session <id>\n  otelite traces list --query 'duration > 500ms AND status = \"ERROR\"'\n  otelite traces list --since 24h --limit 20"
     )]
     List {
         /// Filter by time range (e.g., 1h, 24h, 7d)
@@ -291,6 +291,14 @@ enum TracesCommands {
         /// Structured query filter (e.g., 'duration > 500ms AND status = "ERROR"')
         #[arg(long)]
         query: Option<String>,
+
+        /// Filter by model name (e.g., "claude-opus-4-7")
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Filter by session ID (session.id attribute)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Show a single trace with all spans
     #[command(
@@ -299,6 +307,17 @@ enum TracesCommands {
     Show {
         /// Trace ID
         id: String,
+    },
+    /// Show logs associated with a trace
+    #[command(
+        after_help = "Examples:\n  otelite traces logs trace-abc123\n  otelite traces logs trace-abc123 --limit 20"
+    )]
+    Logs {
+        /// Trace ID
+        id: String,
+        /// Maximum number of results
+        #[arg(long, short = 'n', default_value = "100")]
+        limit: Option<usize>,
     },
     /// Export traces to file or stdout
     #[command(
@@ -667,6 +686,8 @@ async fn handle_traces_command(command: TracesCommands, config: &Config) -> Resu
             status,
             since: _,
             query,
+            model,
+            session,
         } => {
             // Parse min_duration string to milliseconds if provided
             let min_duration_ms = if let Some(duration_str) = min_duration {
@@ -685,6 +706,8 @@ async fn handle_traces_command(command: TracesCommands, config: &Config) -> Resu
                 min_duration_ms,
                 status,
                 query,
+                model,
+                session,
             )
             .await?;
         },
@@ -718,6 +741,9 @@ async fn handle_traces_command(command: TracesCommands, config: &Config) -> Resu
                 output,
             )
             .await?;
+        },
+        TracesCommands::Logs { id, limit } => {
+            traces::handle_logs_for_trace(&client, config, &id, limit).await?;
         },
     }
 

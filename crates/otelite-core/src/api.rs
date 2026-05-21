@@ -758,6 +758,34 @@ pub struct ConversationDepthStats {
     pub p99_turns: i64,
 }
 
+/// Single time-bucket latency point for LLM spans, grouped by model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LatencySeriesPoint {
+    /// Bucket start timestamp in nanoseconds since Unix epoch.
+    pub timestamp: i64,
+    /// Model (None = not attributed).
+    pub model: Option<String>,
+    /// Number of LLM calls in this bucket.
+    pub count: usize,
+    /// Number of error spans (status_code = 2) in this bucket.
+    pub error_count: usize,
+    /// Minimum span duration in milliseconds.
+    pub min_ms: i64,
+    /// Average span duration in milliseconds.
+    pub avg_ms: f64,
+    /// 95th-percentile span duration in milliseconds.
+    pub p95_ms: i64,
+    /// Maximum span duration in milliseconds.
+    pub max_ms: i64,
+    /// Average time-to-first-token in milliseconds (None when no spans carry TTFT data).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
+    /// 95th-percentile time-to-first-token in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_ttft_ms: Option<i64>,
+}
+
 /// Single time-bucket point for calls-over-time series.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

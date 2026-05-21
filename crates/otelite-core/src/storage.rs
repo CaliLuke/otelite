@@ -9,9 +9,10 @@ use thiserror::Error;
 
 use crate::api::{
     CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
-    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, LatencyStats,
-    ModelDriftPair, ModelUsage, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
-    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, LatencySeriesPoint,
+    LatencyStats, ModelDriftPair, ModelUsage, RequestParamProfile, RetrievalStats, RetryStats,
+    SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
@@ -293,6 +294,15 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<ConversationDepthStats>;
+
+    /// LLM span latency (min/avg/p95/max + TTFT) per time bucket grouped by model.
+    async fn query_latency_series(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+        model: Option<&str>,
+    ) -> Result<Vec<LatencySeriesPoint>>;
 
     /// LLM call volume per time bucket (parallel to query_cost_series).
     async fn query_calls_series(

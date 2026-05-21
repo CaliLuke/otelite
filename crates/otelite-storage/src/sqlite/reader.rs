@@ -2076,6 +2076,140 @@ pub fn query_conversation_depth(
     })
 }
 
+/// LLM span latency per time bucket grouped by model.
+///
+/// Fetches raw (bucket, model, duration_ms, ttft_ms, is_error) rows then aggregates in Rust
+/// so that p95 can be computed without a SQLite percentile extension.
+pub fn query_latency_series(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    bucket_secs: u64,
+    model: Option<&str>,
+) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
+    let exprs = token_exprs();
+    let bucket_ns = bucket_secs as i64 * 1_000_000_000;
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+    if let Some(m) = model {
+        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
+        params.push(Box::new(m.to_string()));
+    }
+
+    let sql = format!(
+        "SELECT
+            (start_time / {bucket_ns}) * {bucket_ns} AS bucket,
+            {model} AS model,
+            (end_time - start_time) / 1000000 AS duration_ms,
+            COALESCE(
+                CAST(json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"llm.time_to_first_token\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"ttft_ms\"') AS INTEGER)
+            ) AS ttft_ms,
+            CASE WHEN status_code = 2 THEN 1 ELSE 0 END AS is_error
+        FROM spans
+        {where_clause}
+        ORDER BY bucket ASC",
+        bucket_ns = bucket_ns,
+        model = exprs.model,
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare latency_series query: {}", e))
+    })?;
+
+    struct RawRow {
+        bucket: i64,
+        model: Option<String>,
+        duration_ms: i64,
+        ttft_ms: Option<i64>,
+        is_error: bool,
+    }
+
+    let raw: Vec<RawRow> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(RawRow {
+                bucket: row.get::<_, i64>(0)?,
+                model: row.get::<_, Option<String>>(1)?,
+                duration_ms: row.get::<_, i64>(2)?,
+                ttft_ms: row.get::<_, Option<i64>>(3)?,
+                is_error: row.get::<_, i64>(4)? != 0,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute latency_series query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse latency_series results: {}", e))
+        })?;
+
+    type BucketKey = (i64, Option<String>);
+    type BucketAccum = (Vec<i64>, Vec<i64>, usize);
+
+    // Group by (bucket, model) and collect vectors for in-Rust aggregation.
+    let mut groups: std::collections::BTreeMap<BucketKey, BucketAccum> =
+        std::collections::BTreeMap::new();
+    for r in raw {
+        let entry = groups.entry((r.bucket, r.model)).or_default();
+        entry.0.push(r.duration_ms);
+        if let Some(t) = r.ttft_ms {
+            entry.1.push(t);
+        }
+        if r.is_error {
+            entry.2 += 1;
+        }
+    }
+
+    let mut out = Vec::with_capacity(groups.len());
+    for ((bucket, model), (mut durations, mut ttfts, error_count)) in groups {
+        if durations.is_empty() {
+            continue;
+        }
+        durations.sort_unstable();
+        ttfts.sort_unstable();
+
+        let count = durations.len();
+        let min_ms = durations[0];
+        let max_ms = durations[count - 1];
+        let avg_ms = durations.iter().sum::<i64>() as f64 / count as f64;
+        let p95_ms = percentile(&durations, 0.95);
+
+        let (avg_ttft_ms, p95_ttft_ms) = if ttfts.is_empty() {
+            (None, None)
+        } else {
+            let avg = ttfts.iter().sum::<i64>() as f64 / ttfts.len() as f64;
+            let p95 = percentile(&ttfts, 0.95);
+            (Some(avg), Some(p95))
+        };
+
+        out.push(otelite_core::api::LatencySeriesPoint {
+            timestamp: bucket,
+            model,
+            count,
+            error_count,
+            min_ms,
+            avg_ms,
+            p95_ms,
+            max_ms,
+            avg_ttft_ms,
+            p95_ttft_ms,
+        });
+    }
+
+    Ok(out)
+}
+
 /// LLM call volume per time bucket (parallel to query_cost_series).
 pub fn query_calls_series(
     conn: &Connection,

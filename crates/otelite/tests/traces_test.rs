@@ -62,7 +62,7 @@ async fn test_traces_list_command() {
     let config = create_test_config(server.url(), otelite::config::OutputFormat::Json);
 
     let result =
-        otelite::commands::traces::handle_list(&client, &config, Some(10), None, None, None).await;
+        otelite::commands::traces::handle_list(&client, &config, Some(10), None, None, None, None, None).await;
 
     mock.assert_async().await;
     assert!(result.is_ok());
@@ -83,7 +83,7 @@ async fn test_traces_list_empty() {
     let config = create_test_config(server.url(), otelite::config::OutputFormat::Json);
 
     let result =
-        otelite::commands::traces::handle_list(&client, &config, None, None, None, None).await;
+        otelite::commands::traces::handle_list(&client, &config, None, None, None, None, None, None).await;
 
     mock.assert_async().await;
     assert!(result.is_ok());
@@ -196,7 +196,7 @@ async fn test_traces_list_with_duration_filter() {
     let config = create_test_config(server.url(), otelite::config::OutputFormat::Json);
 
     let result =
-        otelite::commands::traces::handle_list(&client, &config, None, Some(1000), None, None)
+        otelite::commands::traces::handle_list(&client, &config, None, Some(1000), None, None, None, None)
             .await;
 
     mock.assert_async().await;
@@ -236,6 +236,8 @@ async fn test_traces_list_with_status_filter() {
         None,
         None,
         Some("ERROR".to_string()),
+        None,
+        None,
         None,
     )
     .await;
@@ -341,7 +343,7 @@ async fn test_traces_list_pretty_output() {
     let config = create_test_config(server.url(), otelite::config::OutputFormat::Pretty);
 
     let result =
-        otelite::commands::traces::handle_list(&client, &config, None, None, None, None).await;
+        otelite::commands::traces::handle_list(&client, &config, None, None, None, None, None, None).await;
 
     mock.assert_async().await;
     assert!(result.is_ok());

@@ -15,6 +15,8 @@ pub async fn handle_list(
     min_duration: Option<u64>,
     status: Option<String>,
     query: Option<String>,
+    model: Option<String>,
+    session: Option<String>,
 ) -> Result<()> {
     let mut params = Vec::new();
 
@@ -28,6 +30,14 @@ pub async fn handle_list(
 
     if let Some(status) = status {
         params.push(("status", status));
+    }
+
+    if let Some(model) = model {
+        params.push(("model", model));
+    }
+
+    if let Some(session) = session {
+        params.push(("session_id", session));
     }
 
     // Parse and add query predicates if provided
@@ -140,6 +150,42 @@ pub fn filter_by_status(traces: Vec<TraceEntry>, status: &str) -> Vec<TraceEntry
             trace_status.eq_ignore_ascii_case(status)
         })
         .collect()
+}
+
+/// Show logs associated with a specific trace ID.
+pub async fn handle_logs_for_trace(
+    client: &ApiClient,
+    config: &Config,
+    trace_id: &str,
+    limit: Option<usize>,
+) -> Result<()> {
+    use crate::output::{json, pretty};
+
+    let mut params = vec![("trace_id", trace_id.to_string())];
+    if let Some(n) = limit {
+        params.push(("limit", n.to_string()));
+    }
+
+    let logs_response = client.fetch_logs(params).await?;
+
+    if logs_response.logs.is_empty() {
+        println!("No logs found for trace {}", trace_id);
+        return Ok(());
+    }
+
+    match config.format {
+        crate::config::OutputFormat::Pretty => {
+            pretty::print_logs_table(&logs_response.logs, config)?;
+        },
+        crate::config::OutputFormat::Json => {
+            json::print_logs_json(&logs_response.logs)?;
+        },
+        crate::config::OutputFormat::JsonCompact => {
+            json::print_logs_json_compact(&logs_response.logs)?;
+        },
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
