@@ -18,6 +18,7 @@ class UsageView {
         this.trEnd = null;
         this.trWindowHours = null;
         this.activeTopNTab = 'cost';
+        this.activeSectionTab = 'overview';
         this.modelFilter = null;
     }
 
@@ -237,7 +238,7 @@ class UsageView {
             }
             if (this.modelFilter) params.model = this.modelFilter;
             const bucket = this._chooseBucket();
-            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext] = await Promise.all([
+            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext, latencySeries] = await Promise.all([
                 this.api.getTokenUsage(params),
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
@@ -256,9 +257,11 @@ class UsageView {
                 this.api.getErrorTypes(params).catch(() => null),
                 this.api.getModelDrift(params).catch(() => null),
                 this.api.getLatencyByContext(params).catch(() => null),
+                this.api.getLatencySeries(params).catch(() => null),
             ]);
-            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext);
+            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext, latencySeries);
             this._attachTopNTabHandlers(params);
+            this._attachSectionTabHandlers();
             this._populateModelDropdown(summary?.by_model || []);
             // When no explicit range is selected ("All time"), show the user
             // what effective range the query covered by prefilling the date
@@ -281,7 +284,7 @@ class UsageView {
             models.map(m => `<option value="${this._esc(m)}"${m === current ? ' selected' : ''}>${this._esc(m)}</option>`).join('');
     }
 
-    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext) {
+    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext, latencySeries) {
         const { summary, by_model, by_system } = data;
 
         if (summary.total_requests === 0) {
@@ -343,14 +346,18 @@ class UsageView {
         const callsChart = this._buildCallsChart(callsSeries || []);
         const costChart = this._buildCostChart(costSeries || [], bucket);
         const topNSection = this._buildTopNSection(topSpans || [], errorRate || []);
+        const cacheHitRateSection = this._buildCacheHitRate(cacheHitRate || []);
+
+        const latencySection = this._buildLatencyTable(latencyStats || []);
+        const latencySeriesChart = this._buildLatencySeriesChart(latencySeries || [], bucket);
+        const latencyByContextSection = this._buildLatencyByContext(latencyByContext || []);
+
         const finishReasonsSection = this._buildFinishReasons(reasons);
         const truncationRateSection = this._buildTruncationRate(truncationRate || []);
-        const cacheHitRateSection = this._buildCacheHitRate(cacheHitRate || []);
-        const latencySection = this._buildLatencyTable(latencyStats || []);
-        const latencyByContextSection = this._buildLatencyByContext(latencyByContext || []);
         const errorRateSection = this._buildErrorRate(errorRate || []);
         const errorTypesSection = this._buildErrorTypes(errorTypes || []);
         const modelDriftSection = this._buildModelDrift(modelDrift || []);
+
         const toolUsageSection = this._buildToolUsage(toolUsage || []);
         const retrievalSection = this._buildRetrievalStats(retrievalStats);
         const requestParamSection = this._buildRequestParamProfile(requestParamProfile);
@@ -391,11 +398,41 @@ class UsageView {
 
         const pricingNotice = this._renderPricingNotice(pricingMeta);
 
-        return pricingNotice + summaryCards + callsChart + costChart + topNSection
-            + finishReasonsSection + truncationRateSection + cacheHitRateSection
-            + latencySection + latencyByContextSection + errorRateSection + errorTypesSection
-            + modelDriftSection + toolUsageSection + retrievalSection
-            + requestParamSection + modelTable + systemTable;
+        const sectionTabs = `
+            <div class="usage-section-tabs">
+                <button class="usage-section-tab active" data-section="overview">Overview</button>
+                <button class="usage-section-tab" data-section="performance">Performance</button>
+                <button class="usage-section-tab" data-section="quality">Quality</button>
+                <button class="usage-section-tab" data-section="details">Details</button>
+            </div>`;
+
+        return pricingNotice + sectionTabs + `
+            <div id="usage-section-overview" class="usage-section-panel">
+                ${summaryCards}
+                ${callsChart}
+                ${costChart}
+                ${cacheHitRateSection}
+                ${topNSection}
+            </div>
+            <div id="usage-section-performance" class="usage-section-panel" hidden>
+                ${latencySection}
+                ${latencySeriesChart}
+                ${latencyByContextSection}
+            </div>
+            <div id="usage-section-quality" class="usage-section-panel" hidden>
+                ${finishReasonsSection}
+                ${truncationRateSection}
+                ${errorRateSection}
+                ${errorTypesSection}
+                ${modelDriftSection}
+            </div>
+            <div id="usage-section-details" class="usage-section-panel" hidden>
+                ${toolUsageSection}
+                ${retrievalSection}
+                ${requestParamSection}
+                ${modelTable}
+                ${systemTable}
+            </div>`;
     }
 
     _buildRetrievalStats(stats) {
@@ -520,6 +557,103 @@ class UsageView {
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
+    }
+
+    _attachSectionTabHandlers() {
+        const allTabs = document.querySelectorAll('.usage-section-tab');
+        const allPanels = document.querySelectorAll('.usage-section-panel');
+        allTabs.forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.activeSectionTab = btn.dataset.section;
+                allTabs.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                allPanels.forEach(p => p.hidden = true);
+                const panel = document.getElementById(`usage-section-${btn.dataset.section}`);
+                if (panel) panel.hidden = false;
+            });
+        });
+        if (this.activeSectionTab && this.activeSectionTab !== 'overview') {
+            const btn = document.querySelector(`.usage-section-tab[data-section="${this.activeSectionTab}"]`);
+            const panel = document.getElementById(`usage-section-${this.activeSectionTab}`);
+            if (btn && panel) {
+                allTabs.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                allPanels.forEach(p => p.hidden = true);
+                panel.hidden = false;
+            }
+        }
+    }
+
+    _buildLatencySeriesChart(points, bucketSecs) {
+        if (!Array.isArray(points) || !points.length) {
+            return `<h3>Latency over time</h3><div class="empty-state-hint">No latency data in this window.</div>`;
+        }
+
+        // Aggregate across models per bucket: weighted avg for avg_ms, max for p95_ms
+        const bucketMap = new Map();
+        for (const p of points) {
+            const ts = p.timestamp;
+            const n = p.count || 1;
+            const existing = bucketMap.get(ts) || { timestamp: ts, count: 0, sum_avg: 0, max_p95: 0, details: [] };
+            existing.count += n;
+            existing.sum_avg += (p.avg_ms || 0) * n;
+            existing.max_p95 = Math.max(existing.max_p95, p.p95_ms || 0);
+            existing.details.push(p);
+            bucketMap.set(ts, existing);
+        }
+        const buckets = Array.from(bucketMap.values())
+            .sort((a, b) => a.timestamp - b.timestamp)
+            .map(b => ({ ...b, avg_ms: b.count > 0 ? b.sum_avg / b.count : 0 }));
+
+        const maxVal = buckets.reduce((m, b) => Math.max(m, b.max_p95), 0);
+        if (maxVal === 0) return `<h3>Latency over time</h3><div class="empty-state-hint">No latency data in this window.</div>`;
+
+        const width = 100, barGap = 0.5, chartHeight = 100;
+        const barWidth = Math.max((width - barGap * (buckets.length - 1)) / buckets.length, 0.1);
+
+        const bars = buckets.map((b, i) => {
+            const x = i * (barWidth + barGap);
+            const p95H = (b.max_p95 / maxVal) * chartHeight;
+            const avgH = Math.min((b.avg_ms / maxVal) * chartHeight, p95H);
+            const tsDate = new Date(b.timestamp / 1_000_000);
+            const modelLines = b.details.map(d =>
+                `  ${d.model || d.name || '(all)'}: avg ${Math.round(d.avg_ms)}ms · p95 ${d.p95_ms}ms · ${d.count} calls`
+            ).join('\n');
+            const tip = `${formatTs(tsDate)}\navg ${Math.round(b.avg_ms)}ms  p95 ${b.max_p95}ms\n${b.count} calls\n${modelLines}`;
+            const p95Rect = `<rect class="latency-chart-bar-p95" x="${x.toFixed(3)}" y="${(chartHeight - p95H).toFixed(3)}" width="${barWidth.toFixed(3)}" height="${p95H.toFixed(3)}"><title>${this._esc(tip)}</title></rect>`;
+            const avgRect = avgH > 0
+                ? `<rect class="latency-chart-bar-avg" x="${x.toFixed(3)}" y="${(chartHeight - avgH).toFixed(3)}" width="${barWidth.toFixed(3)}" height="${avgH.toFixed(3)}"><title>${this._esc(tip)}</title></rect>`
+                : '';
+            return p95Rect + avgRect;
+        }).join('');
+
+        const labelFor = i => {
+            const d = new Date(buckets[i].timestamp / 1_000_000);
+            const pad = n => String(n).padStart(2, '0');
+            if ((bucketSecs || 3600) >= 86400) return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+            return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        };
+        let axisHtml = '';
+        if (buckets.length > 0) {
+            const left = this._esc(labelFor(0));
+            const mid = buckets.length > 2 ? this._esc(labelFor(Math.floor(buckets.length / 2))) : '';
+            const right = buckets.length > 1 ? this._esc(labelFor(buckets.length - 1)) : '';
+            axisHtml = `<div class="cost-chart-axis-labels">
+                <span class="cost-chart-axis-left">${left}</span>
+                <span class="cost-chart-axis-mid">${mid}</span>
+                <span class="cost-chart-axis-right">${right}</span>
+            </div>`;
+        }
+        const peakP95 = buckets.reduce((m, b) => Math.max(m, b.max_p95), 0);
+        return `
+            <h3>Latency over time — peak p95 ${peakP95.toLocaleString()} ms</h3>
+            <p class="table-hint">Solid bar = avg; faded extension = p95. Hover for per-model breakdown.</p>
+            <div class="cost-chart">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                    ${bars}
+                </svg>
+                ${axisHtml}
+            </div>`;
     }
 
     _buildLatencyByContext(bins) {

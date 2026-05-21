@@ -2583,3 +2583,41 @@ body {
 .drift-warning td {
     color: var(--warning-color, #f59e0b);
 }
+
+/* Usage page — section-level tabs (Overview / Performance / Quality / Details) */
+.usage-section-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.75rem;
+}
+.usage-section-tab {
+    padding: 0.35rem 1.1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    transition: background 0.1s, color 0.1s;
+}
+.usage-section-tab:hover { background: var(--hover-bg, rgba(255,255,255,0.05)); color: var(--text-primary); }
+.usage-section-tab.active { background: var(--accent-color, #3b82f6); color: #fff; border-color: transparent; }
+.usage-section-panel[hidden] { display: none; }
+
+/* Subtle hint text below section headings */
+.table-hint {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin: -0.5rem 0 0.75rem;
+}
+
+/* Latency chart — two-tone bars: p95 faded, avg solid */
+.latency-chart-bar-p95 { fill: var(--accent-color, #3b82f6); opacity: 0.3; }
+.latency-chart-bar-p95:hover { opacity: 0.5; }
+.latency-chart-bar-avg { fill: var(--accent-color, #3b82f6); }
+.latency-chart-bar-avg:hover { fill: #8b5cf6; }
