@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-05-21
+
 ### Added
 
 - **CLI: `otelite logs show <id> --full` dumps the raw body to stdout.** Useful when the body is a
