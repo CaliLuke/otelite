@@ -205,6 +205,13 @@ class ApiClient {
     async getLatencySeries(params = {}) { return this.get('/genai/latency_series', { bucket_secs: 3600, ...params }); }
 
     /**
+     * Fetch session diagnose report
+     */
+    async getSessionDiagnose(sessionId) {
+        return this.get(`/sessions/${encodeURIComponent(sessionId)}/diagnose`);
+    }
+
+    /**
      * Check health status
      */
     async getHealth() {

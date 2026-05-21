@@ -120,6 +120,8 @@ class TracesView {
                 <div id="attr-chips-traces" class="attr-chips"></div>
             </div>
 
+            <div id="session-banner" style="display:none;"></div>
+
             <div class="traces-container">
                 <div id="traces-list" class="traces-list"></div>
                 <div id="traces-h-handle" class="layout-drag-handle-v"></div>
@@ -442,6 +444,179 @@ class TracesView {
         container.querySelectorAll('.trace-entry').forEach((entry, index) => {
             entry.addEventListener('click', () => this.selectTrace(displayTraces[index].trace_id));
         });
+
+        this._updateSessionBanner();
+    }
+
+    _updateSessionBanner() {
+        const banner = document.getElementById('session-banner');
+        if (!banner) return;
+        if (!this.filters.sessionId) {
+            banner.style.display = 'none';
+            return;
+        }
+        banner.style.cssText = `
+            display: flex; align-items: center; gap: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            margin-bottom: 0.5rem;
+            font-size: 0.85rem;
+        `;
+        banner.innerHTML = `
+            <span style="color:var(--text-secondary);">Filtered by session:</span>
+            <code style="color:var(--accent-color);word-break:break-all;">${this.escapeHtml(this.filters.sessionId)}</code>
+            <button id="session-report-btn" class="btn btn-secondary btn-sm">Session Report</button>
+        `;
+        document.getElementById('session-report-btn').addEventListener('click', () => {
+            this.openSessionDiagnoseModal(this.filters.sessionId);
+        });
+    }
+
+    async openSessionDiagnoseModal(sessionId) {
+        const existing = document.getElementById('session-diagnose-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'session-diagnose-modal';
+        modal.style.cssText = `
+            position: fixed; inset: 0; z-index: 9999;
+            background: rgba(0,0,0,0.85);
+            display: flex; align-items: center; justify-content: center;
+            padding: 2rem;
+        `;
+
+        const box = document.createElement('div');
+        box.style.cssText = `
+            background: var(--bg-secondary);
+            border: 1px solid var(--accent-color);
+            border-radius: 8px;
+            width: 100%; max-width: 1100px;
+            max-height: 90vh;
+            display: flex; flex-direction: column;
+            overflow: hidden;
+        `;
+        box.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:1rem 1.25rem;border-bottom:1px solid var(--border-color);flex-shrink:0;">
+                <h3 style="font-size:1rem;font-weight:600;">Session Report</h3>
+                <button id="close-session-diagnose" class="btn btn-secondary btn-sm">× Close</button>
+            </div>
+            <div id="session-diagnose-body" style="flex:1;overflow-y:auto;padding:1.25rem;">
+                <div style="text-align:center;color:var(--text-secondary);padding:2rem;">Loading…</div>
+            </div>
+        `;
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+
+        document.getElementById('close-session-diagnose').addEventListener('click', () => modal.remove());
+        modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+
+        try {
+            const data = await this.apiClient.getSessionDiagnose(sessionId);
+            document.getElementById('session-diagnose-body').innerHTML = this._renderSessionDiagnose(data);
+        } catch (e) {
+            document.getElementById('session-diagnose-body').innerHTML =
+                `<div style="color:var(--error-color);padding:1rem;">Failed to load session report: ${this.escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    _renderSessionDiagnose(data) {
+        const fmt = n => n == null ? '—' : n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}K` : String(n);
+        const fmtDur = ms => ms >= 60000 ? `${Math.floor(ms/60000)}m${String(Math.floor((ms%60000)/1000)).padStart(2,'0')}s` : `${(ms/1000).toFixed(1)}s`;
+        const fmtTtft = v => v == null ? '—' : `${v.toFixed(1)}s`;
+
+        let html = `
+            <div style="margin-bottom:1rem;">
+                <div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.25rem;">Session ID</div>
+                <code style="word-break:break-all;">${this.escapeHtml(data.session_id)}</code>
+            </div>
+            <div style="display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:1.25rem;font-size:0.9rem;">
+                <div><span style="color:var(--text-secondary);">Model: </span>${this.escapeHtml(data.models.join(', ') || '(unknown)')}</div>
+                <div><span style="color:var(--text-secondary);">Interactions: </span>${data.total_interactions}</div>
+                <div><span style="color:var(--text-secondary);">Period: </span>${this.escapeHtml(data.start_time)} – ${this.escapeHtml(data.end_time)}</div>
+                ${data.error_count > 0 ? `<div><span style="color:var(--error-color);">Errors: ${data.error_count}</span></div>` : ''}
+                ${data.stall_count > 0 ? `<div><span style="color:var(--warning-color);">Stalls: ${data.stall_count}</span></div>` : ''}
+            </div>`;
+
+        // Interaction table
+        html += `
+            <div style="overflow-x:auto;margin-bottom:1.25rem;">
+                <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border-color);color:var(--text-secondary);">
+                            <th style="padding:0.3rem 0.5rem;text-align:right;">#</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:left;">Time</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:right;">Input</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:right;">Cached</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:right;">TTFT</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:right;">Duration</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:right;">Output</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:left;">Status</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:left;">Trace</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.interactions.map(ia => {
+                            const statusColor = ia.is_stall ? 'var(--warning-color)' : ia.is_error ? 'var(--error-color)' : 'var(--success-color)';
+                            const statusText = ia.is_stall ? 'STALL' : ia.is_error ? 'ERROR' : 'OK';
+                            const traceShort = ia.trace_id.substring(0, 12);
+                            return `<tr style="border-bottom:1px solid var(--border-color);opacity:0.9;">
+                                <td style="padding:0.3rem 0.5rem;text-align:right;">${ia.index}</td>
+                                <td style="padding:0.3rem 0.5rem;">${this.escapeHtml(ia.time)}</td>
+                                <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.input_tokens)}</td>
+                                <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.cache_read_tokens)}</td>
+                                <td style="padding:0.3rem 0.5rem;text-align:right;">${fmtTtft(ia.ttft_secs)}</td>
+                                <td style="padding:0.3rem 0.5rem;text-align:right;">${fmtDur(ia.duration_ms)}</td>
+                                <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.output_tokens)}</td>
+                                <td style="padding:0.3rem 0.5rem;color:${statusColor};font-weight:600;">${statusText}</td>
+                                <td style="padding:0.3rem 0.5rem;font-family:monospace;font-size:0.78rem;">
+                                    <a class="trace-link" onclick="window.app.views.traces.selectTrace('${this.escapeHtml(ia.trace_id)}');document.getElementById('session-diagnose-modal')?.remove();return false;" href="#">${traceShort}</a>
+                                </td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>`;
+
+        // Context growth
+        if (data.context_growth) {
+            const cg = data.context_growth;
+            html += `
+                <div style="margin-bottom:1.25rem;padding:0.75rem;background:var(--bg-primary);border-radius:6px;font-size:0.87rem;">
+                    <strong>Context growth:</strong>
+                    ${fmt(cg.first_tokens)} → ${fmt(cg.last_tokens)} tokens across ${cg.interaction_count} interactions
+                    <span style="color:var(--text-secondary);"> (peak: ${fmt(cg.peak_tokens)})</span>
+                </div>`;
+        }
+
+        // Stall warnings
+        const stalls = data.interactions.filter(i => i.is_stall);
+        if (stalls.length > 0) {
+            html += `<div style="padding:0.75rem;background:var(--bg-primary);border-left:3px solid var(--warning-color);border-radius:0 6px 6px 0;font-size:0.87rem;">
+                <strong style="color:var(--warning-color);">⚠ ${stalls.length} streaming stall(s) detected</strong>
+                ${stalls.map(ia => `<div style="margin-top:0.35rem;color:var(--text-secondary);">
+                    Interaction #${ia.index}: ${fmtDur(ia.duration_ms)} duration${ia.input_tokens ? `, ~${fmt(ia.input_tokens)} tokens` : ''}
+                </div>`).join('')}
+            </div>`;
+        }
+
+        // Escalation block
+        const errored = data.interactions.filter(i => i.is_error);
+        if (errored.length > 0) {
+            const responseIds = errored.filter(i => i.response_id).map(i => i.response_id).join(', ');
+            const traceIds = errored.map(i => i.trace_id.substring(0, 16)).join(', ');
+            html += `
+                <div style="margin-top:1.25rem;padding:0.75rem;background:var(--bg-primary);border-radius:6px;font-size:0.82rem;font-family:monospace;">
+                    <div style="font-weight:600;margin-bottom:0.5rem;font-family:sans-serif;">Escalation info</div>
+                    <div>Session:&nbsp;&nbsp; ${this.escapeHtml(data.session_id)}</div>
+                    ${data.models.length ? `<div>Model:&nbsp;&nbsp;&nbsp;&nbsp; ${this.escapeHtml(data.models.join(', '))}</div>` : ''}
+                    ${responseIds ? `<div>Response IDs: ${this.escapeHtml(responseIds)}</div>` : ''}
+                    <div>Trace IDs:&nbsp; ${this.escapeHtml(traceIds)}</div>
+                </div>`;
+        }
+
+        return html;
     }
 
     /**

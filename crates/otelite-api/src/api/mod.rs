@@ -7,6 +7,7 @@ pub mod help;
 pub mod logs;
 pub mod metrics;
 pub mod resource_keys;
+pub mod sessions;
 pub mod stats;
 pub mod traces;
 

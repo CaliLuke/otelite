@@ -28,6 +28,9 @@ serde_json = { workspace = true }
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
+# Date/time formatting for session diagnose endpoint
+chrono = { workspace = true }
+
 # MIME type detection for static files
 mime_guess = "2.0"
 

@@ -882,3 +882,53 @@ pub struct ModelDriftPair {
     /// True when both fields are non-null and differ from each other.
     pub differs: bool,
 }
+
+/// One LLM interaction within a session (derived from a single trace's root GenAI span).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionInteraction {
+    pub index: usize,
+    /// Wall-clock time of the interaction start (HH:MM:SS, server local time).
+    pub time: String,
+    pub model: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    /// Time-to-first-token in seconds (None when not instrumented or non-streaming).
+    pub ttft_secs: Option<f64>,
+    pub duration_ms: i64,
+    pub is_error: bool,
+    /// True when a stream started (TTFT present) but the span ended in error after >30 s.
+    pub is_stall: bool,
+    pub response_id: Option<String>,
+    pub trace_id: String,
+    pub start_time_ns: i64,
+}
+
+/// Context-growth summary for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionContextGrowth {
+    pub first_tokens: u64,
+    pub last_tokens: u64,
+    pub peak_tokens: u64,
+    pub interaction_count: usize,
+}
+
+/// Full session diagnose report returned by GET /api/sessions/:id/diagnose.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionDiagnoseResponse {
+    pub session_id: String,
+    pub models: Vec<String>,
+    /// Formatted start time of the first interaction (RFC 3339).
+    pub start_time: String,
+    /// Formatted end time of the last interaction (RFC 3339).
+    pub end_time: String,
+    pub total_interactions: usize,
+    pub error_count: usize,
+    pub stall_count: usize,
+    pub interactions: Vec<SessionInteraction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_growth: Option<SessionContextGrowth>,
+}

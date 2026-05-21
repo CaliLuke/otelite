@@ -379,6 +379,33 @@ impl ApiClient {
         }
         Ok(response.json().await?)
     }
+
+    pub async fn fetch_session_diagnose(
+        &self,
+        session_id: &str,
+    ) -> Result<otelite_core::api::SessionDiagnoseResponse> {
+        let url = format!(
+            "{}/api/sessions/{}/diagnose",
+            self.base_url, session_id
+        );
+        let response = self.client.get(&url).send().await?;
+
+        if response.status().as_u16() == 404 {
+            return Err(Error::NotFound(format!(
+                "Session '{}' not found",
+                session_id
+            )));
+        }
+
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch session diagnose: HTTP {}",
+                response.status()
+            )));
+        }
+
+        Ok(response.json().await?)
+    }
 }
 
 #[cfg(test)]
