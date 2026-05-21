@@ -2080,16 +2080,28 @@ pub fn query_conversation_depth(
 ///
 /// Fetches raw (bucket, model, duration_ms, ttft_ms, is_error) rows then aggregates in Rust
 /// so that p95 can be computed without a SQLite percentile extension.
+#[allow(clippy::too_many_arguments)]
 pub fn query_latency_series(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
     bucket_secs: u64,
     model: Option<&str>,
+    all_spans: bool,
 ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
     let exprs = token_exprs();
     let bucket_ns = bucket_secs as i64 * 1_000_000_000;
-    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    // In all_spans mode group by span name; otherwise group by model.
+    let group_col = if all_spans {
+        "name".to_string()
+    } else {
+        exprs.model.clone()
+    };
+    let mut where_clause = if all_spans {
+        "WHERE 1=1".to_string()
+    } else {
+        format!("WHERE {}", exprs.llm_span_guard)
+    };
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(start) = start_time {
@@ -2100,15 +2112,17 @@ pub fn query_latency_series(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
+    if !all_spans {
+        if let Some(m) = model {
+            where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
+            params.push(Box::new(m.to_string()));
+        }
     }
 
     let sql = format!(
         "SELECT
             (start_time / {bucket_ns}) * {bucket_ns} AS bucket,
-            {model} AS model,
+            {group_col} AS group_label,
             (end_time - start_time) / 1000000 AS duration_ms,
             COALESCE(
                 CAST(json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS INTEGER),
@@ -2120,7 +2134,7 @@ pub fn query_latency_series(
         {where_clause}
         ORDER BY bucket ASC",
         bucket_ns = bucket_ns,
-        model = exprs.model,
+        group_col = group_col,
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -2130,7 +2144,7 @@ pub fn query_latency_series(
 
     struct RawRow {
         bucket: i64,
-        model: Option<String>,
+        label: Option<String>,
         duration_ms: i64,
         ttft_ms: Option<i64>,
         is_error: bool,
@@ -2140,7 +2154,7 @@ pub fn query_latency_series(
         .query_map(param_refs.as_slice(), |row| {
             Ok(RawRow {
                 bucket: row.get::<_, i64>(0)?,
-                model: row.get::<_, Option<String>>(1)?,
+                label: row.get::<_, Option<String>>(1)?,
                 duration_ms: row.get::<_, i64>(2)?,
                 ttft_ms: row.get::<_, Option<i64>>(3)?,
                 is_error: row.get::<_, i64>(4)? != 0,
@@ -2157,11 +2171,10 @@ pub fn query_latency_series(
     type BucketKey = (i64, Option<String>);
     type BucketAccum = (Vec<i64>, Vec<i64>, usize);
 
-    // Group by (bucket, model) and collect vectors for in-Rust aggregation.
     let mut groups: std::collections::BTreeMap<BucketKey, BucketAccum> =
         std::collections::BTreeMap::new();
     for r in raw {
-        let entry = groups.entry((r.bucket, r.model)).or_default();
+        let entry = groups.entry((r.bucket, r.label)).or_default();
         entry.0.push(r.duration_ms);
         if let Some(t) = r.ttft_ms {
             entry.1.push(t);
@@ -2172,7 +2185,7 @@ pub fn query_latency_series(
     }
 
     let mut out = Vec::with_capacity(groups.len());
-    for ((bucket, model), (mut durations, mut ttfts, error_count)) in groups {
+    for ((bucket, label), (mut durations, mut ttfts, error_count)) in groups {
         if durations.is_empty() {
             continue;
         }
@@ -2193,9 +2206,16 @@ pub fn query_latency_series(
             (Some(avg), Some(p95))
         };
 
+        let (model, name) = if all_spans {
+            (None, label)
+        } else {
+            (label, None)
+        };
+
         out.push(otelite_core::api::LatencySeriesPoint {
             timestamp: bucket,
             model,
+            name,
             count,
             error_count,
             min_ms,
@@ -2210,16 +2230,26 @@ pub fn query_latency_series(
     Ok(out)
 }
 
-/// LLM call volume per time bucket (parallel to query_cost_series).
+/// Call volume per time bucket grouped by model (LLM mode) or span name (all-spans mode).
 pub fn query_calls_series(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
     bucket_secs: u64,
+    all_spans: bool,
 ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
     let exprs = token_exprs();
     let bucket_ns = bucket_secs as i64 * 1_000_000_000;
-    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let group_col = if all_spans {
+        "name".to_string()
+    } else {
+        exprs.model.clone()
+    };
+    let mut where_clause = if all_spans {
+        "WHERE 1=1".to_string()
+    } else {
+        format!("WHERE {}", exprs.llm_span_guard)
+    };
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(start) = start_time {
@@ -2234,14 +2264,14 @@ pub fn query_calls_series(
     let sql = format!(
         "SELECT
             (start_time / {bucket_ns}) * {bucket_ns} AS bucket,
-            {model} AS model,
+            {group_col} AS label,
             COUNT(*) AS requests
         FROM spans
         {where_clause}
-        GROUP BY bucket, {model}
+        GROUP BY bucket, {group_col}
         ORDER BY bucket ASC",
         bucket_ns = bucket_ns,
-        model = exprs.model,
+        group_col = group_col,
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -2251,10 +2281,18 @@ pub fn query_calls_series(
 
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
+            let label: Option<String> = row.get(1)?;
+            let requests = row.get::<_, i64>(2)? as usize;
+            let (model, name) = if all_spans {
+                (None, label)
+            } else {
+                (label, None)
+            };
             Ok(otelite_core::api::CallsSeriesPoint {
                 timestamp: row.get::<_, i64>(0)?,
-                model: row.get::<_, Option<String>>(1)?,
-                requests: row.get::<_, i64>(2)? as usize,
+                model,
+                name,
+                requests,
             })
         })
         .map_err(|e| {
@@ -2266,6 +2304,152 @@ pub fn query_calls_series(
         })?;
 
     Ok(rows)
+}
+
+/// LLM latency broken down by input-token context size bin × model.
+///
+/// Bins: 0–1K, 1K–10K, 10K–50K, 50K–100K, 100K+
+/// p95 is computed in Rust over raw rows per bin.
+pub fn query_latency_by_context(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    model: Option<&str>,
+) -> Result<Vec<otelite_core::api::LatencyByContextBin>> {
+    let exprs = token_exprs();
+    let mut where_clause = format!(
+        "WHERE {} AND ({}) IS NOT NULL AND ({}) > 0",
+        exprs.llm_span_guard, exprs.input, exprs.input
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+    if let Some(m) = model {
+        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
+        params.push(Box::new(m.to_string()));
+    }
+
+    let sql = format!(
+        "SELECT
+            {model} AS model,
+            COALESCE({input}, 0) AS input_tokens,
+            (end_time - start_time) / 1000000 AS duration_ms,
+            COALESCE(
+                CAST(json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"llm.time_to_first_token\"') AS INTEGER),
+                CAST(json_extract(attributes, '$.\"ttft_ms\"') AS INTEGER)
+            ) AS ttft_ms
+        FROM spans
+        {where_clause}",
+        model = exprs.model,
+        input = exprs.input,
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare latency_by_context query: {}", e))
+    })?;
+
+    struct RawRow {
+        model: Option<String>,
+        input_tokens: i64,
+        duration_ms: i64,
+        ttft_ms: Option<i64>,
+    }
+
+    let raw: Vec<RawRow> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(RawRow {
+                model: row.get(0)?,
+                input_tokens: row.get::<_, i64>(1)?,
+                duration_ms: row.get::<_, i64>(2)?,
+                ttft_ms: row.get(3)?,
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute latency_by_context query: {}", e))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse latency_by_context results: {}", e))
+        })?;
+
+    const BINS: &[(u64, u64, &str)] = &[
+        (0, 1_000, "0–1K"),
+        (1_000, 10_000, "1K–10K"),
+        (10_000, 50_000, "10K–50K"),
+        (50_000, 100_000, "50K–100K"),
+        (100_000, u64::MAX, "100K+"),
+    ];
+
+    type BinKey = (usize, Option<String>); // (bin_index, model)
+    type BinAccum = (Vec<i64>, Vec<i64>); // (durations, ttfts)
+
+    let mut groups: std::collections::BTreeMap<BinKey, BinAccum> =
+        std::collections::BTreeMap::new();
+
+    for r in raw {
+        let bin_idx = BINS
+            .iter()
+            .position(|(lo, hi, _)| {
+                let t = r.input_tokens as u64;
+                t >= *lo && t < *hi
+            })
+            .unwrap_or(BINS.len() - 1);
+        let entry = groups.entry((bin_idx, r.model)).or_default();
+        entry.0.push(r.duration_ms);
+        if let Some(t) = r.ttft_ms {
+            entry.1.push(t);
+        }
+    }
+
+    let mut out = Vec::with_capacity(groups.len());
+    for ((bin_idx, model), (mut durations, mut ttfts)) in groups {
+        if durations.is_empty() {
+            continue;
+        }
+        durations.sort_unstable();
+        ttfts.sort_unstable();
+
+        let (lo, hi, label) = BINS[bin_idx];
+        let count = durations.len();
+        let avg_ms = durations.iter().sum::<i64>() as f64 / count as f64;
+        let p95_ms = percentile(&durations, 0.95);
+        let max_ms = durations[count - 1];
+        let avg_ttft_ms = if ttfts.is_empty() {
+            None
+        } else {
+            Some(ttfts.iter().sum::<i64>() as f64 / ttfts.len() as f64)
+        };
+
+        out.push(otelite_core::api::LatencyByContextBin {
+            bin: label.to_string(),
+            min_tokens: lo,
+            max_tokens: hi,
+            model,
+            count,
+            avg_ms,
+            p95_ms,
+            max_ms,
+            avg_ttft_ms,
+        });
+    }
+
+    // Sort by bin index so output is always 0–1K → 1K–10K → …
+    out.sort_by_key(|r| {
+        BINS.iter()
+            .position(|(_, _, lbl)| lbl == &r.bin.as_str())
+            .unwrap_or(usize::MAX)
+    });
+
+    Ok(out)
 }
 
 /// Per-(model, error_type) breakdown of error spans, with bucketing into actionable categories.

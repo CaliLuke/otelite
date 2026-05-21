@@ -9,10 +9,10 @@ use thiserror::Error;
 
 use crate::api::{
     CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
-    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, LatencySeriesPoint,
-    LatencyStats, ModelDriftPair, ModelUsage, RequestParamProfile, RetrievalStats, RetryStats,
-    SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, LatencyByContextBin,
+    LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage, RequestParamProfile,
+    RetrievalStats, RetryStats, SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
+    TopSpanSort, TruncationRateByModel,
 };
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
@@ -295,22 +295,35 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
     ) -> Result<ConversationDepthStats>;
 
-    /// LLM span latency (min/avg/p95/max + TTFT) per time bucket grouped by model.
+    /// Latency (min/avg/p95/max + TTFT) per time bucket grouped by model or span name.
+    /// When `all_spans` is true the LLM guard is lifted and results are grouped by span name.
+    #[allow(clippy::too_many_arguments)]
     async fn query_latency_series(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_secs: u64,
         model: Option<&str>,
+        all_spans: bool,
     ) -> Result<Vec<LatencySeriesPoint>>;
 
-    /// LLM call volume per time bucket (parallel to query_cost_series).
+    /// Call volume per time bucket grouped by model or span name.
+    /// When `all_spans` is true the LLM guard is lifted and results are grouped by span name.
     async fn query_calls_series(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_secs: u64,
+        all_spans: bool,
     ) -> Result<Vec<CallsSeriesPoint>>;
+
+    /// LLM latency broken down by input-token context size bin × model.
+    async fn query_latency_by_context(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<LatencyByContextBin>>;
 
     /// Per-(model, error_type) breakdown of error spans, bucketed into actionable categories.
     async fn query_error_types(

@@ -237,7 +237,7 @@ class UsageView {
             }
             if (this.modelFilter) params.model = this.modelFilter;
             const bucket = this._chooseBucket();
-            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift] = await Promise.all([
+            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext] = await Promise.all([
                 this.api.getTokenUsage(params),
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
@@ -255,8 +255,9 @@ class UsageView {
                 this.api.getCallsSeries(params).catch(() => null),
                 this.api.getErrorTypes(params).catch(() => null),
                 this.api.getModelDrift(params).catch(() => null),
+                this.api.getLatencyByContext(params).catch(() => null),
             ]);
-            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift);
+            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext);
             this._attachTopNTabHandlers(params);
             this._populateModelDropdown(summary?.by_model || []);
             // When no explicit range is selected ("All time"), show the user
@@ -280,7 +281,7 @@ class UsageView {
             models.map(m => `<option value="${this._esc(m)}"${m === current ? ' selected' : ''}>${this._esc(m)}</option>`).join('');
     }
 
-    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift) {
+    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext) {
         const { summary, by_model, by_system } = data;
 
         if (summary.total_requests === 0) {
@@ -346,6 +347,7 @@ class UsageView {
         const truncationRateSection = this._buildTruncationRate(truncationRate || []);
         const cacheHitRateSection = this._buildCacheHitRate(cacheHitRate || []);
         const latencySection = this._buildLatencyTable(latencyStats || []);
+        const latencyByContextSection = this._buildLatencyByContext(latencyByContext || []);
         const errorRateSection = this._buildErrorRate(errorRate || []);
         const errorTypesSection = this._buildErrorTypes(errorTypes || []);
         const modelDriftSection = this._buildModelDrift(modelDrift || []);
@@ -391,8 +393,8 @@ class UsageView {
 
         return pricingNotice + summaryCards + callsChart + costChart + topNSection
             + finishReasonsSection + truncationRateSection + cacheHitRateSection
-            + latencySection + errorRateSection + errorTypesSection + modelDriftSection
-            + toolUsageSection + retrievalSection
+            + latencySection + latencyByContextSection + errorRateSection + errorTypesSection
+            + modelDriftSection + toolUsageSection + retrievalSection
             + requestParamSection + modelTable + systemTable;
     }
 
@@ -515,6 +517,34 @@ class UsageView {
                     <th title="Derived metric: span duration includes network and queue time, not pure generation throughput">Tok/s derived (p50/p95/p99)</th>
                     <th>Context (p50/p95/p99)</th>
                     <th>Out/In ratio (p50/p95)</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+    }
+
+    _buildLatencyByContext(bins) {
+        if (!bins || !bins.length) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const rows = bins.map(b => {
+            const ttft = b.avg_ttft_ms != null ? this._formatDuration(b.avg_ttft_ms) : '—';
+            return `
+                <tr>
+                    <td>${this._esc(b.bin)}</td>
+                    <td>${this._esc(b.model || '—')}</td>
+                    <td>${fmt(b.count || 0)}</td>
+                    <td>${this._esc(this._formatDuration(b.avg_ms))}</td>
+                    <td>${this._esc(this._formatDuration(b.p95_ms))}</td>
+                    <td>${this._esc(this._formatDuration(b.max_ms))}</td>
+                    <td>${this._esc(ttft)}</td>
+                </tr>`;
+        }).join('');
+        return `
+            <h3>Latency by context size</h3>
+            <p class="table-hint">Response time broken down by prompt token count × model. Helps identify whether larger contexts cause slowdowns.</p>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Context bin (input tokens)</th><th>Model</th><th>Calls</th>
+                    <th>Avg</th><th>P95</th><th>Max</th><th>TTFT avg</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;

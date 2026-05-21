@@ -54,6 +54,7 @@ use utoipa::OpenApi;
         crate::api::genai::get_conversation_depth,
         crate::api::genai::get_latency_series,
         crate::api::genai::get_calls_series,
+        crate::api::genai::get_latency_by_context,
         crate::api::genai::get_error_types,
         crate::api::genai::get_model_drift,
     ),
@@ -249,6 +250,7 @@ impl DashboardServer {
             .route("/api/genai/conversation_depth", get(crate::api::genai::get_conversation_depth))
             .route("/api/genai/latency_series", get(crate::api::genai::get_latency_series))
             .route("/api/genai/calls_series", get(crate::api::genai::get_calls_series))
+            .route("/api/genai/latency_by_context", get(crate::api::genai::get_latency_by_context))
             .route("/api/genai/error_types", get(crate::api::genai::get_error_types))
             .route("/api/genai/model_drift", get(crate::api::genai::get_model_drift))
             // OpenAPI spec endpoint

@@ -474,12 +474,13 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         bucket_secs: u64,
         model: Option<&str>,
+        all_spans: bool,
     ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
         let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
-        reader::query_latency_series(conn, start_time, end_time, bucket_secs, model)
+        reader::query_latency_series(conn, start_time, end_time, bucket_secs, model, all_spans)
             .map_err(StorageError::from)
     }
 
@@ -488,12 +489,27 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_secs: u64,
+        all_spans: bool,
     ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
         let conn_guard = self.conn.lock();
         let conn = conn_guard
             .as_ref()
             .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
-        reader::query_calls_series(conn, start_time, end_time, bucket_secs)
+        reader::query_calls_series(conn, start_time, end_time, bucket_secs, all_spans)
+            .map_err(StorageError::from)
+    }
+
+    async fn query_latency_by_context(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<Vec<otelite_core::api::LatencyByContextBin>> {
+        let conn_guard = self.conn.lock();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_latency_by_context(conn, start_time, end_time, model)
             .map_err(StorageError::from)
     }
 

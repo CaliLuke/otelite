@@ -201,6 +201,7 @@ class ApiClient {
     async getCallsSeries(params = {}) { return this.get('/genai/calls_series', { bucket_secs: 3600, ...params }); }
     async getErrorTypes(params = {})  { return this.get('/genai/error_types', params); }
     async getModelDrift(params = {})  { return this.get('/genai/model_drift', params); }
+    async getLatencyByContext(params = {}) { return this.get('/genai/latency_by_context', params); }
 
     /**
      * Check health status

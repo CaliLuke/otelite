@@ -92,6 +92,10 @@ pub struct UsageCommand {
     /// Show request→response model pairs (detect silent provider rerouting)
     #[arg(long)]
     pub model_drift: bool,
+
+    /// Show latency broken down by input-token context size bin (and model)
+    #[arg(long)]
+    pub latency_context: bool,
 }
 
 // ── serialisable output types (used for --format json) ───────────────────────
@@ -153,6 +157,8 @@ struct UsageOutput {
     model_drift: Option<Vec<otelite_core::api::ModelDriftPair>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_series: Option<Vec<otelite_core::api::LatencySeriesPoint>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_context: Option<Vec<otelite_core::api::LatencyByContextBin>>,
 }
 
 // ── pricing fetch ─────────────────────────────────────────────────────────────
@@ -321,6 +327,7 @@ impl UsageCommand {
                             Some(end_time),
                             self.bucket_secs,
                             self.model.as_deref(),
+                            false,
                         )
                         .await
                         .map_err(|e| {
@@ -427,6 +434,25 @@ impl UsageCommand {
             None
         };
 
+        // --latency-context
+        let latency_context: Option<Vec<otelite_core::api::LatencyByContextBin>> =
+            if self.latency_context {
+                Some(
+                    storage
+                        .query_latency_by_context(
+                            Some(start_time),
+                            Some(end_time),
+                            self.model.as_deref(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            Error::ApiError(format!("Failed to query latency by context: {}", e))
+                        })?,
+                )
+            } else {
+                None
+            };
+
         // --by-session
         let by_session: Option<Vec<SessionRow>> = if self.by_session {
             let spans = storage
@@ -492,6 +518,7 @@ impl UsageCommand {
                     error_types,
                     model_drift,
                     latency_series,
+                    latency_context,
                 };
                 let json = if matches!(format, OutputFormat::JsonCompact) {
                     serde_json::to_string(&output)
@@ -575,6 +602,11 @@ impl UsageCommand {
 
                 if let Some(ref points) = latency_series {
                     display_latency_series(points);
+                    println!();
+                }
+
+                if let Some(ref bins) = latency_context {
+                    display_latency_context(bins);
                     println!();
                 }
 
@@ -961,6 +993,47 @@ fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
     }
 
     println!("Latency Trend (per bucket × model):");
+    println!("{}", table);
+}
+
+fn display_latency_context(bins: &[otelite_core::api::LatencyByContextBin]) {
+    if bins.is_empty() {
+        println!("Latency by Context Size: no data (requires gen_ai input token attributes)");
+        return;
+    }
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+
+    table.set_header(vec![
+        Cell::new("Context Bin").fg(Color::Cyan),
+        Cell::new("Model").fg(Color::Cyan),
+        Cell::new("N").fg(Color::Cyan),
+        Cell::new("avg ms").fg(Color::Yellow),
+        Cell::new("p95 ms").fg(Color::Yellow),
+        Cell::new("max ms").fg(Color::Red),
+        Cell::new("TTFT avg").fg(Color::Cyan),
+    ]);
+
+    for b in bins {
+        let model = b.model.as_deref().unwrap_or("(unknown)");
+        let ttft = b
+            .avg_ttft_ms
+            .map_or("—".to_string(), |v| format!("{:.0}ms", v));
+        table.add_row(vec![
+            Cell::new(&b.bin),
+            Cell::new(model),
+            Cell::new(b.count),
+            Cell::new(format!("{:.0}", b.avg_ms)),
+            Cell::new(b.p95_ms),
+            Cell::new(b.max_ms),
+            Cell::new(ttft),
+        ]);
+    }
+
+    println!("Latency by Context Size (input tokens × model):");
     println!("{}", table);
 }
 

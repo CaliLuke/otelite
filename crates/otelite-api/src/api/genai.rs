@@ -9,9 +9,9 @@ use axum::{
 use otelite_core::api::{
     CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
     CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown, FinishReasonCount,
-    LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile, RetrievalStats,
-    RetryStats, SessionCostRow, TokenUsageResponse, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile,
+    RetrievalStats, RetryStats, SessionCostRow, TokenUsageResponse, ToolUsage, TopSpan,
+    TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -697,6 +697,8 @@ pub struct TimeSeriesQuery {
     pub end_time: Option<i64>,
     /// Bucket size in seconds (default 3600 = 1 hour).
     pub bucket_secs: Option<u64>,
+    /// Span filter: "llm" (default) = LLM spans only; "all" = all OTel spans grouped by name.
+    pub span_filter: Option<String>,
 }
 
 /// Query parameters for time-series endpoints that also accept a model filter.
@@ -708,6 +710,8 @@ pub struct ModelTimeSeriesQuery {
     pub bucket_secs: Option<u64>,
     /// Optional model filter (e.g. "claude-opus-4-7").
     pub model: Option<String>,
+    /// Span filter: "llm" (default) = LLM spans only; "all" = all OTel spans grouped by name.
+    pub span_filter: Option<String>,
 }
 
 /// Query parameters for endpoints that only filter by time.
@@ -857,6 +861,7 @@ pub async fn get_latency_series(
     Query(query): Query<ModelTimeSeriesQuery>,
 ) -> Result<Json<Vec<LatencySeriesPoint>>, (StatusCode, Json<ErrorResponse>)> {
     let bucket_secs = query.bucket_secs.unwrap_or(3600).clamp(60, 86400);
+    let all_spans = query.span_filter.as_deref() == Some("all");
     let rows = state
         .storage
         .query_latency_series(
@@ -864,6 +869,7 @@ pub async fn get_latency_series(
             query.end_time,
             bucket_secs,
             query.model.as_deref(),
+            all_spans,
         )
         .await
         .map_err(|e| {
@@ -894,15 +900,48 @@ pub async fn get_calls_series(
     Query(query): Query<TimeSeriesQuery>,
 ) -> Result<Json<Vec<CallsSeriesPoint>>, (StatusCode, Json<ErrorResponse>)> {
     let bucket_secs = query.bucket_secs.unwrap_or(3600).clamp(60, 86400);
+    let all_spans = query.span_filter.as_deref() == Some("all");
     let rows = state
         .storage
-        .query_calls_series(query.start_time, query.end_time, bucket_secs)
+        .query_calls_series(query.start_time, query.end_time, bucket_secs, all_spans)
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::storage_error(format!(
                     "query calls series: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// LLM latency broken down by input-token context size bin × model.
+/// Useful for answering "do larger prompts cause slower responses?"
+#[utoipa::path(
+    get,
+    path = "/api/genai/latency_by_context",
+    params(ModelAnalyticsQuery),
+    responses(
+        (status = 200, description = "Latency per context size bin", body = Vec<LatencyByContextBin>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_latency_by_context(
+    State(state): State<AppState>,
+    Query(query): Query<ModelAnalyticsQuery>,
+) -> Result<Json<Vec<LatencyByContextBin>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_latency_by_context(query.start_time, query.end_time, query.model.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query latency by context: {}",
                     e
                 ))),
             )

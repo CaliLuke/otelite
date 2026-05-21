@@ -262,7 +262,10 @@ fn format_span_node(output: &mut String, node: &SpanNode, depth: usize) {
     let duration_ms = node.span.duration / 1_000_000;
 
     // Detect streaming stall: stream started (TTFT present) but span ended in error after a long wait.
-    let has_ttft = node.span.attributes.contains_key("gen_ai.server.time_to_first_token")
+    let has_ttft = node
+        .span
+        .attributes
+        .contains_key("gen_ai.server.time_to_first_token")
         || node.span.attributes.contains_key("llm.time_to_first_token")
         || node.span.attributes.contains_key("ttft_ms");
     let stall_suffix = if node.span.status.code == "Error" && has_ttft && duration_ms > 30_000 {

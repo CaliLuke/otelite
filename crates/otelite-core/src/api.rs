@@ -758,15 +758,19 @@ pub struct ConversationDepthStats {
     pub p99_turns: i64,
 }
 
-/// Single time-bucket latency point for LLM spans, grouped by model.
+/// Single time-bucket latency point, grouped by model (LLM mode) or span name (all-spans mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LatencySeriesPoint {
     /// Bucket start timestamp in nanoseconds since Unix epoch.
     pub timestamp: i64,
-    /// Model (None = not attributed).
+    /// Model name — set when `span_filter=llm` (default); null for `span_filter=all`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Number of LLM calls in this bucket.
+    /// Span name — set when `span_filter=all`; null for `span_filter=llm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Number of spans in this bucket.
     pub count: usize,
     /// Number of error spans (status_code = 2) in this bucket.
     pub error_count: usize,
@@ -786,15 +790,41 @@ pub struct LatencySeriesPoint {
     pub p95_ttft_ms: Option<i64>,
 }
 
+/// LLM latency broken down by input-token context size bin.
+/// Useful for understanding whether larger prompts are slower.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LatencyByContextBin {
+    /// Human-readable bin label, e.g. "0–1K", "1K–10K", "100K+".
+    pub bin: String,
+    /// Inclusive lower bound of the bin in tokens.
+    pub min_tokens: u64,
+    /// Exclusive upper bound (u64::MAX for the open-ended last bin).
+    pub max_tokens: u64,
+    /// Model (None = spans without a model attribute).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub count: usize,
+    pub avg_ms: f64,
+    pub p95_ms: i64,
+    pub max_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
+}
+
 /// Single time-bucket point for calls-over-time series.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CallsSeriesPoint {
     /// Bucket start timestamp in nanoseconds since Unix epoch.
     pub timestamp: i64,
-    /// Model (None = not attributed).
+    /// Model name — set when `span_filter=llm` (default); null for `span_filter=all`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Number of LLM calls in this bucket.
+    /// Span name — set when `span_filter=all`; null for `span_filter=llm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Number of spans in this bucket.
     pub requests: usize,
 }
 
