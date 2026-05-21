@@ -37,11 +37,14 @@ async fn test_exit_code_success() {
         .stdout(predicate::str::contains("No logs found"));
 }
 
+/// Use a non-routable IP (10.255.255.1/24) to guarantee a connection error
+/// regardless of what's running locally. This avoids flakiness when ports
+/// like 9999 are in use for other services (local models, dev servers, etc.).
 #[tokio::test]
 async fn test_exit_code_connection_error() {
     let mut cmd = Command::cargo_bin("otelite").unwrap();
     cmd.arg("--endpoint")
-        .arg("http://localhost:9999")
+        .arg("http://10.255.255.1:1")
         .arg("--timeout")
         .arg("1")
         .arg("logs")
@@ -112,11 +115,13 @@ async fn test_errors_write_to_stderr() {
         .stdout(predicate::str::is_empty());
 }
 
+/// Same non-routable IP as test_exit_code_connection_error; ensures
+/// connection failures are deterministic regardless of local development setup.
 #[tokio::test]
 async fn test_connection_error_message_format() {
     let mut cmd = Command::cargo_bin("otelite").unwrap();
     cmd.arg("--endpoint")
-        .arg("http://localhost:9999")
+        .arg("http://10.255.255.1:1")
         .arg("--timeout")
         .arg("1")
         .arg("logs")
