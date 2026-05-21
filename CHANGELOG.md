@@ -35,6 +35,14 @@ have to work around), not implementation detail.
   calls series queries, grouping by span name instead of model.
 - **Traces: streaming stall detection.** `otelite traces show` marks spans where a stream started
   (TTFT present) but the span ended in error after >30 s as `[streaming stall]`.
+- **CLI: `otelite diagnose <session-id>`** — one-shot forensic report for an LLM session. Lists
+  every interaction with its token counts (input, cached, output), TTFT, duration, and error/stall
+  status. Highlights context growth across the session, calls out streaming stalls with optional
+  `--suggest` remediation advice, and prints a copy-paste escalation block with timestamps,
+  response IDs, and trace IDs.
+- **Docs: LLM observability guide** (`docs/llm-observability.md`). Covers end-to-end setup for
+  Claude Code, Anthropic SDK, OpenAI SDK, and LiteLLM; explains every GenAI attribute; and walks
+  through the investigation workflow from `otelite usage` down to `otelite diagnose`.
 
 ## [0.1.40] - 2026-05-21
 

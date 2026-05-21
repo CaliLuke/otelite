@@ -172,6 +172,17 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
+    /// One-shot forensic report for an AI agent session
+    #[command(
+        after_help = "Examples:\n  otelite diagnose e023c577-8f96-4de8-a86c-6ce3080519b5\n  otelite diagnose <session-id> --suggest"
+    )]
+    Diagnose {
+        /// Session ID (value of the session.id span attribute)
+        session_id: String,
+        /// Print a remediation suggestion when streaming stalls are detected
+        #[arg(long)]
+        suggest: bool,
+    },
     /// Import telemetry data from a JSONL file into a local database (no server required)
     #[command(
         after_help = "Each line must be a complete OTLP JSON export request (ExportMetricsServiceRequest, ExportLogsServiceRequest, or ExportTraceServiceRequest).\n\nExamples:\n  otelite import ci-metrics.jsonl\n  otelite import --signal-type metrics build.jsonl\n  otelite import --storage-path ./ci-run-42 build.jsonl\n  otelite serve --storage-path ./ci-run-42   # browse imported data"
@@ -522,6 +533,14 @@ async fn run_cli() -> Result<()> {
             view,
             debug,
         }) => handle_tui_command(api_url, refresh_interval, view, debug).await,
+        Some(Commands::Diagnose {
+            session_id,
+            suggest,
+        }) => {
+            use otelite_client::ApiClient;
+            let client = ApiClient::new(config.endpoint.clone(), config.timeout)?;
+            commands::diagnose::handle_diagnose(&client, &config, &session_id, suggest).await
+        },
         Some(Commands::Import {
             file,
             signal_type,

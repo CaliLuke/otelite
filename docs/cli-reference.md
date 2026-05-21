@@ -292,6 +292,60 @@ Import complete: 1247 records imported (0 errors, 3 empty lines skipped)
 
 ---
 
+## Diagnose
+
+`otelite diagnose` fetches all traces for a session and prints a per-interaction forensic
+report: token counts, latency, errors, streaming stalls, and a copy-paste escalation block.
+
+### Basic usage
+
+```bash
+otelite diagnose <session-id>
+```
+
+```text
+Session: 3f7a2c1e-8b4d-4f12-a9e1-d2c3b4a5f6e7
+Model:   claude-opus-4-5   Interactions: 12   2026-05-21 14:30–15:02
+Errors:  1   Stalls: 1
+
+   #      Time   Input tok   Cached    TTFT  Duration   Out tok  Status          Trace
+------------------------------------------------------------------------------------
+   1  14:30:01       42.3K     38.1K    1.2s     8.3s     1.2K  OK              3f7a2c1e8b4d
+   2  14:33:47       85.7K     79.2K    1.5s    12.1s     2.8K  OK              4a1b2c3d4e5f
+   3  14:41:22      129.4K    123.8K    1.1s    10.8s     1.5K  OK              5b6c7d8e9f0a
+   4  14:52:08      174.2K    168.9K    3.2s  4m38s       0.8K  ERROR [stall]   6c7d8e9f0a1b
+   ...
+
+Context growth: 42K → 312K tokens across 12 interactions (peak: 312K)
+
+⚠  1 streaming stall(s) detected.
+   Interaction #4: 278000ms duration, ~174K tokens
+
+Escalation info
+  Session:   3f7a2c1e-8b4d-4f12-a9e1-d2c3b4a5f6e7
+  Model:     claude-opus-4-5
+  Timestamps: 2026-05-21T14:52:08Z
+  Response IDs: msg_01XYZ...
+  Trace IDs:  6c7d8e9f0a1b2c3d
+  Peak input: 312K tokens
+```
+
+### Stall remediation suggestions
+
+```bash
+otelite diagnose <session-id> --suggest
+```
+
+Adds a recommended proxy/load-balancer stream-idle timeout based on the longest observed stall.
+
+### Connect to a non-default server
+
+```bash
+otelite --endpoint http://localhost:3000 diagnose <session-id>
+```
+
+---
+
 ## Common patterns
 
 ```bash
