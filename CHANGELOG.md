@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-05-21
+
 ### Added
 
 - **Web: Session Report modal in traces view.** When a trace is filtered by session,
