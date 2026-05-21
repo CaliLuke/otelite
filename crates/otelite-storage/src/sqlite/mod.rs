@@ -535,8 +535,7 @@ impl SqliteBackend {
                     return;
                 },
             };
-            if let Err(e) =
-                conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            if let Err(e) = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
             {
                 tracing::warn!("Purge scheduler: failed to set WAL mode: {}", e);
             }

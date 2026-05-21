@@ -11,6 +11,21 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Storage: database no longer corrupts on OS crash or power loss.** SQLite was
+  configured with `synchronous=NORMAL`, which skips fsyncing WAL frames and can
+  leave the database in an unrecoverable state after an unclean shutdown. Switched
+  to `synchronous=FULL` — each committed frame is fsynced before acknowledgement.
+  You may lose at most the last in-flight transaction on a hard crash, but the
+  database will always open cleanly.
+- **Storage: nightly retention purge no longer silently fails to reclaim space.**
+  The scheduled purge was attempting `VACUUM` from a second connection while the
+  main connection was open. `VACUUM` requires exclusive access and was failing
+  silently every night. Replaced with `PRAGMA wal_checkpoint(PASSIVE)`, which is
+  safe to run alongside an open connection and correctly flushes WAL frames after
+  bulk deletes.
+
 ## [0.1.39] - 2026-05-15
 
 ### Fixed
