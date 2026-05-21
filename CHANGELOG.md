@@ -11,6 +11,21 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Web: Session Report modal in traces view.** When a trace is filtered by session,
+  a "Session Report" banner appears above the list. Clicking it opens a modal with
+  the full per-interaction table (input/cached/output tokens, TTFT, duration, status),
+  context growth, streaming stall warnings, and an escalation block. Each trace ID
+  links back to its waterfall.
+- **Web: "Session Report" button on `session.id` span attribute.** The `session.id`
+  row in any span's attribute panel now shows a "Session Report" button alongside the
+  existing filter link — one click from any open waterfall, no intermediate navigation
+  required.
+- **API: `GET /api/sessions/:session_id/diagnose`** — server-side endpoint backing
+  the session report. Returns `SessionDiagnoseResponse` with per-interaction breakdown
+  and context growth; usable from any HTTP client.
+
 ## [0.1.41] - 2026-05-21
 
 ### Added
