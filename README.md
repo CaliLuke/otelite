@@ -181,6 +181,12 @@ otelite status
 # List recent logs
 otelite logs list --severity ERROR --since 1h
 
+# Show a single log (full body; pretty output shows size for large bodies)
+otelite logs show <timestamp-id>
+
+# Dump raw log body to stdout — useful for large JSON payloads
+otelite logs show <timestamp-id> --full | jq .messages[-1].content
+
 # Search logs
 otelite logs search "database timeout"
 

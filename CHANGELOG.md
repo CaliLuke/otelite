@@ -11,6 +11,29 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **CLI: `otelite logs show <id> --full` dumps the raw body to stdout.** Useful when the body is a
+  large JSON payload (e.g. a 324KB LLM request): pipe it directly to `jq`, `grep`, or a file
+  without any formatting overhead. Example: `otelite logs show 171700000000000 --full | jq .messages[-1].content`
+- **API + CLI: log bodies now report their original byte size.** `LogEntry` carries `body_length`
+  (total bytes) and `body_truncated` (true when the list endpoint capped the body at 512 bytes).
+  The single-entry endpoint (`GET /api/logs/:id`) and `logs show` always return the full body.
+  Pretty output shows `Body (NNN bytes):` for large bodies so you know when to reach for `--full`.
+- **Web: GenAI Usage page is split into four section tabs** — Overview, Performance, Quality, and
+  Details. The earlier single-scroll page grew too long; now each concern is on its own tab. Tab
+  selection persists across the 30-second auto-refresh.
+- **Web: latency-over-time chart on the Performance tab.** Shows average and p95 latency per hour
+  as a two-tone bar chart, grouped across all models.
+- **Web: latency by context-size table on the Performance tab.** Breaks down average latency, p95,
+  and max by input token bucket (0–1K, 1K–10K, 10K–50K, 50K–100K, 100K+) so you can see how
+  request size drives latency.
+- **CLI: `otelite usage --latency-context`** prints a per-(model, context-bin) latency table.
+- **CLI/API: `--span-filter=all` on series endpoints** includes non-GenAI spans in latency and
+  calls series queries, grouping by span name instead of model.
+- **Traces: streaming stall detection.** `otelite traces show` marks spans where a stream started
+  (TTFT present) but the span ended in error after >30 s as `[streaming stall]`.
+
 ## [0.1.40] - 2026-05-21
 
 ### Fixed
