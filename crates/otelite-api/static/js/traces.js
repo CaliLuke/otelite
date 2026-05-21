@@ -683,6 +683,10 @@ class TracesView {
                     <h3>${this.escapeHtml(trace.root_span_name ?? 'Trace Details')}</h3>
                     <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
                         <span class="trace-duration">${duration}ms · ${trace.span_count} spans</span>
+                        ${(() => {
+                            const sessionId = trace.spans?.reduce((found, s) => found || s.attributes?.['session.id'], null);
+                            return sessionId ? `<button class="btn btn-primary btn-sm" onclick="window.app.views.traces.openSessionDiagnoseModal('${this.escapeHtml(sessionId)}');return false;">Session Report</button>` : '';
+                        })()}
                         <button id="expand-all-spans" class="btn btn-secondary btn-sm">Expand all</button>
                         <button id="collapse-all-spans" class="btn btn-secondary btn-sm">Collapse all</button>
                         <span style="width:1px;height:1.2em;background:var(--border-color);display:inline-block;margin:0 0.2rem;"></span>

@@ -24,19 +24,15 @@ fn extract_ttft(attrs: &HashMap<String, String>) -> Option<f64> {
         .and_then(|v| v.parse::<f64>().ok())
 }
 
-fn root_llm_span_index(spans: &[Span]) -> Option<usize> {
+fn root_llm_span<'a>(spans: &'a [Span]) -> Option<&'a Span> {
     spans
         .iter()
-        .enumerate()
-        .filter(|(_, s)| s.parent_span_id.is_none())
-        .find(|(_, s)| s.attributes.keys().any(|k| k.starts_with("gen_ai.")))
-        .map(|(i, _)| i)
+        .filter(|s| s.parent_span_id.is_none())
+        .find(|s| s.attributes.keys().any(|k| k.starts_with("gen_ai.")))
         .or_else(|| {
             spans
                 .iter()
-                .enumerate()
-                .find(|(_, s)| s.attributes.keys().any(|k| k.starts_with("gen_ai.")))
-                .map(|(i, _)| i)
+                .find(|s| s.attributes.keys().any(|k| k.starts_with("gen_ai.")))
         })
 }
 
@@ -48,55 +44,49 @@ pub async fn get_session_diagnose(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionDiagnoseResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let trace_list_query = QueryParams {
+    // Single query: all spans where session.id = <session_id>.
+    // query_spans applies predicates via json_extract — no per-trace round-trips needed.
+    let query = QueryParams {
         predicates: vec![QueryPredicate {
             field: "session.id".to_string(),
             operator: Operator::Equal,
             value: QueryValue::String(session_id.clone()),
         }],
+        limit: Some(10_000),
         ..Default::default()
     };
 
-    let trace_entries = state
-        .storage
-        .query_spans_for_trace_list(&trace_list_query, 500)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal_error(e.to_string())),
-            )
-        })?;
+    let all_spans = state.storage.query_spans(&query).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal_error(e.to_string())),
+        )
+    })?;
 
-    if trace_entries.is_empty() {
+    if all_spans.is_empty() {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::not_found(format!("session {}", session_id))),
         ));
     }
 
-    let mut sorted = trace_entries;
-    sorted.sort_by_key(|t| t.start_time);
+    // Group spans by trace_id.
+    let mut by_trace: HashMap<String, Vec<Span>> = HashMap::new();
+    for span in all_spans {
+        by_trace.entry(span.trace_id.clone()).or_default().push(span);
+    }
+
+    // Sort trace groups by the earliest span start_time (chronological order).
+    let mut trace_groups: Vec<(String, Vec<Span>)> = by_trace.into_iter().collect();
+    trace_groups.sort_by_key(|(_, spans)| spans.iter().map(|s| s.start_time).min().unwrap_or(0));
 
     let mut interactions: Vec<SessionInteraction> = Vec::new();
 
-    for (idx, trace_entry) in sorted.iter().enumerate() {
-        let span_query = QueryParams {
-            trace_id: Some(trace_entry.trace_id.clone()),
-            limit: Some(1000),
-            ..Default::default()
-        };
-
-        let spans = match state.storage.query_spans(&span_query).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let root_idx = match root_llm_span_index(&spans) {
-            Some(i) => i,
+    for (idx, (trace_id, spans)) in trace_groups.iter().enumerate() {
+        let root = match root_llm_span(spans) {
+            Some(s) => s,
             None => continue,
         };
-        let root = &spans[root_idx];
 
         let genai = GenAiSpanInfo::from_attributes(&root.attributes);
         let ttft = extract_ttft(&root.attributes);
@@ -122,7 +112,7 @@ pub async fn get_session_diagnose(
             is_error,
             is_stall,
             response_id: genai.response_id.clone(),
-            trace_id: trace_entry.trace_id.clone(),
+            trace_id: trace_id.clone(),
             start_time_ns: root.start_time,
         });
     }
