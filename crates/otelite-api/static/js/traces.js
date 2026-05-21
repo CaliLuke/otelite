@@ -1042,6 +1042,7 @@ class TracesView {
         }
 
         const info = {
+            sessionId: attributes['session.id'] || null,
             system: attributes['gen_ai.provider.name'] || attributes['gen_ai.system'],
             model: attributes['gen_ai.request.model'],
             responseModel: attributes['gen_ai.response.model'] || null,
@@ -1100,6 +1101,7 @@ class TracesView {
                 <div class="genai-header">
                     <span class="genai-badge">🤖 GenAI/LLM</span>
                     ${systemName ? `<span class="genai-system">[${this.escapeHtml(systemName)}]</span>` : ''}
+                    ${info.sessionId ? `<button class="btn btn-secondary btn-sm" style="margin-left:auto;padding:0.2rem 0.6rem;font-size:0.8rem;" onclick="window.app.views.traces.openSessionDiagnoseModal('${this.escapeHtml(info.sessionId)}');return false;">Session Report</button>` : ''}
                 </div>
                 <div class="genai-details">
                     ${info.model ? `<div class="genai-detail-item"><strong>Model:</strong> ${this.escapeHtml(info.model)}</div>` : ''}
@@ -1574,6 +1576,16 @@ class TracesView {
                     <div class="span-attrs-grid">
                         ${nonGenAi.map(([k, v]) => {
                             const isLong = String(v).length > 80;
+                            if (k === 'session.id') {
+                                const sv = this.escapeHtml(String(v));
+                                return `<div class="span-attr-row" style="grid-column:1/-1">
+                                    <span class="span-attr-key">session.id</span>
+                                    <span class="span-attr-val">
+                                        <a class="trace-link" onclick="window.app.navigateToTracesBySession('${sv}');return false;" href="#">${sv}</a>
+                                        <button class="btn btn-secondary btn-sm" style="margin-left:0.5rem;padding:0.15rem 0.5rem;font-size:0.78rem;" onclick="window.app.views.traces.openSessionDiagnoseModal('${sv}');return false;">Session Report</button>
+                                    </span>
+                                </div>`;
+                            }
                             return `<div class="span-attr-row${isLong ? ' ' : ''}" ${isLong ? 'style="grid-column:1/-1"' : ''}>
                                 <span class="span-attr-key">${this.escapeHtml(k)}</span>
                                 <span class="span-attr-val${isLong ? ' long' : ''}">${this.escapeHtml(String(v))}</span>
