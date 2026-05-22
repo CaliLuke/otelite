@@ -5,7 +5,7 @@ use crate::error::Result;
 use chrono::{DateTime, Local, Utc};
 use otelite_client::models::SpanEntry;
 use otelite_client::ApiClient;
-use otelite_core::telemetry::GenAiSpanInfo;
+use otelite_core::telemetry::{extract_ttft_secs, GenAiSpanInfo};
 
 /// Per-interaction row derived from a trace's root span.
 struct Interaction {
@@ -15,6 +15,7 @@ struct Interaction {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_read: Option<u64>,
+    cache_creation: Option<u64>,
     ttft_secs: Option<f64>,
     duration_ms: i64,
     is_error: bool,
@@ -22,14 +23,8 @@ struct Interaction {
     response_id: Option<String>,
     trace_id: String,
     start_time_ns: i64,
-}
-
-fn extract_ttft(attrs: &std::collections::HashMap<String, String>) -> Option<f64> {
-    attrs
-        .get("gen_ai.server.time_to_first_token")
-        .or_else(|| attrs.get("llm.time_to_first_token"))
-        .or_else(|| attrs.get("ttft_ms"))
-        .and_then(|v| v.parse::<f64>().ok())
+    body_length: Option<u64>,
+    prompt_id: Option<String>,
 }
 
 fn root_llm_span(spans: &[SpanEntry]) -> Option<&SpanEntry> {
@@ -90,12 +85,37 @@ pub async fn handle_diagnose(
         };
 
         let genai = GenAiSpanInfo::from_attributes(&root.attributes);
-        let ttft = extract_ttft(&root.attributes);
+        let ttft = extract_ttft_secs(&root.attributes);
         let duration_ms = root.duration / 1_000_000;
-        let is_stall = root.status.code == "Error" && ttft.is_some() && duration_ms > 30_000;
+        let is_error = root.status.code == "Error";
+        let is_stall = is_error && ttft.is_some() && duration_ms > 30_000;
 
         let dt = DateTime::<Utc>::from_timestamp_nanos(root.start_time);
         let time_str = dt.with_timezone(&Local).format("%H:%M:%S").to_string();
+
+        // For errored interactions, fetch the api_request_body log for body_length.
+        // prompt.id is available as a span attribute.
+        let (body_length, prompt_id) = if is_error {
+            let log_params = vec![
+                ("trace_id", trace_entry.trace_id.clone()),
+                ("search", "api_request_body".to_string()),
+                ("limit", "1".to_string()),
+            ];
+            let body_len = client
+                .fetch_logs(log_params)
+                .await
+                .ok()
+                .and_then(|r| r.logs.into_iter().next())
+                .and_then(|log| {
+                    log.attributes
+                        .get("body_length")
+                        .and_then(|v| v.parse::<u64>().ok())
+                });
+            let pid = root.attributes.get("prompt.id").cloned();
+            (body_len, pid)
+        } else {
+            (None, None)
+        };
 
         interactions.push(Interaction {
             index: idx + 1,
@@ -107,13 +127,16 @@ pub async fn handle_diagnose(
             input_tokens: genai.input_tokens,
             output_tokens: genai.output_tokens,
             cache_read: genai.cache_read_tokens,
+            cache_creation: genai.cache_creation_tokens,
             ttft_secs: ttft,
             duration_ms,
-            is_error: root.status.code == "Error",
+            is_error,
             is_stall,
             response_id: genai.response_id.clone(),
             trace_id: trace_entry.trace_id.clone(),
             start_time_ns: root.start_time,
+            body_length,
+            prompt_id,
         });
     }
 
@@ -164,14 +187,18 @@ pub async fn handle_diagnose(
 
     // ── Per-interaction table ─────────────────────────────────────────────────
     println!(
-        "{:>4}  {:8}  {:>10}  {:>7}  {:>6}  {:>8}  {:>8}  {:<6}  Trace",
-        "#", "Time", "Input tok", "Cached", "TTFT", "Duration", "Out tok", "Status"
+        "{:>4}  {:8}  {:>10}  {:>7}  {:>7}  {:>6}  {:>8}  {:>8}  {:<14}  Trace",
+        "#", "Time", "Input tok", "Cache+", "Cached", "TTFT", "Duration", "Out tok", "Status"
     );
-    println!("{}", "-".repeat(84));
+    println!("{}", "-".repeat(93));
 
     for ia in &interactions {
         let tok_str = ia
             .input_tokens
+            .map(format_tokens)
+            .unwrap_or_else(|| "—".to_string());
+        let cache_plus_str = ia
+            .cache_creation
             .map(format_tokens)
             .unwrap_or_else(|| "—".to_string());
         let cached_str = ia
@@ -195,10 +222,11 @@ pub async fn handle_diagnose(
             "OK"
         };
         println!(
-            "{:>4}  {:8}  {:>10}  {:>7}  {:>6}  {:>8}  {:>8}  {:<14}  {}",
+            "{:>4}  {:8}  {:>10}  {:>7}  {:>7}  {:>6}  {:>8}  {:>8}  {:<14}  {}",
             ia.index,
             ia.time,
             tok_str,
+            cache_plus_str,
             cached_str,
             ttft_str,
             dur_str,
@@ -284,7 +312,24 @@ pub async fn handle_diagnose(
                     .to_string()
             })
             .collect();
-        println!("  Timestamps: {}", timestamps.join(", "));
+        println!("  Timestamps:   {}", timestamps.join(", "));
+
+        let body_lengths: Vec<String> = error_interactions
+            .iter()
+            .filter_map(|i| i.body_length)
+            .map(|b| format!("{} bytes (~{}K tokens)", b, b / 4000))
+            .collect();
+        if !body_lengths.is_empty() {
+            println!("  Body size:    {}", body_lengths.join(", "));
+        }
+
+        let prompt_ids: Vec<&str> = error_interactions
+            .iter()
+            .filter_map(|i| i.prompt_id.as_deref())
+            .collect();
+        if !prompt_ids.is_empty() {
+            println!("  Prompt IDs:   {}", prompt_ids.join(", "));
+        }
 
         let response_ids: Vec<&str> = error_interactions
             .iter()
@@ -298,11 +343,11 @@ pub async fn handle_diagnose(
             .iter()
             .map(|i| i.trace_id[..16].to_string())
             .collect();
-        println!("  Trace IDs:  {}", trace_ids.join(", "));
+        println!("  Trace IDs:    {}", trace_ids.join(", "));
     }
 
     if let Some(max_in) = interactions.iter().filter_map(|i| i.input_tokens).max() {
-        println!("  Peak input: {}K tokens", max_in / 1000);
+        println!("  Peak input:   {}K tokens", max_in / 1000);
     }
 
     Ok(())

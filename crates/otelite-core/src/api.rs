@@ -894,6 +894,9 @@ pub struct SessionInteraction {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
+    /// Tokens written to the prompt cache on this turn (expensive; indicates context just grew).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
     /// Time-to-first-token in seconds (None when not instrumented or non-streaming).
     pub ttft_secs: Option<f64>,
     pub duration_ms: i64,
@@ -903,6 +906,12 @@ pub struct SessionInteraction {
     pub response_id: Option<String>,
     pub trace_id: String,
     pub start_time_ns: i64,
+    /// Body size in bytes from the `api_request_body` log (present on errored Claude Code spans).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_length: Option<u64>,
+    /// LiteLLM proxy correlation ID from the `api_request_body` log (`prompt.id` attribute).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
 }
 
 /// Context-growth summary for a session.

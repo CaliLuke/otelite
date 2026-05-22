@@ -552,7 +552,8 @@ class TracesView {
                             <th style="padding:0.3rem 0.5rem;text-align:right;">#</th>
                             <th style="padding:0.3rem 0.5rem;text-align:left;">Time</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;">Input</th>
-                            <th style="padding:0.3rem 0.5rem;text-align:right;">Cached</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:right;" title="New tokens written to prompt cache this turn">Cache+</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:right;" title="Tokens served from prompt cache">Cached</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;">TTFT</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;">Duration</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;">Output</th>
@@ -565,10 +566,12 @@ class TracesView {
                             const statusColor = ia.is_stall ? 'var(--warning-color)' : ia.is_error ? 'var(--error-color)' : 'var(--success-color)';
                             const statusText = ia.is_stall ? 'STALL' : ia.is_error ? 'ERROR' : 'OK';
                             const traceShort = ia.trace_id.substring(0, 12);
+                            const cachePlusStyle = ia.cache_creation_tokens > 0 ? 'color:var(--warning-color);' : '';
                             return `<tr style="border-bottom:1px solid var(--border-color);opacity:0.9;">
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${ia.index}</td>
                                 <td style="padding:0.3rem 0.5rem;">${this.escapeHtml(ia.time)}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.input_tokens)}</td>
+                                <td style="padding:0.3rem 0.5rem;text-align:right;${cachePlusStyle}">${fmt(ia.cache_creation_tokens)}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.cache_read_tokens)}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmtTtft(ia.ttft_secs)}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmtDur(ia.duration_ms)}</td>
@@ -594,14 +597,22 @@ class TracesView {
                 </div>`;
         }
 
-        // Stall warnings
+        // Stall warnings + timeout suggestion
         const stalls = data.interactions.filter(i => i.is_stall);
         if (stalls.length > 0) {
+            const longestMs = Math.max(...stalls.map(i => i.duration_ms));
+            const suggestedTimeout = Math.max(Math.floor(longestMs / 1000) + 200, 500);
+            const model = data.models[0] || 'this model';
             html += `<div style="padding:0.75rem;background:var(--bg-primary);border-left:3px solid var(--warning-color);border-radius:0 6px 6px 0;font-size:0.87rem;">
                 <strong style="color:var(--warning-color);">⚠ ${stalls.length} streaming stall(s) detected</strong>
                 ${stalls.map(ia => `<div style="margin-top:0.35rem;color:var(--text-secondary);">
                     Interaction #${ia.index}: ${fmtDur(ia.duration_ms)} duration${ia.input_tokens ? `, ~${fmt(ia.input_tokens)} tokens` : ''}
                 </div>`).join('')}
+                <div style="margin-top:0.5rem;">
+                    <strong>Suggestion:</strong> raise the stream-idle timeout on the proxy/load-balancer
+                    to at least <strong>${suggestedTimeout}s</strong> for the <code>${this.escapeHtml(model)}</code> route.
+                    <span style="color:var(--text-secondary);">(longest stall: ${fmtDur(longestMs)}; a 300s hop-level timeout is a common cause)</span>
+                </div>
             </div>`;
         }
 
@@ -609,14 +620,18 @@ class TracesView {
         const errored = data.interactions.filter(i => i.is_error);
         if (errored.length > 0) {
             const responseIds = errored.filter(i => i.response_id).map(i => i.response_id).join(', ');
+            const promptIds = errored.filter(i => i.prompt_id).map(i => i.prompt_id).join(', ');
             const traceIds = errored.map(i => i.trace_id.substring(0, 16)).join(', ');
+            const bodySizes = errored.filter(i => i.body_length).map(i => `${i.body_length.toLocaleString()} bytes (~${Math.round(i.body_length/4000)}K tokens)`).join(', ');
             html += `
                 <div style="margin-top:1.25rem;padding:0.75rem;background:var(--bg-primary);border-radius:6px;font-size:0.82rem;font-family:monospace;">
                     <div style="font-weight:600;margin-bottom:0.5rem;font-family:sans-serif;">Escalation info</div>
-                    <div>Session:&nbsp;&nbsp; ${this.escapeHtml(data.session_id)}</div>
-                    ${data.models.length ? `<div>Model:&nbsp;&nbsp;&nbsp;&nbsp; ${this.escapeHtml(data.models.join(', '))}</div>` : ''}
-                    ${responseIds ? `<div>Response IDs: ${this.escapeHtml(responseIds)}</div>` : ''}
-                    <div>Trace IDs:&nbsp; ${this.escapeHtml(traceIds)}</div>
+                    <div>Session:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${this.escapeHtml(data.session_id)}</div>
+                    ${data.models.length ? `<div>Model:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${this.escapeHtml(data.models.join(', '))}</div>` : ''}
+                    ${bodySizes ? `<div>Body size:&nbsp;&nbsp;&nbsp;&nbsp; ${this.escapeHtml(bodySizes)}</div>` : ''}
+                    ${promptIds ? `<div>Prompt IDs:&nbsp;&nbsp;&nbsp; ${this.escapeHtml(promptIds)}</div>` : ''}
+                    ${responseIds ? `<div>Response IDs:&nbsp; ${this.escapeHtml(responseIds)}</div>` : ''}
+                    <div>Trace IDs:&nbsp;&nbsp;&nbsp;&nbsp; ${this.escapeHtml(traceIds)}</div>
                 </div>`;
         }
 

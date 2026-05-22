@@ -14,17 +14,9 @@ use otelite_core::api::{
 use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::trace::StatusCode as SpanStatusCode;
-use otelite_core::telemetry::{GenAiSpanInfo, Span};
+use otelite_core::telemetry::{extract_ttft_secs, GenAiSpanInfo, Span};
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
-
-fn extract_ttft(attrs: &HashMap<String, String>) -> Option<f64> {
-    attrs
-        .get("gen_ai.server.time_to_first_token")
-        .or_else(|| attrs.get("llm.time_to_first_token"))
-        .or_else(|| attrs.get("ttft_ms"))
-        .and_then(|v| v.parse::<f64>().ok())
-}
 
 fn root_llm_span(spans: &[Span]) -> Option<&Span> {
     spans
@@ -94,13 +86,39 @@ pub async fn get_session_diagnose(
         };
 
         let genai = GenAiSpanInfo::from_attributes(&root.attributes);
-        let ttft = extract_ttft(&root.attributes);
+        let ttft = extract_ttft_secs(&root.attributes);
         let duration_ms = (root.end_time - root.start_time) / 1_000_000;
         let is_error = root.status.code == SpanStatusCode::Error;
         let is_stall = is_error && ttft.is_some() && duration_ms > 30_000;
 
         let dt = DateTime::<Utc>::from_timestamp_nanos(root.start_time);
         let time_str = dt.with_timezone(&Local).format("%H:%M:%S").to_string();
+
+        // For errored interactions, fetch the api_request_body log to get body_length.
+        // prompt.id is available directly on the span attributes.
+        let (body_length, prompt_id) = if is_error {
+            let log_params = QueryParams {
+                trace_id: Some(trace_id.clone()),
+                search_text: Some("api_request_body".to_string()),
+                limit: Some(1),
+                ..Default::default()
+            };
+            let log_body_len = state
+                .storage
+                .query_logs(&log_params)
+                .await
+                .ok()
+                .and_then(|logs| logs.into_iter().next())
+                .and_then(|log| {
+                    log.attributes
+                        .get("body_length")
+                        .and_then(|v| v.parse::<u64>().ok())
+                });
+            let pid = root.attributes.get("prompt.id").cloned();
+            (log_body_len, pid)
+        } else {
+            (None, None)
+        };
 
         interactions.push(SessionInteraction {
             index: idx + 1,
@@ -112,6 +130,7 @@ pub async fn get_session_diagnose(
             input_tokens: genai.input_tokens,
             output_tokens: genai.output_tokens,
             cache_read_tokens: genai.cache_read_tokens,
+            cache_creation_tokens: genai.cache_creation_tokens,
             ttft_secs: ttft,
             duration_ms,
             is_error,
@@ -119,6 +138,8 @@ pub async fn get_session_diagnose(
             response_id: genai.response_id.clone(),
             trace_id: trace_id.clone(),
             start_time_ns: root.start_time,
+            body_length,
+            prompt_id,
         });
     }
 

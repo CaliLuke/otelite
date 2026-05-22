@@ -7,6 +7,26 @@
 
 use std::collections::HashMap;
 
+/// Extract TTFT from span attributes, normalising to **seconds**.
+///
+/// Attribute priority:
+/// - `gen_ai.server.time_to_first_token` — OTel GenAI spec, already in seconds
+/// - `llm.time_to_first_token` — non-standard, assumed seconds
+/// - `ttft_ms` — Claude Code custom attribute, in **milliseconds**; divided by 1000
+pub fn extract_ttft_secs(attrs: &HashMap<String, String>) -> Option<f64> {
+    if let Some(v) = attrs
+        .get("gen_ai.server.time_to_first_token")
+        .or_else(|| attrs.get("llm.time_to_first_token"))
+        .and_then(|s| s.parse::<f64>().ok())
+    {
+        return Some(v);
+    }
+    attrs
+        .get("ttft_ms")
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|ms| ms / 1000.0)
+}
+
 /// Information extracted from a GenAI/LLM span.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GenAiSpanInfo {
@@ -482,5 +502,28 @@ mod tests {
         let info = GenAiSpanInfo::from_attributes(&attrs);
         assert_eq!(info.top_p, Some(0.9));
         assert_eq!(info.seed, Some(42));
+    }
+
+    #[test]
+    fn test_extract_ttft_secs_otel_spec() {
+        let mut attrs = HashMap::new();
+        attrs.insert("gen_ai.server.time_to_first_token".to_string(), "1.2".to_string());
+        attrs.insert("ttft_ms".to_string(), "9999".to_string());
+        let v = extract_ttft_secs(&attrs).unwrap();
+        assert!((v - 1.2).abs() < 0.001, "OTel spec attribute should be used as-is (seconds)");
+    }
+
+    #[test]
+    fn test_extract_ttft_secs_claude_code_ms() {
+        let mut attrs = HashMap::new();
+        attrs.insert("ttft_ms".to_string(), "1200".to_string());
+        let v = extract_ttft_secs(&attrs).unwrap();
+        assert!((v - 1.2).abs() < 0.001, "ttft_ms must be divided by 1000 to yield seconds");
+    }
+
+    #[test]
+    fn test_extract_ttft_secs_missing() {
+        let attrs = HashMap::new();
+        assert!(extract_ttft_secs(&attrs).is_none());
     }
 }
