@@ -73,6 +73,10 @@ fn get_static_file(path: &str) -> Option<(&'static [u8], &'static str)> {
             include_bytes!("../static/js/lazy.js"),
             "application/javascript; charset=utf-8",
         )),
+        "js/sessions.js" => Some((
+            include_bytes!("../static/js/sessions.js"),
+            "application/javascript; charset=utf-8",
+        )),
         _ => None,
     }
 }

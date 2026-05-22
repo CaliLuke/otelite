@@ -5,7 +5,7 @@ import { api } from './api.js';
 /**
  * Main application class
  */
-const VALID_VIEWS = ['logs', 'traces', 'metrics', 'usage', 'setup'];
+const VALID_VIEWS = ['logs', 'traces', 'sessions', 'metrics', 'usage', 'setup'];
 
 class App {
     constructor() {
@@ -30,6 +30,7 @@ class App {
         this.views = {
             logs: new window.LogsView(api),
             traces: new window.TracesView(api),
+            sessions: new window.SessionsView(api),
             metrics: new window.MetricsView(api),
             usage: new window.UsageView(api),
             // setup is static HTML — no view class needed

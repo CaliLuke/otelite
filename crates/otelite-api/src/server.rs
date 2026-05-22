@@ -254,6 +254,7 @@ impl DashboardServer {
             .route("/api/genai/error_types", get(crate::api::genai::get_error_types))
             .route("/api/genai/model_drift", get(crate::api::genai::get_model_drift))
             // API routes - Sessions
+            .route("/api/sessions", get(crate::api::sessions::list_sessions))
             .route("/api/sessions/{session_id}/diagnose", get(crate::api::sessions::get_session_diagnose))
             // OpenAPI spec endpoint
             .route("/api/openapi.json", get(|| async {

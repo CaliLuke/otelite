@@ -1,0 +1,152 @@
+// Sessions view — list of GenAI sessions seen in the time window.
+//
+// Click a row to open the existing Session Report modal (rendered by
+// traces.js → openSessionDiagnoseModal). The list itself is a thin
+// summary; the modal stays the canonical detail view.
+
+class SessionsView {
+    constructor(apiClient) {
+        this.api = apiClient;
+        // Default time window: 1 day. Sessions stretching past that show
+        // their full activity once the user widens the window.
+        const now = new Date();
+        this.trWindowHours = 24;
+        this.trEnd = now;
+        this.trStart = new Date(now.getTime() - this.trWindowHours * 3600000);
+        this.refreshInterval = null;
+    }
+
+    async render() {
+        const container = document.getElementById('sessions-container');
+        if (!container) return;
+
+        container.innerHTML = `
+            <div class="filters">
+                <div class="time-range-bar">
+                    <label class="filter-label">Window:</label>
+                    <select id="tr-preset-sessions" class="filter-select tr-preset">
+                        <option value="1">1 hr</option>
+                        <option value="6">6 hr</option>
+                        <option value="24" selected>24 hr</option>
+                        <option value="168">7 days</option>
+                        <option value="720">30 days</option>
+                    </select>
+                    <button id="sessions-refresh" class="btn btn-secondary btn-sm">Refresh</button>
+                </div>
+                <span class="filter-hint">Click a row to open the Session Report.</span>
+            </div>
+            <div id="sessions-list"></div>
+        `;
+
+        document.getElementById('tr-preset-sessions').addEventListener('change', (e) => {
+            const hours = parseFloat(e.target.value);
+            const now = new Date();
+            this.trWindowHours = hours;
+            this.trEnd = now;
+            this.trStart = new Date(now.getTime() - hours * 3600000);
+            this._loadAndRender();
+        });
+
+        document.getElementById('sessions-refresh').addEventListener('click', () => this._loadAndRender());
+
+        await this._loadAndRender();
+    }
+
+    async _loadAndRender() {
+        const list = document.getElementById('sessions-list');
+        list.innerHTML = '<div class="loading-state"><span class="spinner-sm"></span> Loading…</div>';
+        try {
+            const params = {
+                start_time: this.trStart.getTime() * 1_000_000,
+                end_time: this.trEnd.getTime() * 1_000_000,
+                limit: 200,
+            };
+            const resp = await this.api.getSessions(params);
+            this._renderList(resp.sessions || []);
+        } catch (err) {
+            list.innerHTML = `<div class="error-message">Failed to load sessions: ${this._escape(err.message)}</div>`;
+        }
+    }
+
+    _renderList(sessions) {
+        const list = document.getElementById('sessions-list');
+        if (sessions.length === 0) {
+            list.innerHTML = '<div class="empty-state"><p>No sessions in this window</p><p class="empty-state-hint">Sessions are GenAI traces tagged with a <code>session.id</code> attribute. Widen the window or check that your instrumentation emits session ids.</p></div>';
+            return;
+        }
+
+        const fmtNum = n => Number(n).toLocaleString();
+        const fmtTime = ns => {
+            const d = new Date(ns / 1_000_000);
+            const p = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+        };
+
+        const rows = sessions.map(s => {
+            const errClass = s.error_count > 0 ? ' has-errors' : '';
+            const errCell = s.error_count > 0
+                ? `<span class="cell-error">${s.error_count}</span>`
+                : '<span class="cell-muted">0</span>';
+            const models = s.models.length === 0
+                ? '<span class="cell-muted">—</span>'
+                : this._escape(s.models.join(', '));
+            return `
+                <tr class="session-row${errClass}" data-session-id="${this._escape(s.session_id)}">
+                    <td class="session-id-cell"><code>${this._escape(s.session_id)}</code></td>
+                    <td>${models}</td>
+                    <td class="num-cell">${fmtNum(s.interaction_count)}</td>
+                    <td class="num-cell">${fmtNum(s.total_input_tokens)}</td>
+                    <td class="num-cell">${fmtNum(s.total_output_tokens)}</td>
+                    <td class="num-cell">${errCell}</td>
+                    <td class="time-cell">${fmtTime(s.first_seen_ns)}</td>
+                    <td class="time-cell">${fmtTime(s.last_seen_ns)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        list.innerHTML = `
+            <table class="sessions-table">
+                <thead>
+                    <tr>
+                        <th>Session ID</th>
+                        <th>Models</th>
+                        <th class="num-cell">Interactions</th>
+                        <th class="num-cell">Input tokens</th>
+                        <th class="num-cell">Output tokens</th>
+                        <th class="num-cell">Errors</th>
+                        <th>First seen</th>
+                        <th>Last seen</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `;
+
+        list.querySelectorAll('.session-row').forEach(row => {
+            row.addEventListener('click', () => {
+                const sid = row.dataset.sessionId;
+                if (window.app && window.app.views && window.app.views.traces &&
+                    typeof window.app.views.traces.openSessionDiagnoseModal === 'function') {
+                    // Make sure traces view is rendered so its modal helpers exist.
+                    if (!window.app.renderedViews.has('traces')) {
+                        window.app.views.traces.render();
+                        window.app.renderedViews.add('traces');
+                    }
+                    window.app.views.traces.openSessionDiagnoseModal(sid);
+                } else {
+                    // Fallback: navigate to traces tab pre-filtered by session.
+                    window.app.navigateToTracesBySession(sid);
+                }
+            });
+        });
+    }
+
+    _escape(s) {
+        const div = document.createElement('div');
+        div.textContent = String(s);
+        return div.innerHTML;
+    }
+}
+
+window.SessionsView = SessionsView;
+export { SessionsView };

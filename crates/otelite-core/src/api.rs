@@ -932,3 +932,29 @@ pub struct SessionDiagnoseResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_growth: Option<SessionContextGrowth>,
 }
+
+/// One row in the response from GET /api/sessions — a summary line for the
+/// Sessions tab list view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionSummary {
+    pub session_id: String,
+    /// Models observed within this session (deduplicated).
+    pub models: Vec<String>,
+    pub interaction_count: usize,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub error_count: usize,
+    /// First interaction start time (epoch ns).
+    pub first_seen_ns: i64,
+    /// Last interaction start time (epoch ns).
+    pub last_seen_ns: i64,
+}
+
+/// Wrapper for paginated session lists from GET /api/sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionListResponse {
+    pub sessions: Vec<SessionSummary>,
+    pub total: usize,
+}

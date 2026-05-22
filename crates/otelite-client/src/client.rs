@@ -403,6 +403,23 @@ impl ApiClient {
 
         Ok(response.json().await?)
     }
+
+    /// List recent sessions with summary stats.
+    /// `params` are forwarded as query string (e.g. start_time, end_time, limit).
+    pub async fn fetch_sessions(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::SessionListResponse> {
+        let url = format!("{}/api/sessions", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch sessions: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
 }
 
 #[cfg(test)]

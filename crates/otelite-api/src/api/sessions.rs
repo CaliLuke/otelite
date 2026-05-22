@@ -2,19 +2,21 @@
 
 use crate::server::AppState;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
 use chrono::{DateTime, Local, Utc};
 use otelite_core::api::{
     ErrorResponse, SessionContextGrowth, SessionDiagnoseResponse, SessionInteraction,
+    SessionListResponse, SessionSummary,
 };
 use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::trace::StatusCode as SpanStatusCode;
 use otelite_core::telemetry::{GenAiSpanInfo, Span};
-use std::collections::{HashMap, HashSet};
+use serde::Deserialize;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 fn extract_ttft(attrs: &HashMap<String, String>) -> Option<f64> {
     attrs
@@ -171,5 +173,126 @@ pub async fn get_session_diagnose(
         stall_count,
         interactions,
         context_growth,
+    }))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SessionListQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/sessions
+///
+/// Lists distinct GenAI sessions seen in the time window with summary stats:
+/// model(s), interaction count, total tokens, error count, first/last seen.
+///
+/// Strategy: single `query_spans` over the window for any span carrying
+/// `session.id`, group by session.id in memory, aggregate.
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    Query(params): Query<SessionListQuery>,
+) -> Result<Json<SessionListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = params.limit.unwrap_or(200);
+
+    // No "exists" predicate available; scan all spans in the window and
+    // filter in memory. Limit caps the worst case at 20k spans (typically
+    // many fewer once a time window is applied).
+    let query = QueryParams {
+        start_time: params.start_time,
+        end_time: params.end_time,
+        limit: Some(20_000),
+        ..Default::default()
+    };
+
+    let all_spans = state.storage.query_spans(&query).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal_error(e.to_string())),
+        )
+    })?;
+
+    // Group by session.id, then by trace_id (one interaction = one trace).
+    let mut by_session: HashMap<String, HashMap<String, Vec<Span>>> = HashMap::new();
+    for span in all_spans {
+        let sid = match span.attributes.get("session.id") {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => continue,
+        };
+        by_session
+            .entry(sid)
+            .or_default()
+            .entry(span.trace_id.clone())
+            .or_default()
+            .push(span);
+    }
+
+    let mut summaries: Vec<SessionSummary> = Vec::with_capacity(by_session.len());
+
+    for (session_id, by_trace) in by_session {
+        let mut models: BTreeSet<String> = BTreeSet::new();
+        let mut interaction_count = 0usize;
+        let mut total_input: u64 = 0;
+        let mut total_output: u64 = 0;
+        let mut error_count = 0usize;
+        let mut first_seen_ns = i64::MAX;
+        let mut last_seen_ns = i64::MIN;
+
+        for (_trace_id, spans) in by_trace {
+            let root = match root_llm_span(&spans) {
+                Some(s) => s,
+                None => continue,
+            };
+            interaction_count += 1;
+            let genai = GenAiSpanInfo::from_attributes(&root.attributes);
+            if let Some(m) = genai.model.as_deref().or_else(|| {
+                root.attributes
+                    .get("gen_ai.request.model")
+                    .map(|s| s.as_str())
+            }) {
+                models.insert(m.to_string());
+            }
+            if let Some(v) = genai.input_tokens {
+                total_input += v;
+            }
+            if let Some(v) = genai.output_tokens {
+                total_output += v;
+            }
+            if root.status.code == SpanStatusCode::Error {
+                error_count += 1;
+            }
+            if root.start_time < first_seen_ns {
+                first_seen_ns = root.start_time;
+            }
+            if root.start_time > last_seen_ns {
+                last_seen_ns = root.start_time;
+            }
+        }
+
+        if interaction_count == 0 {
+            continue;
+        }
+
+        summaries.push(SessionSummary {
+            session_id,
+            models: models.into_iter().collect(),
+            interaction_count,
+            total_input_tokens: total_input,
+            total_output_tokens: total_output,
+            error_count,
+            first_seen_ns,
+            last_seen_ns,
+        });
+    }
+
+    // Sort newest-first by last_seen, then truncate.
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.last_seen_ns));
+    let total = summaries.len();
+    summaries.truncate(limit);
+
+    Ok(Json(SessionListResponse {
+        sessions: summaries,
+        total,
     }))
 }
