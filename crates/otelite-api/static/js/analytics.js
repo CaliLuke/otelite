@@ -1,8 +1,13 @@
-// GenAI token usage view
+// GenAI analytics view
 //
-// Costs are computed server-side (see crates/otelite-core/src/pricing.rs). Rows
-// returned by the backend carry `cost`, `cost_source` and optional
-// `cost_reason` fields — this view only renders them.
+// Replaces the old "Usage" tab. The page is organised as 4 collapsed
+// <details> accordion sections grouped by question:
+//   Cost · Latency · Reliability · Behavior
+// On initial load only a single cheap getTokenUsage summary call (plus the
+// static pricing metadata) is made — every chart inside a section is fetched
+// lazily on first expand and cached thereafter.
+//
+// Costs are computed server-side (see crates/otelite-core/src/pricing.rs).
 
 function formatTs(date) {
     const p = n => String(n).padStart(2, '0');
@@ -10,39 +15,43 @@ function formatTs(date) {
            `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
 }
 
-class UsageView {
+class AnalyticsView {
     constructor(apiClient) {
         this.api = apiClient;
         this.refreshInterval = null;
-        // Default time window: 1 day. The Usage page used to fire 18 parallel
-        // queries against "all time" on every visit.
         const now = new Date();
         this.trWindowHours = 24;
         this.trEnd = now;
         this.trStart = new Date(now.getTime() - this.trWindowHours * 3600000);
-        this.activeTopNTab = 'cost';
-        this.activeSectionTab = 'overview';
         this.modelFilter = null;
+        this.topNSort = 'cost';
+        // Loader registry — keyed by section id ('cost', 'latency', ...)
+        this.sectionLoaders = {};
+        // Sections that have rendered their content for the current params.
+        this.loadedSections = new Set();
+        // Track open state across re-renders
+        this.openSections = new Set();
+        this.lastSummary = null;
     }
 
     async render() {
-        const container = document.getElementById('usage-container');
+        const container = document.getElementById('analytics-container');
         if (!container) return;
 
         container.innerHTML = `
             ${this._renderTipsPanel()}
             <div class="view-header">
-                <h2>GenAI Usage</h2>
+                <h2>GenAI Analytics</h2>
             </div>
             <div class="filters">
                 <div class="time-range-bar">
-                    <button class="btn-icon" id="tr-prev-usage" title="Previous window">&#8592;</button>
-                    <input type="text" id="tr-start-usage" class="filter-input tr-datetime" placeholder="YYYY-MM-DD HH:MM" autocomplete="off">
+                    <button class="btn-icon" id="tr-prev-analytics" title="Previous window">&#8592;</button>
+                    <input type="text" id="tr-start-analytics" class="filter-input tr-datetime" placeholder="YYYY-MM-DD HH:MM" autocomplete="off">
                     <span class="tr-sep">–</span>
-                    <input type="text" id="tr-end-usage" class="filter-input tr-datetime" placeholder="YYYY-MM-DD HH:MM" autocomplete="off">
-                    <button class="btn-icon" id="tr-next-usage" title="Next window">&#8594;</button>
-                    <button class="btn-icon" id="tr-now-usage" title="Jump to now">Now</button>
-                    <select id="tr-preset-usage" class="filter-select tr-preset">
+                    <input type="text" id="tr-end-analytics" class="filter-input tr-datetime" placeholder="YYYY-MM-DD HH:MM" autocomplete="off">
+                    <button class="btn-icon" id="tr-next-analytics" title="Next window">&#8594;</button>
+                    <button class="btn-icon" id="tr-now-analytics" title="Jump to now">Now</button>
+                    <select id="tr-preset-analytics" class="filter-select tr-preset">
                         <option value="">All time</option>
                         <option value="1">1 hr</option>
                         <option value="6">6 hr</option>
@@ -50,34 +59,66 @@ class UsageView {
                         <option value="168">7 days</option>
                     </select>
                 </div>
-                <select id="usage-model-filter" class="filter-select">
+                <select id="analytics-model-filter" class="filter-select">
                     <option value="">All models</option>
                 </select>
             </div>
-            <div id="usage-data-container"></div>
+            <div id="analytics-pricing-notice"></div>
+            <div id="analytics-summary-cards"></div>
+            <div id="analytics-empty-state"></div>
+            <div id="analytics-sections">
+                ${this._renderSectionShell('cost', 'Cost', 'Tokens spent · pricing · most expensive calls')}
+                ${this._renderSectionShell('latency', 'Latency', 'Response time · throughput · context size')}
+                ${this._renderSectionShell('reliability', 'Reliability', 'Errors · retries · truncation · drift')}
+                ${this._renderSectionShell('behavior', 'Behavior', 'Tool use · retrieval · request volume')}
+            </div>
         `;
 
         this._attachTimeRangeListeners();
         this._attachTipsPanelListener();
         this._syncDateInputs();
-        document.getElementById('usage-model-filter').addEventListener('change', (e) => {
+        document.getElementById('analytics-model-filter').addEventListener('change', (e) => {
             this.modelFilter = e.target.value || null;
-            this._loadAndRender();
+            this._refresh();
         });
-        await this._loadAndRender();
+
+        this._registerSectionLoaders();
+        this._attachSectionToggleHandlers();
+
+        await this._loadSummary();
 
         if (!this.refreshInterval) {
-            this.refreshInterval = setInterval(() => this._loadAndRender(), 30000);
+            this.refreshInterval = setInterval(() => this._refresh(), 30000);
         }
     }
 
+    _renderSectionShell(id, title, hint) {
+        const open = this.openSections.has(id);
+        return `
+            <details class="analytics-section" id="analytics-section-${id}"${open ? ' open' : ''}>
+                <summary class="analytics-section-summary">
+                    <span class="analytics-section-title">${title}</span>
+                    <span class="analytics-section-hint">${hint}</span>
+                    <span class="analytics-section-stat" id="analytics-section-stat-${id}">—</span>
+                </summary>
+                <div class="analytics-section-body" id="analytics-section-body-${id}">
+                    <div class="empty-state-hint">Loading…</div>
+                </div>
+            </details>`;
+    }
+
     _renderTipsPanel() {
-        const dismissed = localStorage.getItem('otelite_tips_dismissed_usage') === 'true';
+        const dismissed = localStorage.getItem('otelite_tips_dismissed_analytics') === 'true';
         const openAttr = dismissed ? '' : ' open';
         return `
-            <details class="tips-panel" id="tips-panel-usage"${openAttr}>
+            <details class="tips-panel" id="tips-panel-analytics"${openAttr}>
                 <summary>Tips</summary>
                 <div class="tips-panel-body">
+                    <h4>Layout</h4>
+                    <ul>
+                        <li>Sections are collapsed by default — expand only what you need; charts fetch lazily on first open</li>
+                        <li>Top-spans table is under <strong>Cost</strong> — use the sort dropdown to switch between most expensive / slowest / truncated / etc.</li>
+                    </ul>
                     <h4>Widget tips</h4>
                     <ul>
                         <li>Cost is estimated from a Claude 4.x pricing table — unknown models show "—"</li>
@@ -90,11 +131,11 @@ class UsageView {
                     <ul>
                         <li>What did this prompt cost? — Logs → click any <code>prompt.id</code> → summary banner</li>
                         <li>All activity for a session — click <code>session.id</code> anywhere</li>
-                        <li>Any truncation? — Usage → finish_reasons → <code>max_tokens</code> bar</li>
-                        <li>Top expensive calls — Usage → top calls table</li>
-                        <li>Which tool is failing? — Usage → tool usage table → success rate column</li>
-                        <li>Is Opus slower than Sonnet? — Usage → latency-by-model → compare P50 / P95</li>
-                        <li>How much is cache saving? — Usage → cache hit rate gauge</li>
+                        <li>Any truncation? — Reliability → finish_reasons → <code>max_tokens</code> bar</li>
+                        <li>Top expensive calls — Cost → top calls table</li>
+                        <li>Which tool is failing? — Behavior → tool usage table → success rate column</li>
+                        <li>Is Opus slower than Sonnet? — Latency → latency-by-model</li>
+                        <li>How much is cache saving? — Cost → cache hit rate</li>
                     </ul>
                 </div>
             </details>
@@ -102,19 +143,19 @@ class UsageView {
     }
 
     _attachTipsPanelListener() {
-        const panel = document.getElementById('tips-panel-usage');
+        const panel = document.getElementById('tips-panel-analytics');
         if (!panel) return;
         panel.addEventListener('toggle', () => {
             if (!panel.open) {
-                localStorage.setItem('otelite_tips_dismissed_usage', 'true');
+                localStorage.setItem('otelite_tips_dismissed_analytics', 'true');
             } else {
-                localStorage.removeItem('otelite_tips_dismissed_usage');
+                localStorage.removeItem('otelite_tips_dismissed_analytics');
             }
         });
     }
 
     _attachTimeRangeListeners() {
-        document.getElementById('tr-preset-usage').addEventListener('change', (e) => {
+        document.getElementById('tr-preset-analytics').addEventListener('change', (e) => {
             const hours = e.target.value ? parseFloat(e.target.value) : null;
             if (hours !== null) {
                 const now = new Date();
@@ -128,24 +169,24 @@ class UsageView {
                 this.trWindowHours = null;
                 this._syncDateInputs();
             }
-            this._loadAndRender();
+            this._refresh();
         });
 
-        document.getElementById('tr-start-usage').addEventListener('change', () => this._onDateInputChange());
-        document.getElementById('tr-end-usage').addEventListener('change', () => this._onDateInputChange());
+        document.getElementById('tr-start-analytics').addEventListener('change', () => this._onDateInputChange());
+        document.getElementById('tr-end-analytics').addEventListener('change', () => this._onDateInputChange());
 
-        document.getElementById('tr-prev-usage').addEventListener('click', () => {
+        document.getElementById('tr-prev-analytics').addEventListener('click', () => {
             const windowMs = (this.trWindowHours || 1) * 3600000;
             const end = (this.trEnd || new Date()).getTime() - windowMs;
             const start = (this.trStart ? this.trStart.getTime() : end - windowMs) - windowMs;
             this.trEnd = new Date(end);
             this.trStart = new Date(start);
             this._syncDateInputs();
-            document.getElementById('tr-preset-usage').value = '';
-            this._loadAndRender();
+            document.getElementById('tr-preset-analytics').value = '';
+            this._refresh();
         });
 
-        document.getElementById('tr-next-usage').addEventListener('click', () => {
+        document.getElementById('tr-next-analytics').addEventListener('click', () => {
             const now = Date.now();
             const windowMs = (this.trWindowHours || 1) * 3600000;
             let end = (this.trEnd || new Date()).getTime() + windowMs;
@@ -153,32 +194,32 @@ class UsageView {
             this.trEnd = new Date(end);
             this.trStart = new Date(end - windowMs);
             this._syncDateInputs();
-            document.getElementById('tr-preset-usage').value = '';
-            this._loadAndRender();
+            document.getElementById('tr-preset-analytics').value = '';
+            this._refresh();
         });
 
-        document.getElementById('tr-now-usage').addEventListener('click', () => {
+        document.getElementById('tr-now-analytics').addEventListener('click', () => {
             const now = new Date();
             const windowMs = (this.trWindowHours || 1) * 3600000;
             this.trEnd = now;
             this.trStart = new Date(now.getTime() - windowMs);
             this._syncDateInputs();
-            document.getElementById('tr-preset-usage').value = '';
-            this._loadAndRender();
+            document.getElementById('tr-preset-analytics').value = '';
+            this._refresh();
         });
     }
 
     _syncDateInputs() {
-        const startEl = document.getElementById('tr-start-usage');
-        const endEl = document.getElementById('tr-end-usage');
+        const startEl = document.getElementById('tr-start-analytics');
+        const endEl = document.getElementById('tr-end-analytics');
         if (startEl) startEl.value = this.trStart ? this._toDatetimeLocal(this.trStart) : '';
         if (endEl) endEl.value = this.trEnd ? this._toDatetimeLocal(this.trEnd) : '';
     }
 
     _prefillDateInputsFromData(costSeries, bucketSecs) {
-        if (this.trStart !== null || this.trEnd !== null) return; // preset already populated via _syncDateInputs
-        const startEl = document.getElementById('tr-start-usage');
-        const endEl = document.getElementById('tr-end-usage');
+        if (this.trStart !== null || this.trEnd !== null) return;
+        const startEl = document.getElementById('tr-start-analytics');
+        const endEl = document.getElementById('tr-end-analytics');
         if (!startEl || !endEl) return;
         if (!Array.isArray(costSeries) || costSeries.length === 0) return;
         const timestamps = costSeries
@@ -187,8 +228,6 @@ class UsageView {
         if (timestamps.length === 0) return;
         const minMs = Math.min(...timestamps) / 1_000_000;
         const bucketMs = (bucketSecs || 3600) * 1000;
-        // Last bucket's END is (last-start + bucket). Cap at now so we don't
-        // show an end in the future for bucket sizes that cross now.
         const maxMs = Math.min(Math.max(...timestamps) / 1_000_000 + bucketMs, Date.now());
         startEl.value = this._toDatetimeLocal(new Date(minMs));
         endEl.value = this._toDatetimeLocal(new Date(maxMs));
@@ -208,16 +247,16 @@ class UsageView {
     }
 
     _onDateInputChange() {
-        const startEl = document.getElementById('tr-start-usage');
-        const endEl = document.getElementById('tr-end-usage');
+        const startEl = document.getElementById('tr-start-analytics');
+        const endEl = document.getElementById('tr-end-analytics');
         this.trStart = this._parseDatetimeInput(startEl ? startEl.value : '');
         this.trEnd = this._parseDatetimeInput(endEl ? endEl.value : '');
         if (this.trStart && this.trEnd) {
             this.trWindowHours = (this.trEnd.getTime() - this.trStart.getTime()) / 3600000;
         }
-        const presetEl = document.getElementById('tr-preset-usage');
+        const presetEl = document.getElementById('tr-preset-analytics');
         if (presetEl) presetEl.value = '';
-        this._loadAndRender();
+        this._refresh();
     }
 
     _chooseBucket() {
@@ -230,143 +269,230 @@ class UsageView {
         return 86400;
     }
 
-    async _loadAndRender() {
-        const dataContainer = document.getElementById('usage-data-container');
-        if (!dataContainer) return;
+    _baseParams() {
+        const params = {};
+        if (this.trStart !== null) {
+            params.start_time = this.trStart.getTime() * 1_000_000;
+            params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
+        }
+        if (this.modelFilter) params.model = this.modelFilter;
+        return params;
+    }
+
+    /**
+     * Re-fetch summary and any currently-expanded section. Called when the
+     * time window or model filter changes, or on the 30s auto-refresh.
+     */
+    async _refresh() {
+        this.loadedSections.clear();
+        await this._loadSummary();
+        // Re-fire loaders for any open sections
+        for (const id of Object.keys(this.sectionLoaders)) {
+            const details = document.getElementById(`analytics-section-${id}`);
+            if (details && details.open) {
+                this.sectionLoaders[id]();
+            }
+        }
+    }
+
+    /**
+     * Single eager call: getTokenUsage. Populates the header summary cards,
+     * the per-section tiny stat in each <summary>, the model dropdown, and
+     * the pricing-notice slot (a separate cheap fetch for static metadata).
+     */
+    async _loadSummary() {
+        const summaryContainer = document.getElementById('analytics-summary-cards');
+        const emptyEl = document.getElementById('analytics-empty-state');
+        const sectionsEl = document.getElementById('analytics-sections');
+        const noticeEl = document.getElementById('analytics-pricing-notice');
+        if (!summaryContainer) return;
 
         try {
-            const params = {};
-            if (this.trStart !== null) {
-                params.start_time = this.trStart.getTime() * 1_000_000;
-                params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
-            }
-            if (this.modelFilter) params.model = this.modelFilter;
-            const bucket = this._chooseBucket();
-            const [summary, costSeries, topSpans, finishReasons, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext, latencySeries] = await Promise.all([
+            const params = this._baseParams();
+            const [summary, pricingMeta] = await Promise.all([
                 this.api.getTokenUsage(params),
-                this.api.getCostSeries({ ...params, bucket }),
-                this.api.getTopSpans({ ...params, limit: 20 }),
-                this.api.getFinishReasons(params),
-                this.api.getLatencyStats(params),
-                this.api.getErrorRate(params),
-                this.api.getToolUsage(params),
-                this.api.getRetryStats(params),
-                this.api.getRetrievalStats(params).catch(() => null),
                 this.api.getPricingMetadata().catch(() => null),
-                this.api.getTruncationRate(params).catch(() => null),
-                this.api.getCacheHitRate(params).catch(() => null),
-                this.api.getRequestParamProfile(params).catch(() => null),
-                this.api.getConversationDepth(params).catch(() => null),
-                this.api.getCallsSeries(params).catch(() => null),
-                this.api.getErrorTypes(params).catch(() => null),
-                this.api.getModelDrift(params).catch(() => null),
-                this.api.getLatencyByContext(params).catch(() => null),
-                this.api.getLatencySeries(params).catch(() => null),
             ]);
-            dataContainer.innerHTML = this._buildHtml(summary, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext, latencySeries);
-            this._attachTopNTabHandlers(params);
-            this._attachSectionTabHandlers();
-            this._populateModelDropdown(summary?.by_model || []);
-            // When no explicit range is selected ("All time"), show the user
-            // what effective range the query covered by prefilling the date
-            // inputs from the returned cost-series data. Prefill is visual
-            // only — we don't mutate trStart/trEnd so the preset stays
-            // "All time" until the user actively edits.
-            this._prefillDateInputsFromData(costSeries, bucket);
+            this.lastSummary = summary;
+
+            if (noticeEl) {
+                noticeEl.innerHTML = this._renderPricingNotice(pricingMeta);
+            }
+
+            if (!summary || !summary.summary || summary.summary.total_requests === 0) {
+                summaryContainer.innerHTML = '';
+                if (sectionsEl) sectionsEl.style.display = 'none';
+                if (emptyEl) {
+                    emptyEl.innerHTML = `<div class="empty-state">
+                        <p>No GenAI data yet</p>
+                        <p class="empty-state-hint">
+                            Instrument your LLM application with the OpenAI or Anthropic OTel SDK and point it at
+                            <strong>http://localhost:4318</strong>. Token usage will appear here once spans with
+                            <code>gen_ai.system</code> attributes arrive.
+                        </p>
+                    </div>`;
+                }
+                this._populateModelDropdown([]);
+                return;
+            }
+
+            if (sectionsEl) sectionsEl.style.display = '';
+            if (emptyEl) emptyEl.innerHTML = '';
+
+            summaryContainer.innerHTML = this._buildHeaderCards(summary);
+            this._populateModelDropdown(summary.by_model || []);
+            this._updateSectionStats(summary);
         } catch (err) {
-            dataContainer.innerHTML = `<div class="empty-state"><p>Failed to load usage data</p><p class="empty-state-hint">${err.message}</p></div>`;
+            summaryContainer.innerHTML = `<div class="empty-state"><p>Failed to load analytics summary</p><p class="empty-state-hint">${this._esc(err.message)}</p></div>`;
         }
     }
 
-    _populateModelDropdown(byModel) {
-        const sel = document.getElementById('usage-model-filter');
-        if (!sel) return;
-        const current = this.modelFilter || '';
-        const models = byModel.map(r => r.model).filter(Boolean).sort();
-        // Rebuild options preserving current selection
-        sel.innerHTML = '<option value="">All models</option>' +
-            models.map(m => `<option value="${this._esc(m)}"${m === current ? ' selected' : ''}>${this._esc(m)}</option>`).join('');
-    }
-
-    _buildHtml(data, costSeries, topSpans, finishReasons, bucket, latencyStats, errorRate, toolUsage, retryStats, retrievalStats, pricingMeta, truncationRate, cacheHitRate, requestParamProfile, conversationDepth, callsSeries, errorTypes, modelDrift, latencyByContext, latencySeries) {
-        const { summary, by_model, by_system } = data;
-
-        if (summary.total_requests === 0) {
-            return `<div class="empty-state">
-                <p>No GenAI data yet</p>
-                <p class="empty-state-hint">
-                    Instrument your LLM application with the OpenAI or Anthropic OTel SDK and point it at
-                    <strong>http://localhost:4318</strong>. Token usage will appear here once spans with
-                    <code>gen_ai.system</code> attributes arrive.
-                </p>
-            </div>`;
-        }
-
+    _buildHeaderCards(data) {
+        const { summary } = data;
         const fmt = n => Number(n).toLocaleString();
-
-        const cacheRead = summary.total_cache_read_tokens ?? 0;
-        const cacheCreate = summary.total_cache_creation_tokens ?? 0;
         const totalInput = summary.total_input_tokens ?? 0;
-        const cacheDenom = cacheRead + cacheCreate + totalInput;
-        const cachePct = cacheDenom > 0 ? (cacheRead / cacheDenom) * 100 : 0;
-
-        const reasons = Array.isArray(finishReasons) ? finishReasons : [];
-        const truncCount = reasons
-            .filter(r => String(r.reason || '').toLowerCase() === 'max_tokens')
-            .reduce((acc, r) => acc + (r.count || 0), 0);
-        const totalCount = reasons.reduce((acc, r) => acc + (r.count || 0), 0);
-        const truncPct = totalCount > 0 ? (truncCount / totalCount) * 100 : 0;
-
-        const summaryCards = `
+        const totalOutput = summary.total_output_tokens ?? 0;
+        return `
             <div class="usage-summary-cards">
+                <div class="usage-card">
+                    <div class="usage-card-label">Requests</div>
+                    <div class="usage-card-value">${fmt(summary.total_requests ?? 0)}</div>
+                </div>
                 <div class="usage-card">
                     <div class="usage-card-label">Input tokens</div>
                     <div class="usage-card-value">${fmt(totalInput)}</div>
                 </div>
                 <div class="usage-card">
                     <div class="usage-card-label">Output tokens</div>
-                    <div class="usage-card-value">${fmt(summary.total_output_tokens ?? 0)}</div>
+                    <div class="usage-card-value">${fmt(totalOutput)}</div>
                 </div>
                 <div class="usage-card">
-                    <div class="usage-card-label">Requests</div>
-                    <div class="usage-card-value">${fmt(summary.total_requests)}</div>
+                    <div class="usage-card-label">Models</div>
+                    <div class="usage-card-value">${fmt((data.by_model || []).length)}</div>
                 </div>
-                <div class="usage-gauge-card">
-                    <div class="usage-card-label">Cache hit rate</div>
-                    <div class="usage-card-value">${cachePct.toFixed(1)}%</div>
-                    <div class="gauge-bar"><div class="gauge-fill" style="width:${cachePct.toFixed(2)}%"></div></div>
-                    <div class="gauge-hint">${fmt(cacheRead)} / ${fmt(cacheDenom)} tokens served from cache</div>
-                </div>
-                <div class="usage-gauge-card">
-                    <div class="usage-card-label">Truncation rate</div>
-                    <div class="usage-card-value">${truncPct.toFixed(1)}%</div>
-                    <div class="gauge-bar"><div class="gauge-fill ${truncPct > 0 ? 'gauge-fill-warning' : ''}" style="width:${truncPct.toFixed(2)}%"></div></div>
-                    <div class="gauge-hint">${fmt(truncCount)} / ${fmt(totalCount)} responses hit max_tokens</div>
-                </div>
-                ${this._buildRetryGauge(retryStats)}
-                ${this._buildConversationDepthCard(conversationDepth)}
             </div>`;
+    }
 
-        const callsChart = this._buildCallsChart(callsSeries || []);
-        const costChart = this._buildCostChart(costSeries || [], bucket);
-        const topNSection = this._buildTopNSection(topSpans || [], errorRate || []);
-        const cacheHitRateSection = this._buildCacheHitRate(cacheHitRate || []);
+    _updateSectionStats(data) {
+        const { summary, by_model } = data;
+        const fmt = n => Number(n).toLocaleString();
+        const requests = summary.total_requests ?? 0;
+        const totalTokens = (summary.total_input_tokens ?? 0) + (summary.total_output_tokens ?? 0);
+        const modelCount = (by_model || []).length;
 
-        const latencySection = this._buildLatencyTable(latencyStats || []);
-        const latencySeriesChart = this._buildLatencySeriesChart(latencySeries || [], bucket);
-        const latencyByContextSection = this._buildLatencyByContext(latencyByContext || []);
+        const set = (id, html) => {
+            const el = document.getElementById(`analytics-section-stat-${id}`);
+            if (el) el.innerHTML = html;
+        };
+        set('cost', `${fmt(totalTokens)} tokens · ${fmt(requests)} req`);
+        set('latency', `${fmt(requests)} req · ${fmt(modelCount)} model${modelCount === 1 ? '' : 's'}`);
+        set('reliability', `${fmt(requests)} req`);
+        set('behavior', `${fmt(requests)} req`);
+    }
 
-        const finishReasonsSection = this._buildFinishReasons(reasons);
-        const truncationRateSection = this._buildTruncationRate(truncationRate || []);
-        const errorRateSection = this._buildErrorRate(errorRate || []);
-        const errorTypesSection = this._buildErrorTypes(errorTypes || []);
-        const modelDriftSection = this._buildModelDrift(modelDrift || []);
+    _populateModelDropdown(byModel) {
+        const sel = document.getElementById('analytics-model-filter');
+        if (!sel) return;
+        const current = this.modelFilter || '';
+        const models = byModel.map(r => r.model).filter(Boolean).sort();
+        sel.innerHTML = '<option value="">All models</option>' +
+            models.map(m => `<option value="${this._esc(m)}"${m === current ? ' selected' : ''}>${this._esc(m)}</option>`).join('');
+    }
 
-        const toolUsageSection = this._buildToolUsage(toolUsage || []);
-        const retrievalSection = this._buildRetrievalStats(retrievalStats);
-        const requestParamSection = this._buildRequestParamProfile(requestParamProfile);
+    // ── Section lazy-loaders ─────────────────────────────────────────────────
 
-        const modelRows = by_model.map(m => `
+    _registerSectionLoaders() {
+        this.sectionLoaders = {
+            cost: () => this._loadCostSection(),
+            latency: () => this._loadLatencySection(),
+            reliability: () => this._loadReliabilitySection(),
+            behavior: () => this._loadBehaviorSection(),
+        };
+    }
+
+    _attachSectionToggleHandlers() {
+        for (const id of Object.keys(this.sectionLoaders)) {
+            const details = document.getElementById(`analytics-section-${id}`);
+            if (!details) continue;
+            details.addEventListener('toggle', () => {
+                if (details.open) {
+                    this.openSections.add(id);
+                    if (!this.loadedSections.has(id)) {
+                        this.sectionLoaders[id]();
+                    }
+                } else {
+                    this.openSections.delete(id);
+                }
+            });
+        }
+    }
+
+    _setSectionBody(id, html) {
+        const body = document.getElementById(`analytics-section-body-${id}`);
+        if (body) body.innerHTML = html;
+    }
+
+    _setSectionLoading(id) {
+        this._setSectionBody(id, `<div class="empty-state-hint">Loading…</div>`);
+    }
+
+    _setSectionError(id, err) {
+        this._setSectionBody(id, `<div class="empty-state-hint">Failed to load: ${this._esc(err.message || String(err))}</div>`);
+    }
+
+    async _loadCostSection() {
+        this._setSectionLoading('cost');
+        try {
+            const params = this._baseParams();
+            const bucket = this._chooseBucket();
+            const [costSeries, topSpans, cacheHitRate, retryStats, errorRate] = await Promise.all([
+                this.api.getCostSeries({ ...params, bucket }),
+                this.api.getTopSpans({ ...params, limit: 20 }),
+                this.api.getCacheHitRate(params).catch(() => null),
+                this.api.getRetryStats(params).catch(() => null),
+                this.api.getErrorRate(params).catch(() => []),
+            ]);
+
+            const summary = this.lastSummary || { summary: {} };
+            const cacheRead = summary.summary?.total_cache_read_tokens ?? 0;
+            const cacheCreate = summary.summary?.total_cache_creation_tokens ?? 0;
+            const totalInput = summary.summary?.total_input_tokens ?? 0;
+            const cacheDenom = cacheRead + cacheCreate + totalInput;
+            const cachePct = cacheDenom > 0 ? (cacheRead / cacheDenom) * 100 : 0;
+
+            const fmt = n => Number(n).toLocaleString();
+            const cacheCard = `
+                <div class="usage-summary-cards">
+                    <div class="usage-gauge-card">
+                        <div class="usage-card-label">Cache hit rate</div>
+                        <div class="usage-card-value">${cachePct.toFixed(1)}%</div>
+                        <div class="gauge-bar"><div class="gauge-fill" style="width:${cachePct.toFixed(2)}%"></div></div>
+                        <div class="gauge-hint">${fmt(cacheRead)} / ${fmt(cacheDenom)} tokens served from cache</div>
+                    </div>
+                    ${this._buildRetryGauge(retryStats)}
+                </div>`;
+
+            const html = [
+                cacheCard,
+                this._buildCostChart(costSeries || [], bucket),
+                this._buildTopNSection(topSpans || [], errorRate || []),
+                this._buildCacheHitRate(cacheHitRate || []),
+                this._buildByModelByProvider(summary),
+            ].filter(Boolean).join('');
+
+            this._setSectionBody('cost', html);
+            this._attachTopNDropdownHandler(params);
+            this._prefillDateInputsFromData(costSeries, bucket);
+            this.loadedSections.add('cost');
+        } catch (err) {
+            this._setSectionError('cost', err);
+        }
+    }
+
+    _buildByModelByProvider(data) {
+        if (!data || !data.by_model) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const modelRows = (data.by_model || []).map(m => `
             <tr>
                 <td>${this._esc(m.model)}</td>
                 <td>${fmt(m.requests)}</td>
@@ -374,24 +500,20 @@ class UsageView {
                 <td>${fmt(m.output_tokens)}</td>
                 <td>${fmt(m.input_tokens + m.output_tokens)}</td>
             </tr>`).join('');
-
-        const modelTable = `
+        const systemRows = (data.by_system || []).map(s => `
+            <tr>
+                <td>${this._esc(s.system)}</td>
+                <td>${fmt(s.requests)}</td>
+                <td>${fmt(s.input_tokens + s.output_tokens)}</td>
+            </tr>`).join('');
+        return `
             <h3>By model</h3>
             <table class="data-table">
                 <thead><tr>
                     <th>Model</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th>
                 </tr></thead>
                 <tbody>${modelRows}</tbody>
-            </table>`;
-
-        const systemRows = by_system.map(s => `
-            <tr>
-                <td>${this._esc(s.system)}</td>
-                <td>${fmt(s.requests)}</td>
-                <td>${fmt(s.input_tokens + s.output_tokens)}</td>
-            </tr>`).join('');
-
-        const systemTable = `
+            </table>
             <h3>By provider</h3>
             <table class="data-table">
                 <thead><tr>
@@ -399,45 +521,109 @@ class UsageView {
                 </tr></thead>
                 <tbody>${systemRows}</tbody>
             </table>`;
-
-        const pricingNotice = this._renderPricingNotice(pricingMeta);
-
-        const sectionTabs = `
-            <div class="usage-section-tabs">
-                <button class="usage-section-tab active" data-section="overview">Overview</button>
-                <button class="usage-section-tab" data-section="performance">Performance</button>
-                <button class="usage-section-tab" data-section="quality">Quality</button>
-                <button class="usage-section-tab" data-section="details">Details</button>
-            </div>`;
-
-        return pricingNotice + sectionTabs + `
-            <div id="usage-section-overview" class="usage-section-panel">
-                ${summaryCards}
-                ${callsChart}
-                ${costChart}
-                ${cacheHitRateSection}
-                ${topNSection}
-            </div>
-            <div id="usage-section-performance" class="usage-section-panel" hidden>
-                ${latencySection}
-                ${latencySeriesChart}
-                ${latencyByContextSection}
-            </div>
-            <div id="usage-section-quality" class="usage-section-panel" hidden>
-                ${finishReasonsSection}
-                ${truncationRateSection}
-                ${errorRateSection}
-                ${errorTypesSection}
-                ${modelDriftSection}
-            </div>
-            <div id="usage-section-details" class="usage-section-panel" hidden>
-                ${toolUsageSection}
-                ${retrievalSection}
-                ${requestParamSection}
-                ${modelTable}
-                ${systemTable}
-            </div>`;
     }
+
+    async _loadLatencySection() {
+        this._setSectionLoading('latency');
+        try {
+            const params = this._baseParams();
+            const bucket = this._chooseBucket();
+            const [latencyStats, latencySeries, latencyByContext, conversationDepth] = await Promise.all([
+                this.api.getLatencyStats(params),
+                this.api.getLatencySeries(params).catch(() => null),
+                this.api.getLatencyByContext(params).catch(() => null),
+                this.api.getConversationDepth(params).catch(() => null),
+            ]);
+
+            const convCard = this._buildConversationDepthCard(conversationDepth);
+            const cards = convCard ? `<div class="usage-summary-cards">${convCard}</div>` : '';
+
+            const html = [
+                cards,
+                this._buildLatencyTable(latencyStats || []),
+                this._buildLatencySeriesChart(latencySeries || [], bucket),
+                this._buildLatencyByContext(latencyByContext || []),
+            ].filter(Boolean).join('');
+
+            this._setSectionBody('latency', html);
+            this.loadedSections.add('latency');
+        } catch (err) {
+            this._setSectionError('latency', err);
+        }
+    }
+
+    async _loadReliabilitySection() {
+        this._setSectionLoading('reliability');
+        try {
+            const params = this._baseParams();
+            const [finishReasons, errorRate, errorTypes, truncationRate, modelDrift] = await Promise.all([
+                this.api.getFinishReasons(params),
+                this.api.getErrorRate(params),
+                this.api.getErrorTypes(params).catch(() => null),
+                this.api.getTruncationRate(params).catch(() => null),
+                this.api.getModelDrift(params).catch(() => null),
+            ]);
+
+            const reasons = Array.isArray(finishReasons) ? finishReasons : [];
+            const truncCount = reasons
+                .filter(r => String(r.reason || '').toLowerCase() === 'max_tokens')
+                .reduce((acc, r) => acc + (r.count || 0), 0);
+            const totalCount = reasons.reduce((acc, r) => acc + (r.count || 0), 0);
+            const truncPct = totalCount > 0 ? (truncCount / totalCount) * 100 : 0;
+            const fmt = n => Number(n).toLocaleString();
+
+            const truncCard = totalCount > 0 ? `
+                <div class="usage-summary-cards">
+                    <div class="usage-gauge-card">
+                        <div class="usage-card-label">Truncation rate</div>
+                        <div class="usage-card-value">${truncPct.toFixed(1)}%</div>
+                        <div class="gauge-bar"><div class="gauge-fill ${truncPct > 0 ? 'gauge-fill-warning' : ''}" style="width:${truncPct.toFixed(2)}%"></div></div>
+                        <div class="gauge-hint">${fmt(truncCount)} / ${fmt(totalCount)} responses hit max_tokens</div>
+                    </div>
+                </div>` : '';
+
+            const html = [
+                truncCard,
+                this._buildFinishReasons(reasons),
+                this._buildTruncationRate(truncationRate || []),
+                this._buildErrorRate(errorRate || []),
+                this._buildErrorTypes(errorTypes || []),
+                this._buildModelDrift(modelDrift || []),
+            ].filter(Boolean).join('');
+
+            this._setSectionBody('reliability', html);
+            this.loadedSections.add('reliability');
+        } catch (err) {
+            this._setSectionError('reliability', err);
+        }
+    }
+
+    async _loadBehaviorSection() {
+        this._setSectionLoading('behavior');
+        try {
+            const params = this._baseParams();
+            const [toolUsage, retrievalStats, requestParamProfile, callsSeries] = await Promise.all([
+                this.api.getToolUsage(params),
+                this.api.getRetrievalStats(params).catch(() => null),
+                this.api.getRequestParamProfile(params).catch(() => null),
+                this.api.getCallsSeries(params).catch(() => null),
+            ]);
+
+            const html = [
+                this._buildCallsChart(callsSeries || []),
+                this._buildToolUsage(toolUsage || []),
+                this._buildRetrievalStats(retrievalStats),
+                this._buildRequestParamProfile(requestParamProfile),
+            ].filter(Boolean).join('');
+
+            this._setSectionBody('behavior', html);
+            this.loadedSections.add('behavior');
+        } catch (err) {
+            this._setSectionError('behavior', err);
+        }
+    }
+
+    // ── Renderers (preserved from the old usage view) ────────────────────────
 
     _buildRetrievalStats(stats) {
         if (!stats || !stats.total_retrievals) return '';
@@ -563,37 +749,11 @@ class UsageView {
             </table>`;
     }
 
-    _attachSectionTabHandlers() {
-        const allTabs = document.querySelectorAll('.usage-section-tab');
-        const allPanels = document.querySelectorAll('.usage-section-panel');
-        allTabs.forEach(btn => {
-            btn.addEventListener('click', () => {
-                this.activeSectionTab = btn.dataset.section;
-                allTabs.forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                allPanels.forEach(p => p.hidden = true);
-                const panel = document.getElementById(`usage-section-${btn.dataset.section}`);
-                if (panel) panel.hidden = false;
-            });
-        });
-        if (this.activeSectionTab && this.activeSectionTab !== 'overview') {
-            const btn = document.querySelector(`.usage-section-tab[data-section="${this.activeSectionTab}"]`);
-            const panel = document.getElementById(`usage-section-${this.activeSectionTab}`);
-            if (btn && panel) {
-                allTabs.forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                allPanels.forEach(p => p.hidden = true);
-                panel.hidden = false;
-            }
-        }
-    }
-
     _buildLatencySeriesChart(points, bucketSecs) {
         if (!Array.isArray(points) || !points.length) {
             return `<h3>Latency over time</h3><div class="empty-state-hint">No latency data in this window.</div>`;
         }
 
-        // Aggregate across models per bucket: weighted avg for avg_ms, max for p95_ms
         const bucketMap = new Map();
         for (const p of points) {
             const ts = p.timestamp;
@@ -797,8 +957,6 @@ class UsageView {
             return `<h3>Cost over time</h3><div class="empty-state-hint">No cost data in this window.</div>`;
         }
 
-        // Server-enriched: each row has `cost` (null if unknown). Group by
-        // timestamp bucket and sum, tracking per-model breakdown for tooltips.
         const bucketMap = new Map();
         for (const row of costSeries) {
             const ts = row.timestamp;
@@ -837,9 +995,6 @@ class UsageView {
             return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
         };
 
-        // Axis labels render as HTML below the SVG so the SVG's
-        // preserveAspectRatio="none" (needed to stretch bars across the
-        // container width) doesn't distort the text.
         let axisHtml = '';
         if (buckets.length > 0) {
             const left = this._esc(labelFor(0));
@@ -867,10 +1022,10 @@ class UsageView {
             </div>`;
     }
 
-    // ── Top-N tabbed section ─────────────────────────────────────────────────
+    // ── Top-N section: dropdown-driven (replaces the old 8-tab switcher) ─────
 
     _buildTopNSection(topSpans, errorRate) {
-        const tabs = [
+        const sortOptions = [
             { id: 'cost',      label: 'Most expensive' },
             { id: 'slow',      label: 'Slowest' },
             { id: 'truncated', label: 'Truncated' },
@@ -881,81 +1036,75 @@ class UsageView {
             { id: 'errors',    label: 'Error runs' },
         ];
 
-        const tabBtns = tabs.map((t, i) =>
-            `<button class="top-n-tab${i === 0 ? ' active' : ''}" data-tab="${t.id}">${t.label}</button>`
+        const opts = sortOptions.map(o =>
+            `<option value="${o.id}"${o.id === this.topNSort ? ' selected' : ''}>${o.label}</option>`
         ).join('');
 
-        const panels = tabs.map((t, i) => {
-            let content = '';
-            if (t.id === 'cost') {
-                content = this._renderSpanTable(topSpans || [], { extraCol: 'cost', emptyMsg: 'No expensive calls in this window.' });
-            } else if (t.id === 'errors') {
-                content = this._renderErrorRunsTable(errorRate || []);
-            } else {
-                content = `<div class="top-n-loading" data-tab="${t.id}">Click to load…</div>`;
-            }
-            return `<div id="top-n-panel-${t.id}" class="top-n-panel" ${i !== 0 ? 'hidden' : ''}>${content}</div>`;
-        }).join('');
+        let initialContent = '';
+        if (this.topNSort === 'cost') {
+            initialContent = this._renderSpanTable(topSpans || [], { extraCol: 'cost', emptyMsg: 'No expensive calls in this window.' });
+        } else if (this.topNSort === 'errors') {
+            initialContent = this._renderErrorRunsTable(errorRate || []);
+        } else {
+            initialContent = `<div class="empty-state-hint">Loading…</div>`;
+        }
+
+        // Cache the initial cost data so the dropdown handler can return to it
+        // without an extra fetch.
+        this._topNCostCache = topSpans || [];
+        this._topNErrorCache = errorRate || [];
 
         return `
             <div class="top-n-section">
-                <h3>Top 20 calls</h3>
-                <div class="top-n-tabs">${tabBtns}</div>
-                ${panels}
+                <h3>Top 20 calls
+                    <select id="top-n-sort" class="filter-select" style="margin-left:0.75rem;font-size:0.85em">${opts}</select>
+                </h3>
+                <div id="top-n-content">${initialContent}</div>
             </div>`;
     }
 
-    _attachTopNTabHandlers(params) {
-        const tabDefs = {
-            slow:      p => this.api.getTopSpans({...p, sort_by: 'duration'}),
-            truncated: p => this.api.getTopSpans({...p, truncated_only: true}),
-            sessions:  p => this.api.getTopSessions(p),
-            convs:     p => this.api.getTopConversations(p),
-            verbose:   p => this.api.getTopSpans({...p, sort_by: 'output_input_ratio'}),
-            cache:     p => this.api.getTopSpans({...p, sort_by: 'cache_efficiency'}),
-        };
+    _attachTopNDropdownHandler(params) {
+        const sel = document.getElementById('top-n-sort');
+        if (!sel) return;
+        sel.addEventListener('change', async (e) => {
+            this.topNSort = e.target.value;
+            const content = document.getElementById('top-n-content');
+            if (!content) return;
 
-        const activateTab = async (tabId) => {
-            document.querySelectorAll('.top-n-tab').forEach(b => b.classList.remove('active'));
-            const btn = document.querySelector(`.top-n-tab[data-tab="${tabId}"]`);
-            if (btn) btn.classList.add('active');
-            document.querySelectorAll('.top-n-panel').forEach(p => p.hidden = true);
-            const panel = document.getElementById(`top-n-panel-${tabId}`);
-            if (!panel) return;
-            panel.hidden = false;
+            if (this.topNSort === 'cost') {
+                content.innerHTML = this._renderSpanTable(this._topNCostCache, { extraCol: 'cost', emptyMsg: 'No expensive calls in this window.' });
+                return;
+            }
+            if (this.topNSort === 'errors') {
+                content.innerHTML = this._renderErrorRunsTable(this._topNErrorCache);
+                return;
+            }
 
-            const placeholder = panel.querySelector('.top-n-loading');
-            if (!placeholder || !tabDefs[tabId]) return;
-            placeholder.textContent = 'Loading…';
-
+            content.innerHTML = `<div class="empty-state-hint">Loading…</div>`;
+            const fetchers = {
+                slow:      p => this.api.getTopSpans({...p, sort_by: 'duration'}),
+                truncated: p => this.api.getTopSpans({...p, truncated_only: true}),
+                sessions:  p => this.api.getTopSessions(p),
+                convs:     p => this.api.getTopConversations(p),
+                verbose:   p => this.api.getTopSpans({...p, sort_by: 'output_input_ratio'}),
+                cache:     p => this.api.getTopSpans({...p, sort_by: 'cache_efficiency'}),
+            };
             try {
-                const data = await tabDefs[tabId]({ ...params, limit: 20 });
+                const data = await fetchers[this.topNSort]({ ...params, limit: 20 });
                 let html;
-                if (tabId === 'sessions') {
+                if (this.topNSort === 'sessions') {
                     html = this._renderGroupTable(data || [], 'session_id', 'Session ID');
-                } else if (tabId === 'convs') {
+                } else if (this.topNSort === 'convs') {
                     html = this._renderGroupTable(data || [], 'conversation_id', 'Conversation ID');
                 } else {
-                    const extraCol = {slow: 'duration', truncated: 'finish_reason', verbose: 'ratio', cache: 'cache_rate'}[tabId] || 'cost';
+                    const extraCol = {slow: 'duration', truncated: 'finish_reason', verbose: 'ratio', cache: 'cache_rate'}[this.topNSort] || 'cost';
                     html = this._renderSpanTable(data || [], { extraCol, emptyMsg: 'No matching spans in this window.' });
                 }
-                panel.innerHTML = html;
-            } catch (e) {
-                panel.innerHTML = `<div class="empty-state-hint">Failed to load: ${this._esc(e.message)}</div>`;
+                content.innerHTML = html;
+            } catch (err) {
+                content.innerHTML = `<div class="empty-state-hint">Failed to load: ${this._esc(err.message)}</div>`;
             }
-        };
-
-        document.querySelectorAll('.top-n-tab').forEach(btn => {
-            btn.addEventListener('click', () => {
-                this.activeTopNTab = btn.dataset.tab;
-                activateTab(btn.dataset.tab);
-            });
         });
-
-        // Restore the previously active tab (survives 30s auto-refresh)
-        if (this.activeTopNTab && this.activeTopNTab !== 'cost') {
-            activateTab(this.activeTopNTab);
-        }
     }
 
     _renderSpanTable(spans, { extraCol, emptyMsg }) {
@@ -1239,7 +1388,6 @@ class UsageView {
             return `<h3>Request volume over time</h3><div class="empty-state-hint">No request data in this window.</div>`;
         }
 
-        // Aggregate across all models per timestamp bucket
         const bucketMap = new Map();
         for (const row of callsSeries) {
             const ts = row.timestamp;
@@ -1334,4 +1482,4 @@ class UsageView {
     }
 }
 
-window.UsageView = UsageView;
+window.AnalyticsView = AnalyticsView;

@@ -5,7 +5,10 @@ import { api } from './api.js';
 /**
  * Main application class
  */
-const VALID_VIEWS = ['overview', 'logs', 'traces', 'sessions', 'metrics', 'usage', 'setup'];
+const VALID_VIEWS = ['overview', 'logs', 'traces', 'sessions', 'metrics', 'analytics', 'setup'];
+
+// Old hash routes that should redirect to a renamed view.
+const VIEW_ALIASES = { usage: 'analytics' };
 
 class App {
     constructor() {
@@ -19,7 +22,8 @@ class App {
     }
 
     _readHash() {
-        const h = (window.location.hash || '').replace(/^#/, '').split('?')[0];
+        const raw = (window.location.hash || '').replace(/^#/, '').split('?')[0];
+        const h = VIEW_ALIASES[raw] || raw;
         return VALID_VIEWS.includes(h) ? h : null;
     }
 
@@ -33,7 +37,7 @@ class App {
             traces: new window.TracesView(api),
             sessions: new window.SessionsView(api),
             metrics: new window.MetricsView(api),
-            usage: new window.UsageView(api),
+            analytics: new window.AnalyticsView(api),
             // setup is static HTML — no view class needed
         };
         this.setupNavigation();

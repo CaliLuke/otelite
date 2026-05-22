@@ -18,7 +18,7 @@
                     <button class="nav-btn" data-view="traces">Traces</button>
                     <button class="nav-btn" data-view="sessions">Sessions</button>
                     <button class="nav-btn" data-view="metrics">Metrics</button>
-                    <button class="nav-btn" data-view="usage">Usage</button>
+                    <button class="nav-btn" data-view="analytics">Analytics</button>
                     <button class="nav-btn" data-view="setup">Setup</button>
                 </nav>
                 <div class="connection-status">
@@ -121,12 +121,12 @@
                 <div id="sessions-container"></div>
             </div>
 
-            <!-- Usage View -->
-            <div id="usage-view" class="view">
+            <!-- Analytics View -->
+            <div id="analytics-view" class="view">
                 <div class="view-header">
-                    <h2>GenAI Usage</h2>
+                    <h2>GenAI Analytics</h2>
                 </div>
-                <div id="usage-container"></div>
+                <div id="analytics-container"></div>
             </div>
 
             <!-- Setup View -->
@@ -337,7 +337,7 @@ otel-cli exec --endpoint http://localhost:4318 --service my-test -- echo "Hello 
     <script type="module" src="/js/traces.js"></script>
     <script type="module" src="/js/sessions.js"></script>
     <script type="module" src="/js/metrics.js"></script>
-    <script type="module" src="/js/usage.js"></script>
+    <script type="module" src="/js/analytics.js"></script>
     <script type="module" src="/js/overview.js"></script>
     <script type="module" src="/js/app.js"></script>
 </body>
