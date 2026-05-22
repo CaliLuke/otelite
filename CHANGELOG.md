@@ -11,6 +11,36 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.44] - 2026-05-22
+
+### Fixed
+
+- **TTFT values are now correct for Claude Code spans.** Claude Code emits
+  `ttft_ms` (milliseconds); previous releases treated that value as seconds,
+  displaying e.g. "1200.0s" instead of "1.2s" in `otelite diagnose`, the
+  Session Report modal, and the `SessionDiagnoseResponse` JSON. The shared
+  `extract_ttft_secs()` helper in `otelite-core` now converts `ttft_ms` to
+  seconds; `gen_ai.server.time_to_first_token` (OTel spec, already seconds)
+  is used as-is. Closes #98.
+
+### Added
+
+- **`otelite diagnose` shows cache-write spikes.** A new `Cache+` column in
+  both the CLI table and the Session Report modal shows `cache_creation_tokens`
+  per interaction — tokens written to the prompt cache that turn. A spike marks
+  the interaction where context grew, explaining why subsequent requests became
+  slower. Closes #99.
+
+- **Escalation block includes request body size and proxy correlation ID.**
+  For errored interactions, `otelite diagnose` and the Session Report modal now
+  show `body_length` (bytes, with a rough token estimate) and `prompt.id`
+  (LiteLLM's proxy-level correlation ID) — the fields proxy/cloud admins ask
+  for first. Closes #100.
+
+- **Session Report modal shows a timeout-fix suggestion.** When streaming stalls
+  are detected the modal now recommends a stream-idle timeout value (longest stall
+  + 200 s, minimum 500 s), mirroring `otelite diagnose --suggest`. Closes #101.
+
 ## [0.1.43] - 2026-05-22
 
 ### Added
