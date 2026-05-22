@@ -5,11 +5,11 @@ import { api } from './api.js';
 /**
  * Main application class
  */
-const VALID_VIEWS = ['logs', 'traces', 'sessions', 'metrics', 'usage', 'setup'];
+const VALID_VIEWS = ['overview', 'logs', 'traces', 'sessions', 'metrics', 'usage', 'setup'];
 
 class App {
     constructor() {
-        this.currentView = this._readHash() || 'logs';
+        this.currentView = this._readHash() || 'overview';
         this.connectionCheckInterval = null;
         this.renderedViews = new Set();
         this.views = {};
@@ -28,6 +28,7 @@ class App {
      */
     init() {
         this.views = {
+            overview: new window.OverviewView(api),
             logs: new window.LogsView(api),
             traces: new window.TracesView(api),
             sessions: new window.SessionsView(api),

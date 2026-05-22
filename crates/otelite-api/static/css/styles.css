@@ -2621,3 +2621,178 @@ body {
 .latency-chart-bar-p95:hover { opacity: 0.5; }
 .latency-chart-bar-avg { fill: var(--accent-color, #3b82f6); }
 .latency-chart-bar-avg:hover { fill: #8b5cf6; }
+
+/* Overview landing page */
+.overview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 1rem;
+    padding: 0.5rem;
+}
+.overview-widget {
+    background: var(--bg-secondary, #1a1a24);
+    border: 1px solid var(--border-color, #2a2a38);
+    border-radius: 8px;
+    padding: 1rem;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+}
+.overview-widget-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-bottom: 0.75rem;
+}
+.overview-widget-header h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+}
+.overview-widget-hint {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+}
+.overview-widget-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-height: 0;
+}
+.overview-stat-large {
+    font-size: 2rem;
+    font-weight: 600;
+    line-height: 1.1;
+}
+.overview-stat-sub {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+}
+.overview-empty {
+    color: var(--text-secondary, #888);
+    font-size: 0.85rem;
+    padding: 0.5rem 0;
+}
+.overview-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 0.8rem;
+    flex: 1;
+    overflow: auto;
+}
+.overview-list-item {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--border-color, #2a2a38);
+}
+.overview-list-item:last-child { border-bottom: none; }
+.overview-list-item:hover { background: var(--bg-hover, rgba(255,255,255,0.04)); }
+.ov-mono {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+    min-width: 60px;
+}
+.ov-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ov-time {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.7rem;
+    color: var(--text-secondary, #888);
+}
+.overview-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.ov-bar-row {
+    display: grid;
+    grid-template-columns: 100px 1fr 60px;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+}
+.ov-bar-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.7rem;
+}
+.ov-bar-track {
+    background: var(--border-color, #2a2a38);
+    height: 8px;
+    border-radius: 2px;
+    overflow: hidden;
+    display: block;
+}
+.ov-bar-fill {
+    background: var(--accent-color, #3b82f6);
+    height: 100%;
+    display: block;
+}
+.ov-bar-count {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+}
+.overview-sparkline {
+    color: var(--accent-color, #3b82f6);
+    width: 100%;
+    height: 32px;
+}
+.overview-cta {
+    align-self: flex-start;
+    margin-top: auto;
+}
+
+/* Sessions tab */
+.sessions-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.sessions-table th, .sessions-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border-color, #2a2a38);
+    text-align: left;
+}
+.sessions-table th {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary, #888);
+    background: var(--bg-secondary, #1a1a24);
+}
+.sessions-table .num-cell { text-align: right; font-variant-numeric: tabular-nums; }
+.sessions-table .time-cell { font-family: var(--font-mono, monospace); font-size: 0.75rem; color: var(--text-secondary, #888); }
+.session-row { cursor: pointer; }
+.session-row:hover { background: var(--bg-hover, rgba(255,255,255,0.04)); }
+.session-row.has-errors .session-id-cell { color: #f87171; }
+.session-row .session-id-cell code {
+    font-size: 0.75rem;
+    background: transparent;
+    padding: 0;
+}
+.cell-error { color: #f87171; font-weight: 600; }
+.cell-muted { color: var(--text-secondary, #888); }
+.filter-hint {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+    align-self: center;
+    margin-left: 1rem;
+}
+.filter-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #888);
+    margin-right: 0.25rem;
+}
