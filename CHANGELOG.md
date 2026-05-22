@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.43] - 2026-05-22
+
 ### Added
 
 - **Web: Sessions tab** — new top-level tab lists all sessions with span count, token
