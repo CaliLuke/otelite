@@ -59,7 +59,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_trace_service_creation() {
-        let mut storage = SqliteBackend::new(StorageConfig::default());
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config = StorageConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut storage = SqliteBackend::new(config);
         storage
             .initialize()
             .await
@@ -70,7 +75,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_trace_export_empty() {
-        let mut storage = SqliteBackend::new(StorageConfig::default());
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config = StorageConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut storage = SqliteBackend::new(config);
         storage
             .initialize()
             .await
