@@ -11,6 +11,24 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Web: Sessions tab** — new top-level tab lists all sessions with span count, token
+  totals, and duration at a glance. Click any row to filter the traces view to that
+  session instantly.
+- **Web: Overview landing page** — five summary widgets (recent traces, error rate,
+  token usage, latency, top models) load lazily so the app feels fast even on large
+  datasets. Default time window is now 1 day.
+- **Web: Analytics accordion** — Usage metrics are now grouped into collapsible
+  sections (Token Usage, Latency, Model/Provider breakdown) making the tab easier
+  to navigate.
+- **API: `GET /api/sessions`** — list endpoint returning all sessions with aggregate
+  stats; backs the new Sessions tab and is usable from any HTTP client.
+
+### Internal
+
+- CI: fix parallel-test SQLite lock in receiver unit tests; recalibrate coverage thresholds.
+
 ## [0.1.42] - 2026-05-21
 
 ### Added
