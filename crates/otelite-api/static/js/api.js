@@ -212,6 +212,14 @@ class ApiClient {
     }
 
     /**
+     * Fetch a list of recent sessions with summary stats.
+     * Params: { start_time, end_time, limit }
+     */
+    async getSessions(params = {}) {
+        return this.get('/sessions', params);
+    }
+
+    /**
      * Check health status
      */
     async getHealth() {

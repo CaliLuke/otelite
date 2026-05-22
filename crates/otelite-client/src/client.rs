@@ -384,10 +384,7 @@ impl ApiClient {
         &self,
         session_id: &str,
     ) -> Result<otelite_core::api::SessionDiagnoseResponse> {
-        let url = format!(
-            "{}/api/sessions/{}/diagnose",
-            self.base_url, session_id
-        );
+        let url = format!("{}/api/sessions/{}/diagnose", self.base_url, session_id);
         let response = self.client.get(&url).send().await?;
 
         if response.status().as_u16() == 404 {

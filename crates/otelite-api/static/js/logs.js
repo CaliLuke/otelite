@@ -45,9 +45,12 @@ class LogsView {
         this.filters.model = null;
         this.attrFilters = [];
         this.observedModels = new Set();
-        this.trStart = null;
-        this.trEnd = null;
-        this.trWindowHours = null;
+        // Default time window: 1 day. With "all time" the page used to load
+        // hundreds of thousands of rows on every visit.
+        const now = new Date();
+        this.trWindowHours = 24;
+        this.trEnd = now;
+        this.trStart = new Date(now.getTime() - this.trWindowHours * 3600000);
         this.currentPage = 0;
         this.pageSize = 100;
         this.autoRefresh = false;
@@ -99,7 +102,7 @@ class LogsView {
                         <option value="0.25">15 min</option>
                         <option value="1">1 hr</option>
                         <option value="6">6 hr</option>
-                        <option value="24">24 hr</option>
+                        <option value="24" selected>24 hr</option>
                         <option value="168">7 days</option>
                         <option value="720">30 days</option>
                     </select>
@@ -141,6 +144,7 @@ class LogsView {
         `;
 
         this.attachEventListeners();
+        this._syncDateInputs('logs');
         this.loadLogs();
         this.loadResourceKeys();
     }

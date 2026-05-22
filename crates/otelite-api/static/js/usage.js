@@ -14,9 +14,12 @@ class UsageView {
     constructor(apiClient) {
         this.api = apiClient;
         this.refreshInterval = null;
-        this.trStart = null;
-        this.trEnd = null;
-        this.trWindowHours = null;
+        // Default time window: 1 day. The Usage page used to fire 18 parallel
+        // queries against "all time" on every visit.
+        const now = new Date();
+        this.trWindowHours = 24;
+        this.trEnd = now;
+        this.trStart = new Date(now.getTime() - this.trWindowHours * 3600000);
         this.activeTopNTab = 'cost';
         this.activeSectionTab = 'overview';
         this.modelFilter = null;
@@ -43,7 +46,7 @@ class UsageView {
                         <option value="">All time</option>
                         <option value="1">1 hr</option>
                         <option value="6">6 hr</option>
-                        <option value="24">24 hr</option>
+                        <option value="24" selected>24 hr</option>
                         <option value="168">7 days</option>
                     </select>
                 </div>
@@ -56,6 +59,7 @@ class UsageView {
 
         this._attachTimeRangeListeners();
         this._attachTipsPanelListener();
+        this._syncDateInputs();
         document.getElementById('usage-model-filter').addEventListener('change', (e) => {
             this.modelFilter = e.target.value || null;
             this._loadAndRender();

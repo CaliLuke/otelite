@@ -24,7 +24,7 @@ fn extract_ttft(attrs: &HashMap<String, String>) -> Option<f64> {
         .and_then(|v| v.parse::<f64>().ok())
 }
 
-fn root_llm_span<'a>(spans: &'a [Span]) -> Option<&'a Span> {
+fn root_llm_span(spans: &[Span]) -> Option<&Span> {
     spans
         .iter()
         .filter(|s| s.parent_span_id.is_none())
@@ -73,7 +73,10 @@ pub async fn get_session_diagnose(
     // Group spans by trace_id.
     let mut by_trace: HashMap<String, Vec<Span>> = HashMap::new();
     for span in all_spans {
-        by_trace.entry(span.trace_id.clone()).or_default().push(span);
+        by_trace
+            .entry(span.trace_id.clone())
+            .or_default()
+            .push(span);
     }
 
     // Sort trace groups by the earliest span start_time (chronological order).
@@ -146,10 +149,7 @@ pub async fn get_session_diagnose(
     let error_count = interactions.iter().filter(|i| i.is_error).count();
     let stall_count = interactions.iter().filter(|i| i.is_stall).count();
 
-    let input_series: Vec<u64> = interactions
-        .iter()
-        .filter_map(|i| i.input_tokens)
-        .collect();
+    let input_series: Vec<u64> = interactions.iter().filter_map(|i| i.input_tokens).collect();
     let context_growth = if input_series.len() >= 2 {
         Some(SessionContextGrowth {
             first_tokens: *input_series.first().unwrap(),

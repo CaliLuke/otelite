@@ -21,7 +21,7 @@ class MetricsView {
         // trStart/trEnd null + trWindowHours null = "All time".
         this.trStart = null;
         this.trEnd = null;
-        this.trWindowHours = 1; // default preset on first load
+        this.trWindowHours = 24; // default preset on first load (1 day)
         this.resourceFilter = '';
     }
 
@@ -50,9 +50,9 @@ class MetricsView {
                     <select id="tr-preset-metrics" class="filter-select tr-preset">
                         <option value="">All time</option>
                         <option value="0.25">15 min</option>
-                        <option value="1" selected>1 hr</option>
+                        <option value="1">1 hr</option>
                         <option value="6">6 hr</option>
-                        <option value="24">24 hr</option>
+                        <option value="24" selected>24 hr</option>
                         <option value="168">7 days</option>
                         <option value="720">30 days</option>
                     </select>

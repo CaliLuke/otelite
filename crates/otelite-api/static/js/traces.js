@@ -28,9 +28,12 @@ class TracesView {
         this.attrFilters = [];
         this.observedModels = new Set();
         this.observedSpanKinds = new Set();
-        this.trStart = null;
-        this.trEnd = null;
-        this.trWindowHours = null;
+        // Default time window: 1 day. Loading "all time" was the dominant
+        // contributor to slow Traces page mounts.
+        const now = new Date();
+        this.trWindowHours = 24;
+        this.trEnd = now;
+        this.trStart = new Date(now.getTime() - this.trWindowHours * 3600000);
         this.currentPage = 0;
         this.pageSize = 50;
         this.autoRefresh = false;
@@ -90,7 +93,7 @@ class TracesView {
                         <option value="0.25">15 min</option>
                         <option value="1">1 hr</option>
                         <option value="6">6 hr</option>
-                        <option value="24">24 hr</option>
+                        <option value="24" selected>24 hr</option>
                         <option value="168">7 days</option>
                         <option value="720">30 days</option>
                     </select>
@@ -140,6 +143,7 @@ class TracesView {
         `;
 
         this.attachEventListeners();
+        this._syncDateInputs('traces');
         this.loadTraces();
         this.loadResourceKeys();
     }
