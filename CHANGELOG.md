@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.45] - 2026-05-25
+
 ### Internal
 
 - style: `cargo fmt` on `extract_ttft_secs` in `otelite-core` (trailing-newline fix missed in v0.1.44 release commit).
