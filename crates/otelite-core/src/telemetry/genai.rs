@@ -507,10 +507,16 @@ mod tests {
     #[test]
     fn test_extract_ttft_secs_otel_spec() {
         let mut attrs = HashMap::new();
-        attrs.insert("gen_ai.server.time_to_first_token".to_string(), "1.2".to_string());
+        attrs.insert(
+            "gen_ai.server.time_to_first_token".to_string(),
+            "1.2".to_string(),
+        );
         attrs.insert("ttft_ms".to_string(), "9999".to_string());
         let v = extract_ttft_secs(&attrs).unwrap();
-        assert!((v - 1.2).abs() < 0.001, "OTel spec attribute should be used as-is (seconds)");
+        assert!(
+            (v - 1.2).abs() < 0.001,
+            "OTel spec attribute should be used as-is (seconds)"
+        );
     }
 
     #[test]
@@ -518,7 +524,10 @@ mod tests {
         let mut attrs = HashMap::new();
         attrs.insert("ttft_ms".to_string(), "1200".to_string());
         let v = extract_ttft_secs(&attrs).unwrap();
-        assert!((v - 1.2).abs() < 0.001, "ttft_ms must be divided by 1000 to yield seconds");
+        assert!(
+            (v - 1.2).abs() < 0.001,
+            "ttft_ms must be divided by 1000 to yield seconds"
+        );
     }
 
     #[test]
