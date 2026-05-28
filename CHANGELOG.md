@@ -11,6 +11,10 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Internal
+
+- Clarify bump-and-tag retry behaviour in AGENTS.md changelog discipline section.
+
 ## [0.1.45] - 2026-05-25
 
 ### Internal

@@ -164,6 +164,8 @@ changes, CI/release plumbing, dependency bumps with no behaviour change.
 3. For pure-plumbing pushes with no user impact, add an `### Internal` bullet
    (e.g. "CI workflow tweak — no user-visible change"). This satisfies the gate
    without inventing fake user-facing copy.
+4. If the bump fails because `[Unreleased]` was empty, add the missing bullet and
+   push — the workflow retries automatically on the next push to main.
 
 You can dry-run the rotation locally:
 
