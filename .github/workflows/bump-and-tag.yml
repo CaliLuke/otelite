@@ -75,6 +75,9 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Update Cargo.lock
         run: cargo metadata --format-version 1 > /dev/null
 
