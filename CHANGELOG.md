@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.48] - 2026-06-05
+
 ### Fixed
 
 - **gRPC receiver no longer panics when the Python OTel SDK connects.** The
