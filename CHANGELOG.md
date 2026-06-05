@@ -11,8 +11,6 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
-## [0.1.47] - 2026-06-05
-
 ### Fixed
 
 - **gRPC receiver no longer panics when the Python OTel SDK connects.** The
@@ -20,6 +18,8 @@ have to work around), not implementation detail.
   HTTP/2 maximum of 16,777,215. The h2 crate asserts this limit on every new
   connection, crashing the worker thread before any data could be received.
   Value corrected to `(1 << 24) - 1`.
+
+## [0.1.47] - 2026-06-05
 
 ### Fixed
 
