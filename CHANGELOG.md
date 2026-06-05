@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.47] - 2026-06-05
+
 ### Fixed
 
 - **Metrics API now rejects malformed `attrs` filters instead of ignoring them.**
