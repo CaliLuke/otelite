@@ -15,6 +15,14 @@ have to work around), not implementation detail.
 
 ### Fixed
 
+- **gRPC receiver no longer panics when the Python OTel SDK connects.** The
+  `max_frame_size` was set to 16,777,216 (16 MiB), which is one byte over the
+  HTTP/2 maximum of 16,777,215. The h2 crate asserts this limit on every new
+  connection, crashing the worker thread before any data could be received.
+  Value corrected to `(1 << 24) - 1`.
+
+### Fixed
+
 - **Metrics API now rejects malformed `attrs` filters instead of ignoring them.**
   `GET /api/metrics?attrs=not-json` returns `400 Bad Request` with a clear
   message, so users no longer receive unfiltered metric results after a typo in

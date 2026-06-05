@@ -88,8 +88,9 @@ impl GrpcServer {
             .timeout(Duration::from_secs(30))
             // Set TCP keepalive
             .tcp_keepalive(Some(Duration::from_secs(60)))
-            // Set max frame size (16MB)
-            .max_frame_size(Some(16 * 1024 * 1024));
+            // Set max frame size to the HTTP/2 maximum (2^24 - 1 = 16,777,215).
+            // 16 * 1024 * 1024 = 16,777,216 exceeds this by 1 and panics in h2.
+            .max_frame_size(Some((1 << 24) - 1));
 
         // Add services and start server
         let shutdown_notify = self.shutdown_notify.clone();
