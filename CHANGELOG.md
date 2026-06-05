@@ -18,6 +18,11 @@ have to work around), not implementation detail.
   message, so users no longer receive unfiltered metric results after a typo in
   the JSON filter parameter.
 
+- **API time filters now reject invalid ranges.** Logs, traces, and metrics
+  endpoints return `400 Bad Request` for negative timestamps or
+  `start_time >= end_time` instead of silently returning an empty response;
+  valid ranges with no data still return a normal empty `200 OK` response.
+
 ## [0.1.46] - 2026-05-28
 
 ### Internal
