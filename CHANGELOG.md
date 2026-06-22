@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-06-22
+
 ### Added
 
 - **Trace→log correlation endpoint.** `GET /api/traces/{id}/logs` returns all
