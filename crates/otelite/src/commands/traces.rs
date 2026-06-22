@@ -153,6 +153,9 @@ pub fn filter_by_status(traces: Vec<TraceEntry>, status: &str) -> Vec<TraceEntry
 }
 
 /// Show logs associated with a specific trace ID.
+///
+/// Uses the dedicated `GET /api/traces/{trace_id}/logs` endpoint for
+/// single-round-trip trace→log correlation.
 pub async fn handle_logs_for_trace(
     client: &ApiClient,
     config: &Config,
@@ -161,12 +164,7 @@ pub async fn handle_logs_for_trace(
 ) -> Result<()> {
     use crate::output::{json, pretty};
 
-    let mut params = vec![("trace_id", trace_id.to_string())];
-    if let Some(n) = limit {
-        params.push(("limit", n.to_string()));
-    }
-
-    let logs_response = client.fetch_logs(params).await?;
+    let logs_response = client.fetch_logs_for_trace(trace_id, limit, None).await?;
 
     if logs_response.logs.is_empty() {
         println!("No logs found for trace {}", trace_id);

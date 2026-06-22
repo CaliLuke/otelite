@@ -11,6 +11,14 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Trace→log correlation endpoint.** `GET /api/traces/{id}/logs` returns all
+  logs associated with a trace in a single call. AI agents and scripts can now
+  fetch logs for a trace without a second round-trip to the logs endpoint.
+  Internal: refactored `otelite traces logs` and `otelite diagnose` to use the
+  consolidated endpoint. Closes #106.
+
 ## [0.1.48] - 2026-06-05
 
 ### Fixed

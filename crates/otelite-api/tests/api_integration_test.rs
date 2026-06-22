@@ -73,6 +73,10 @@ fn build_test_router(storage: Arc<dyn StorageBackend>) -> Router {
             axum::routing::get(otelite_api::api::traces::get_trace),
         )
         .route(
+            "/api/traces/{trace_id}/logs",
+            axum::routing::get(otelite_api::api::traces::get_trace_logs),
+        )
+        .route(
             "/api/metrics",
             axum::routing::get(otelite_api::api::metrics::list_metrics),
         )
@@ -630,6 +634,134 @@ async fn test_get_trace_by_id() {
     assert_eq!(trace_detail.trace_id, "trace1");
     assert_eq!(trace_detail.spans.len(), 2);
     assert_eq!(trace_detail.span_count, 2);
+}
+
+#[tokio::test]
+async fn test_get_trace_logs_empty() {
+    let (storage, _tmp) = setup_test_storage().await;
+
+    storage
+        .write_span(&create_test_span("trace1", "span1", "root", 1000, 2000))
+        .await
+        .unwrap();
+
+    let app = build_test_router(storage);
+
+    // No logs written — should return empty LogsResponse
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/traces/trace1/logs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let logs: LogsResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(logs.logs.len(), 0);
+    assert_eq!(logs.total, 0);
+}
+
+#[tokio::test]
+async fn test_get_trace_logs_with_data() {
+    let (storage, _tmp) = setup_test_storage().await;
+
+    // Insert a span for trace1
+    storage
+        .write_span(&create_test_span("trace1", "span1", "root", 1000, 2000))
+        .await
+        .unwrap();
+
+    // Insert logs for trace1
+    let mut log1 = create_test_log(1100, SeverityLevel::Info, "request body");
+    log1.trace_id = Some("trace1".to_string());
+    let mut log2 = create_test_log(1200, SeverityLevel::Error, "timeout occurred");
+    log2.trace_id = Some("trace1".to_string());
+
+    // Insert a log for a different trace (should not appear in results)
+    let mut other_log = create_test_log(1300, SeverityLevel::Info, "other trace log");
+    other_log.trace_id = Some("trace2".to_string());
+
+    storage.write_log(&log1).await.unwrap();
+    storage.write_log(&log2).await.unwrap();
+    storage.write_log(&other_log).await.unwrap();
+
+    let app = build_test_router(storage);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/traces/trace1/logs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let logs: LogsResponse = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(logs.total, 2, "expected 2 logs for trace1");
+    assert_eq!(logs.logs.len(), 2);
+
+    // Logs should belong to trace1
+    for log in &logs.logs {
+        assert_eq!(log.trace_id, Some("trace1".to_string()));
+    }
+    // Both expected bodies present
+    let bodies: Vec<&str> = logs.logs.iter().map(|l| l.body.as_str()).collect();
+    assert!(bodies.contains(&"request body"));
+    assert!(bodies.contains(&"timeout occurred"));
+}
+
+#[tokio::test]
+async fn test_get_trace_logs_search_filter() {
+    let (storage, _tmp) = setup_test_storage().await;
+
+    // Insert a span for trace1
+    storage
+        .write_span(&create_test_span("trace1", "span1", "root", 1000, 2000))
+        .await
+        .unwrap();
+
+    // Insert logs for trace1 with different bodies
+    let mut log1 = create_test_log(1100, SeverityLevel::Info, "api_request_body");
+    log1.trace_id = Some("trace1".to_string());
+    log1.attributes
+        .insert("body_length".to_string(), "1024".to_string());
+    let mut log2 = create_test_log(1200, SeverityLevel::Info, "normal log entry");
+    log2.trace_id = Some("trace1".to_string());
+
+    storage.write_log(&log1).await.unwrap();
+    storage.write_log(&log2).await.unwrap();
+
+    let app = build_test_router(storage);
+
+    // Search filter should return only matching log
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/traces/trace1/logs?search=api_request_body")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let logs: LogsResponse = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(logs.total, 1, "expected 1 log matching search");
+    assert_eq!(logs.logs[0].body, "api_request_body");
+    assert_eq!(
+        logs.logs[0].attributes.get("body_length"),
+        Some(&"1024".to_string())
+    );
 }
 
 // NEW TEST: GET /api/traces/export - empty state

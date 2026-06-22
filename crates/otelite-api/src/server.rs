@@ -29,6 +29,7 @@ use utoipa::OpenApi;
         crate::api::logs::export_logs,
         crate::api::traces::list_traces,
         crate::api::traces::get_trace,
+        crate::api::traces::get_trace_logs,
         crate::api::traces::export_traces,
         crate::api::metrics::list_metrics,
         crate::api::metrics::list_metric_names,
@@ -218,6 +219,7 @@ impl DashboardServer {
             .route("/api/traces", get(crate::api::traces::list_traces))
             .route("/api/traces/export", get(crate::api::traces::export_traces))
             .route("/api/traces/{trace_id}", get(crate::api::traces::get_trace))
+            .route("/api/traces/{trace_id}/logs", get(crate::api::traces::get_trace_logs))
             // API routes - Metrics
             .route("/api/metrics", get(crate::api::metrics::list_metrics))
             .route("/api/metrics/names", get(crate::api::metrics::list_metric_names))

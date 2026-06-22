@@ -93,16 +93,12 @@ pub async fn handle_diagnose(
         let dt = DateTime::<Utc>::from_timestamp_nanos(root.start_time);
         let time_str = dt.with_timezone(&Local).format("%H:%M:%S").to_string();
 
-        // For errored interactions, fetch the api_request_body log for body_length.
-        // prompt.id is available as a span attribute.
+        // For errored interactions, fetch the api_request_body log for body_length
+        // via the consolidated trace→logs endpoint. prompt.id is available as a
+        // span attribute.
         let (body_length, prompt_id) = if is_error {
-            let log_params = vec![
-                ("trace_id", trace_entry.trace_id.clone()),
-                ("search", "api_request_body".to_string()),
-                ("limit", "1".to_string()),
-            ];
             let body_len = client
-                .fetch_logs(log_params)
+                .fetch_logs_for_trace(&trace_entry.trace_id, Some(1), Some("api_request_body"))
                 .await
                 .ok()
                 .and_then(|r| r.logs.into_iter().next())

@@ -230,6 +230,37 @@ impl ApiClient {
         }
     }
 
+    /// Fetch logs associated with a specific trace ID.
+    /// Uses the dedicated `/api/traces/{trace_id}/logs` endpoint for
+    /// single-round-trip trace→log correlation.
+    ///
+    /// Optionally filter by full-text search in log body (e.g. "api_request_body").
+    pub async fn fetch_logs_for_trace(
+        &self,
+        trace_id: &str,
+        limit: Option<usize>,
+        search: Option<&str>,
+    ) -> Result<LogsResponse> {
+        let url = format!("{}/api/traces/{}/logs", self.base_url, trace_id);
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(n) = limit {
+            params.push(("limit", n.to_string()));
+        }
+        if let Some(s) = search {
+            params.push(("search", s.to_string()));
+        }
+        let response = self.client.get(&url).query(&params).send().await?;
+
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch logs for trace: HTTP {}",
+                response.status()
+            )));
+        }
+
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_token_usage(
         &self,
         params: Vec<(&str, String)>,
@@ -794,5 +825,102 @@ mod tests {
         let result = client.health_check().await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_logs_for_trace_success() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/traces/trace123/logs")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "logs": [
+                {
+                    "timestamp": 1705315800000000000,
+                    "severity": "ERROR",
+                    "severity_text": "ERROR",
+                    "body": "timeout in trace",
+                    "attributes": {"body_length": "2048"},
+                    "resource": null,
+                    "trace_id": "trace123",
+                    "span_id": "span001"
+                }
+                ],
+                "total": 1,
+                "limit": 10,
+                "offset": 0
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client
+            .fetch_logs_for_trace("trace123", Some(10), None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let logs_response = result.unwrap();
+        assert_eq!(logs_response.logs.len(), 1);
+        assert_eq!(logs_response.total, 1);
+        assert_eq!(logs_response.logs[0].trace_id, Some("trace123".to_string()));
+        assert_eq!(
+            logs_response.logs[0].attributes.get("body_length"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_logs_for_trace_with_search() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/traces/trace123/logs")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "search".into(),
+                "api_request_body".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "logs": [],
+                "total": 0,
+                "limit": 5,
+                "offset": 0
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client
+            .fetch_logs_for_trace("trace123", Some(5), Some("api_request_body"))
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let logs_response = result.unwrap();
+        assert_eq!(logs_response.logs.len(), 0);
+        assert_eq!(logs_response.total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_logs_for_trace_not_found() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/traces/nonexistent/logs")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_logs_for_trace("nonexistent", None, None).await;
+
+        mock.assert_async().await;
+        assert!(result.is_err());
     }
 }

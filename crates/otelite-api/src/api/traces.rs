@@ -6,7 +6,9 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use otelite_core::api::{ErrorResponse, SpanEntry, TraceDetail, TraceEntry, TracesResponse};
+use otelite_core::api::{
+    ErrorResponse, LogEntry, LogsResponse, SpanEntry, TraceDetail, TraceEntry, TracesResponse,
+};
 use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::Span;
@@ -342,6 +344,70 @@ pub async fn get_trace(
     };
 
     Ok(Json(trace_detail))
+}
+
+/// Handler for GET /api/traces/{trace_id}/logs
+///
+/// Returns all logs associated with a trace, enabling single-round-trip
+/// trace→log correlation without a separate API call.
+#[utoipa::path(
+    get,
+    path = "/api/traces/{trace_id}/logs",
+    params(
+        ("trace_id" = String, Path, description = "Trace ID"),
+        ("limit" = Option<usize>, Query, description = "Maximum number of log results (default: 100, max: 1000)"),
+        ("search" = Option<String>, Query, description = "Full-text search in log body")
+    ),
+    responses(
+        (status = 200, description = "Logs associated with the trace", body = LogsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "traces"
+)]
+pub async fn get_trace_logs(
+    State(state): State<AppState>,
+    Path(trace_id): Path<String>,
+    Query(params): Query<TraceLogsQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let limit = params.limit.unwrap_or(100).min(1000);
+
+    let query = QueryParams {
+        trace_id: Some(trace_id.clone()),
+        search_text: params.search.clone().filter(|s| !s.is_empty()),
+        limit: Some(limit),
+        ..Default::default()
+    };
+
+    let logs = state.storage.query_logs(&query).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::storage_error(format!(
+                "query logs for trace {}: {}",
+                trace_id, e
+            ))),
+        )
+    })?;
+
+    let log_entries: Vec<LogEntry> = logs.into_iter().map(LogEntry::from).collect();
+    let total = log_entries.len();
+
+    Ok(Json(LogsResponse {
+        logs: log_entries,
+        total,
+        limit,
+        offset: 0,
+    }))
+}
+
+/// Query parameters for GET /api/traces/{trace_id}/logs
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct TraceLogsQuery {
+    /// Maximum number of log results (default: 100, max: 1000)
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Full-text search in log body (e.g. "api_request_body" to find request metadata)
+    #[serde(default)]
+    pub search: Option<String>,
 }
 
 /// Export format for traces
