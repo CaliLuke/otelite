@@ -530,12 +530,27 @@ class TracesView {
         const fmtDur = ms => ms >= 60000 ? `${Math.floor(ms/60000)}m${String(Math.floor((ms%60000)/1000)).padStart(2,'0')}s` : `${(ms/1000).toFixed(1)}s`;
         const fmtTtft = v => v == null ? '—' : `${v.toFixed(1)}s`;
 
+        // ── Derive session-level stats for the summary panel ──────────────────
+        const totalDurationMs = data.interactions.reduce((s, i) => s + (i.duration_ms || 0), 0);
+        const maxDurationMs   = Math.max(...data.interactions.map(i => i.duration_ms || 0));
+        const slowCount       = data.interactions.filter(i => i.duration_ms > 30_000).length;
+        const coldCount       = data.interactions.filter(i =>
+            (i.cache_read_tokens || 0) === 0 && (i.cache_creation_tokens || 0) > 50_000
+        ).length;
+        const totalOutput     = data.interactions.reduce((s, i) => s + (i.output_tokens || 0), 0);
+        const totalInput      = data.interactions.reduce((s, i) => s + (i.input_tokens  || 0), 0);
+        const p95DurMs        = (() => {
+            const sorted = [...data.interactions].map(i => i.duration_ms || 0).sort((a,b) => a-b);
+            return sorted[Math.floor(sorted.length * 0.95)] ?? 0;
+        })();
+        const hasSummaryData  = data.interactions.some(i => i.input_tokens != null || i.output_tokens != null);
+
         let html = `
             <div style="margin-bottom:1rem;">
                 <div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.25rem;">Session ID</div>
                 <code style="word-break:break-all;">${this.escapeHtml(data.session_id)}</code>
             </div>
-            <div style="display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:1.25rem;font-size:0.9rem;">
+            <div style="display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:1rem;font-size:0.9rem;">
                 <div><span style="color:var(--text-secondary);">Model: </span>${this.escapeHtml(data.models.join(', ') || '(unknown)')}</div>
                 <div><span style="color:var(--text-secondary);">Interactions: </span>${data.total_interactions}</div>
                 <div><span style="color:var(--text-secondary);">Period: </span>${this.escapeHtml(data.start_time)} – ${this.escapeHtml(data.end_time)}</div>
@@ -543,7 +558,45 @@ class TracesView {
                 ${data.stall_count > 0 ? `<div><span style="color:var(--warning-color);">Stalls: ${data.stall_count}</span></div>` : ''}
             </div>`;
 
-        // Interaction table
+        // ── Slowness summary panel ────────────────────────────────────────────
+        // Only render if we have meaningful data (non-trivial session).
+        if (data.interactions.length > 1) {
+            const chips = [];
+            chips.push(`<div class="sd-chip"><div class="sd-chip-val">${fmtDur(totalDurationMs)}</div><div class="sd-chip-lbl">Total LLM time</div></div>`);
+            chips.push(`<div class="sd-chip"><div class="sd-chip-val">${fmtDur(maxDurationMs)}</div><div class="sd-chip-lbl">Slowest turn</div></div>`);
+            chips.push(`<div class="sd-chip${p95DurMs > 30_000 ? ' sd-chip-warn' : ''}"><div class="sd-chip-val">${fmtDur(p95DurMs)}</div><div class="sd-chip-lbl">p95 turn</div></div>`);
+            if (slowCount > 0)
+                chips.push(`<div class="sd-chip sd-chip-warn"><div class="sd-chip-val">${slowCount}</div><div class="sd-chip-lbl">Turns >30s</div></div>`);
+            if (coldCount > 0)
+                chips.push(`<div class="sd-chip sd-chip-warn"><div class="sd-chip-val">${coldCount}</div><div class="sd-chip-lbl">Cold starts</div></div>`);
+            if (hasSummaryData && totalOutput > 0)
+                chips.push(`<div class="sd-chip${totalOutput > 50_000 ? ' sd-chip-warn' : ''}"><div class="sd-chip-val">${fmt(totalOutput)}</div><div class="sd-chip-lbl">Total output tok</div></div>`);
+            if (hasSummaryData && totalInput > 0)
+                chips.push(`<div class="sd-chip"><div class="sd-chip-val">${fmt(totalInput)}</div><div class="sd-chip-lbl">Total input tok</div></div>`);
+
+            html += `<div class="sd-chips">${chips.join('')}</div>`;
+
+            // ── Actionable findings ─────────────────────────────────────────
+            const findings = [];
+            if (coldCount > 0)
+                findings.push(`❄ ${coldCount} cold-start turn${coldCount>1?'s':''} rebuilt full context with no cache reads — likely session or context resets.`);
+            if (slowCount > 0 && totalOutput > 0) {
+                const avgOutSlow = data.interactions
+                    .filter(i => i.duration_ms > 30_000 && i.output_tokens)
+                    .reduce((s, i) => s + (i.output_tokens||0), 0);
+                if (avgOutSlow > 5_000)
+                    findings.push(`📝 Slow turns are generating ${fmt(avgOutSlow)} output tokens total — generation time dominates latency. Consider capping max_tokens.`);
+            }
+            if (p95DurMs > 60_000)
+                findings.push(`⏱ p95 turn time is ${fmtDur(p95DurMs)} — most turns are slow, not just outliers.`);
+            if (findings.length > 0)
+                html += `<div class="sd-findings">${findings.map(f => `<div class="sd-finding">${this.escapeHtml(f)}</div>`).join('')}</div>`;
+        }
+
+        // ── Interaction table ─────────────────────────────────────────────────
+        // Duration bar scale: max across all interactions.
+        const durBarMax = Math.max(...data.interactions.map(i => i.duration_ms || 0), 1);
+
         html += `
             <div style="overflow-x:auto;margin-bottom:1.25rem;">
                 <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
@@ -554,8 +607,9 @@ class TracesView {
                             <th style="padding:0.3rem 0.5rem;text-align:right;">Input</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;" title="New tokens written to prompt cache this turn">Cache+</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;" title="Tokens served from prompt cache">Cached</th>
+                            <th style="padding:0.3rem 0.5rem;text-align:center;" title="COLD=no cache reads, full rebuild. WARMING=partial. HOT=>80% cached.">Cache</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;">TTFT</th>
-                            <th style="padding:0.3rem 0.5rem;text-align:right;">Duration</th>
+                            <th style="padding:0.3rem 0.5rem;" title="Duration with proportional bar">Duration ▼</th>
                             <th style="padding:0.3rem 0.5rem;text-align:right;">Output</th>
                             <th style="padding:0.3rem 0.5rem;text-align:left;">Status</th>
                             <th style="padding:0.3rem 0.5rem;text-align:left;">Trace</th>
@@ -564,17 +618,46 @@ class TracesView {
                     <tbody>
                         ${data.interactions.map(ia => {
                             const statusColor = ia.is_stall ? 'var(--warning-color)' : ia.is_error ? 'var(--error-color)' : 'var(--success-color)';
-                            const statusText = ia.is_stall ? 'STALL' : ia.is_error ? 'ERROR' : 'OK';
-                            const traceShort = ia.trace_id.substring(0, 12);
-                            const cachePlusStyle = ia.cache_creation_tokens > 0 ? 'color:var(--warning-color);' : '';
-                            return `<tr style="border-bottom:1px solid var(--border-color);opacity:0.9;">
+                            const statusText  = ia.is_stall ? 'STALL' : ia.is_error ? 'ERROR' : 'OK';
+                            const traceShort  = ia.trace_id.substring(0, 12);
+                            const cachePlusStyle = (ia.cache_creation_tokens || 0) > 0 ? 'color:var(--warning-color);' : '';
+                            const durMs       = ia.duration_ms || 0;
+                            const barPct      = Math.max(2, (durMs / durBarMax) * 100);
+                            const isSlow      = durMs > 30_000;
+                            const rowBg       = isSlow ? 'background:rgba(245,158,11,0.05);' : '';
+
+                            // Cache state badge
+                            const read    = ia.cache_read_tokens    || 0;
+                            const create  = ia.cache_creation_tokens || 0;
+                            const inp     = ia.input_tokens          || 0;
+                            const total   = read + create + inp;
+                            let cacheBadge = '';
+                            if (total > 0) {
+                                if (read === 0 && create > 50_000) {
+                                    cacheBadge = '<span class="cache-state-badge cache-state-cold" title="Full context rebuild — no cache reads">COLD</span>';
+                                } else if (read / total >= 0.8) {
+                                    cacheBadge = '<span class="cache-state-badge cache-state-hot" title=">80% of tokens from cache">HOT</span>';
+                                } else if (read > 0) {
+                                    cacheBadge = '<span class="cache-state-badge cache-state-warming" title="Partial cache hit">WARM</span>';
+                                }
+                            }
+
+                            return `<tr style="border-bottom:1px solid var(--border-color);${rowBg}">
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${ia.index}</td>
                                 <td style="padding:0.3rem 0.5rem;">${this.escapeHtml(ia.time)}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.input_tokens)}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;${cachePlusStyle}">${fmt(ia.cache_creation_tokens)}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.cache_read_tokens)}</td>
+                                <td style="padding:0.3rem 0.5rem;text-align:center;">${cacheBadge}</td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmtTtft(ia.ttft_secs)}</td>
-                                <td style="padding:0.3rem 0.5rem;text-align:right;">${fmtDur(ia.duration_ms)}</td>
+                                <td style="padding:0.3rem 0.5rem;min-width:120px;">
+                                    <div style="display:flex;align-items:center;gap:5px;">
+                                        <div style="flex:1;background:var(--border-color);border-radius:2px;height:8px;min-width:40px;">
+                                            <div style="width:${barPct.toFixed(1)}%;height:8px;border-radius:2px;background:${isSlow ? '#f59e0b' : 'var(--accent-color,#3b82d4)'};"></div>
+                                        </div>
+                                        <span style="white-space:nowrap;${isSlow ? 'color:#d97706;font-weight:600;' : ''}">${fmtDur(durMs)}</span>
+                                    </div>
+                                </td>
                                 <td style="padding:0.3rem 0.5rem;text-align:right;">${fmt(ia.output_tokens)}</td>
                                 <td style="padding:0.3rem 0.5rem;color:${statusColor};font-weight:600;">${statusText}</td>
                                 <td style="padding:0.3rem 0.5rem;font-family:monospace;font-size:0.78rem;">

@@ -2932,3 +2932,58 @@ body {
     color: var(--text-secondary, #888);
     margin-right: 0.25rem;
 }
+
+/* Session diagnose modal — summary chips */
+.sd-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+.sd-chip {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.4rem 0.75rem;
+    background: var(--bg-secondary, #1a1a24);
+    border: 1px solid var(--border-color, #2a2a38);
+    border-radius: 6px;
+    min-width: 80px;
+}
+.sd-chip-warn {
+    border-color: var(--warning-color, #f59e0b);
+    background: rgba(245, 158, 11, 0.08);
+}
+.sd-chip-val {
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    color: var(--text-primary);
+}
+.sd-chip-warn .sd-chip-val {
+    color: var(--warning-color, #f59e0b);
+}
+.sd-chip-lbl {
+    font-size: 0.7rem;
+    color: var(--text-secondary, #888);
+    text-align: center;
+    margin-top: 0.1rem;
+}
+
+/* Session diagnose modal — actionable findings */
+.sd-findings {
+    margin-bottom: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    background: rgba(245, 158, 11, 0.07);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.sd-finding {
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    line-height: 1.4;
+}

@@ -11,6 +11,43 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Session modal now shows token counts per interaction.** Claude Code sessions
+  previously showed blank input/output/cache columns in the interaction table
+  because the session root span carries no tokens. Counts are now aggregated
+  from child `llm_request` spans so every row shows real numbers.
+
+- **Session modal: performance summary strip.** Clicking a session row now
+  shows a chip row with Total LLM time, Slowest turn, p95 turn, and warning
+  badges for slow turns (>30 s) and cold-start turns, plus Total output/input
+  token counts. Slow interactions are highlighted amber inline.
+
+- **Session modal: actionable findings panel.** Auto-generated diagnostic
+  sentences appear below the summary strip when the session has notable issues:
+  cold-start rebuilds, high output-token volume on slow turns, and a p95 >60 s
+  overall.
+
+- **Session modal: cache state badges.** Each interaction row in the session
+  detail table now shows a `COLD` / `WARM` / `HOT` badge indicating how well
+  the prompt cache was used that turn.
+
+- **Analytics → Behavior: tool total-time sort.** The MCP/tool-call table is
+  now sorted by total wall-clock time (not call count), and includes an inline
+  bar so the costliest tools surface immediately.
+
+- **Analytics → Latency: high output-ratio warning.** Rows where p95
+  output/input ratio exceeds 200× are highlighted amber so generation-dominated
+  latency is obvious at a glance.
+
+- **Analytics → Top Spans: cache state badges.** Every span row now shows
+  `COLD` / `WARMING` / `HOT` to identify cold-start requests across all models.
+
+- **Overview: anomaly strip.** The Overview landing page now shows a horizontal
+  strip of clickable alert chips whenever the last 7 days contain slow calls
+  (>5 min), cold-start spans, high-ratio output events, or slow tools — with
+  direct links to the relevant analytics view.
+
 ## [0.1.49] - 2026-06-22
 
 ### Added

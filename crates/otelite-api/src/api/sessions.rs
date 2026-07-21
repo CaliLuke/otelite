@@ -85,11 +85,64 @@ pub async fn get_session_diagnose(
             None => continue,
         };
 
-        let genai = GenAiSpanInfo::from_attributes(&root.attributes);
-        let ttft = extract_ttft_secs(&root.attributes);
+        let mut genai = GenAiSpanInfo::from_attributes(&root.attributes);
+        let mut ttft = extract_ttft_secs(&root.attributes);
         let duration_ms = (root.end_time - root.start_time) / 1_000_000;
         let is_error = root.status.code == SpanStatusCode::Error;
         let is_stall = is_error && ttft.is_some() && duration_ms > 30_000;
+
+        // Claude Code traces use claude_code.interaction as the root span with
+        // claude_code.llm_request children. When the root span carries no token
+        // counts, aggregate across all LLM child spans so the modal displays
+        // real numbers instead of blanks.
+        if genai.input_tokens.is_none() && genai.output_tokens.is_none() {
+            let llm_spans: Vec<&Span> = spans
+                .iter()
+                .filter(|s| {
+                    s.name.contains("llm_request")
+                        || s.attributes.keys().any(|k| k.starts_with("gen_ai."))
+                })
+                .collect();
+
+            if !llm_spans.is_empty() {
+                // Use the first LLM span for scalar fields (model, TTFT, response_id).
+                let first = llm_spans[0];
+                let first_genai = GenAiSpanInfo::from_attributes(&first.attributes);
+                if genai.model.is_none() {
+                    genai.model = first_genai.model;
+                }
+                if genai.response_id.is_none() {
+                    genai.response_id = first_genai.response_id;
+                }
+                if ttft.is_none() {
+                    ttft = extract_ttft_secs(&first.attributes);
+                }
+
+                // Sum token counts across all LLM spans in the trace (one
+                // trace can contain multiple tool-call round-trips).
+                let mut total_input: u64 = 0;
+                let mut total_output: u64 = 0;
+                let mut total_cache_read: u64 = 0;
+                let mut total_cache_creation: u64 = 0;
+                for s in &llm_spans {
+                    let sg = GenAiSpanInfo::from_attributes(&s.attributes);
+                    total_input += sg.input_tokens.unwrap_or(0);
+                    total_output += sg.output_tokens.unwrap_or(0);
+                    total_cache_read += sg.cache_read_tokens.unwrap_or(0);
+                    total_cache_creation += sg.cache_creation_tokens.unwrap_or(0);
+                }
+                if total_input > 0 || total_output > 0 {
+                    genai.input_tokens = Some(total_input);
+                    genai.output_tokens = Some(total_output);
+                }
+                if total_cache_read > 0 {
+                    genai.cache_read_tokens = Some(total_cache_read);
+                }
+                if total_cache_creation > 0 {
+                    genai.cache_creation_tokens = Some(total_cache_creation);
+                }
+            }
+        }
 
         let dt = DateTime::<Utc>::from_timestamp_nanos(root.start_time);
         let time_str = dt.with_timezone(&Local).format("%H:%M:%S").to_string();
