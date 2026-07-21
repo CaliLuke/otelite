@@ -725,21 +725,37 @@ class TracesView {
      * Render a single trace entry
      */
     renderTraceEntry(trace) {
-        const startTime = new Date(trace.start_time / 1000000); // Convert nanoseconds to milliseconds
-        const duration = (trace.duration / 1000000).toFixed(2); // Convert to milliseconds
+        const startTime = new Date(trace.start_time / 1000000);
+        const durationMs = trace.duration / 1000000;
+        const duration = durationMs >= 60000
+            ? `${Math.floor(durationMs/60000)}m${String(Math.floor((durationMs%60000)/1000)).padStart(2,'0')}s`
+            : `${durationMs.toFixed(0)}ms`;
         const errorClass = trace.has_errors ? 'trace-error' : '';
+        const isSlowTrace = durationMs > 30_000;
+        const durationClass = isSlowTrace ? 'trace-duration trace-duration-slow' : 'trace-duration';
+
+        // Extract session/model tags if present on the root span metadata.
+        const sessionId = trace.session_id || null;
+        const model = trace.model || null;
+        const sessionBadge = sessionId
+            ? `<span class="trace-tag trace-tag-session" title="Session: ${this.escapeHtml(sessionId)}">session</span>`
+            : '';
+        const modelBadge = model
+            ? `<span class="trace-tag trace-tag-model" title="${this.escapeHtml(model)}">${this.escapeHtml(model.replace(/^.*\//,'').substring(0,24))}</span>`
+            : '';
 
         return `
             <div class="trace-entry ${errorClass}" data-trace-id="${trace.trace_id}">
                 <div class="trace-header">
                     <span class="trace-time">${formatTs(startTime)}</span>
                     <span class="trace-name">${this.escapeHtml(trace.root_span_name)}</span>
-                    <span class="trace-duration">${duration}ms</span>
+                    ${sessionBadge}${modelBadge}
+                    <span class="${durationClass}">${duration}</span>
                     <span class="trace-spans">${trace.span_count} spans</span>
                     ${trace.has_errors ? '<span class="trace-error-badge">ERROR</span>' : ''}
                 </div>
                 <div class="trace-meta">
-                    <span class="trace-id-short" title="${trace.trace_id}">${trace.trace_id.substring(0, 16)}...</span>
+                    <span class="trace-id-short" title="${trace.trace_id}">${trace.trace_id.substring(0, 16)}…</span>
                     ${trace.service_names.length > 0 ? `<span class="trace-services">${trace.service_names.join(', ')}</span>` : ''}
                 </div>
             </div>
@@ -917,11 +933,26 @@ class TracesView {
 
         if (info.isToolCall) {
             const toolLabel = info.toolName ? this.escapeHtml(info.toolName) : 'tool';
-            return `<span class="genai-waterfall-badge">\uD83D\uDD27 ${toolLabel}</span>`;
+            return `<span class="genai-waterfall-badge genai-wb-tool">\uD83D\uDD27 ${toolLabel}</span>`;
         }
 
         const model = info.responseModel || info.model;
         const hasTokens = info.inputTokens !== null || info.outputTokens !== null;
+
+        // Cache state pill alongside tokens.
+        let cachePill = '';
+        if (hasTokens && info.cacheReadTokens != null) {
+            const total = (info.inputTokens ?? 0) + (info.cacheReadTokens ?? 0) + (info.cacheCreationTokens ?? 0);
+            if (total > 0) {
+                if (info.cacheReadTokens === 0 && (info.cacheCreationTokens ?? 0) > 50_000) {
+                    cachePill = '<span class="cache-state-badge cache-state-cold">COLD</span>';
+                } else if (info.cacheReadTokens / total >= 0.8) {
+                    cachePill = '<span class="cache-state-badge cache-state-hot">HOT</span>';
+                } else if (info.cacheReadTokens > 0) {
+                    cachePill = '<span class="cache-state-badge cache-state-warming">WARM</span>';
+                }
+            }
+        }
 
         let badgeText = '';
         if (model && hasTokens) {
@@ -936,8 +967,8 @@ class TracesView {
             badgeText = `${inTok}\u2192${outTok}`;
         }
 
-        if (!badgeText) return '';
-        return `<span class="genai-waterfall-badge">${badgeText}</span>`;
+        if (!badgeText) return cachePill;
+        return `<span class="genai-waterfall-badge genai-wb-llm">${badgeText}</span>${cachePill}`;
     }
 
     /**
@@ -968,14 +999,20 @@ class TracesView {
                 : '';
             const genAiBadge = this.buildGenAiWaterfallBadge(span);
 
+            const spanDurMs = span.duration / 1_000_000;
+            const isSlowSpan = spanDurMs > 5_000;
+            const slowBadge = isSlowSpan
+                ? `<span class="span-slow-badge" title="${spanDurMs >= 60000 ? Math.floor(spanDurMs/60000)+'m' : duration+'ms'} — slow span">slow</span>`
+                : '';
             return `
-                <div class="span-row" data-row-span-id="${span.span_id}" style="padding-left: ${depth * 16 + 4}px;">
+                <div class="span-row${isSlowSpan ? ' span-row-slow' : ''}" data-row-span-id="${span.span_id}" style="padding-left: ${depth * 16 + 4}px;">
                     <div class="span-info">
                         ${toggleBtn}
                         <span class="span-name ${hasError ? 'span-error' : ''}" title="${this.escapeHtml(span.name)}">${this.escapeHtml(span.name)}${collapsedCountEl}</span>
                         ${genAiBadge}
                         <span class="span-kind">${this.escapeHtml(kindLabel)}</span>
-                        <span class="span-duration">${duration}ms</span>
+                        ${slowBadge}
+                        <span class="span-duration${isSlowSpan ? ' span-duration-slow' : ''}">${duration}ms</span>
                     </div>
                     <div class="span-bar-container">
                         <div class="span-bar ${hasError ? 'span-bar-error' : kindClass}"
@@ -1651,7 +1688,11 @@ class TracesView {
                     <div class="span-attr-row"><span class="span-attr-key">start</span><span class="span-attr-val">${formatTs(startTime)}</span></div>
                     <div class="span-attr-row"><span class="span-attr-key">status</span><span class="span-attr-val">${span.status?.code ?? 'Unset'}${span.status?.message ? ': ' + this.escapeHtml(span.status.message) : ''}</span></div>
                     <div class="span-attr-row"><span class="span-attr-key">span_id</span><span class="span-attr-val">${span.span_id}</span></div>
-                    <div class="span-attr-row"><span class="span-attr-key">trace_id</span><span class="span-attr-val">${span.trace_id}</span></div>
+                    <div class="span-attr-row"><span class="span-attr-key">trace_id</span>
+                        <span class="span-attr-val">
+                            <a class="trace-link" onclick="window.app.navigateToLogs('${this.escapeHtml(span.trace_id)}');return false;" href="#" title="View all logs for this trace">${this.escapeHtml(span.trace_id)}</a>
+                        </span>
+                    </div>
                     ${parent ? `<div class="span-attr-row"><span class="span-attr-key">parent</span><span class="span-attr-val">${this.escapeHtml(parent.name)}</span></div>` : ''}
                     ${children.length > 0 ? `<div class="span-attr-row" style="grid-column:1/-1"><span class="span-attr-key">children</span><span class="span-attr-val">${children.map(c => this.escapeHtml(c.name)).join(', ')}</span></div>` : ''}
                 </div>

@@ -81,6 +81,12 @@ class SessionsView {
             const p = n => String(n).padStart(2, '0');
             return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
         };
+        // Duration between first and last event in the session.
+        const fmtDur = ns => {
+            const ms = ns / 1_000_000;
+            if (ms < 60_000) return `${(ms / 1000).toFixed(0)}s`;
+            return `${Math.floor(ms / 60_000)}m${String(Math.floor((ms % 60_000) / 1000)).padStart(2, '0')}s`;
+        };
 
         const rows = sessions.map(s => {
             const errClass = s.error_count > 0 ? ' has-errors' : '';
@@ -90,14 +96,24 @@ class SessionsView {
             const models = s.models.length === 0
                 ? '<span class="cell-muted">—</span>'
                 : this._escape(s.models.join(', '));
+            const durNs = s.last_seen_ns - s.first_seen_ns;
+            const durCell = durNs > 0 ? fmtDur(durNs) : '<span class="cell-muted">—</span>';
+            const sid = this._escape(s.session_id);
+            // Cross-nav buttons — stop propagation so the row click (Session Report) doesn't also fire.
+            const navBtns = `
+                <span class="session-nav-btns">
+                    <button class="btn btn-secondary btn-xs session-nav-traces" data-sid="${sid}" title="View traces for this session">Traces</button>
+                    <button class="btn btn-secondary btn-xs session-nav-logs" data-sid="${sid}" title="View logs for this session">Logs</button>
+                </span>`;
             return `
-                <tr class="session-row${errClass}" data-session-id="${this._escape(s.session_id)}">
-                    <td class="session-id-cell"><code>${this._escape(s.session_id)}</code></td>
+                <tr class="session-row${errClass}" data-session-id="${sid}">
+                    <td class="session-id-cell"><code>${sid}</code>${navBtns}</td>
                     <td>${models}</td>
                     <td class="num-cell">${fmtNum(s.interaction_count)}</td>
                     <td class="num-cell">${fmtNum(s.total_input_tokens)}</td>
                     <td class="num-cell">${fmtNum(s.total_output_tokens)}</td>
                     <td class="num-cell">${errCell}</td>
+                    <td class="num-cell">${durCell}</td>
                     <td class="time-cell">${fmtTime(s.first_seen_ns)}</td>
                     <td class="time-cell">${fmtTime(s.last_seen_ns)}</td>
                 </tr>
@@ -114,6 +130,7 @@ class SessionsView {
                         <th class="num-cell">Input tokens</th>
                         <th class="num-cell">Output tokens</th>
                         <th class="num-cell">Errors</th>
+                        <th class="num-cell">Duration</th>
                         <th>First seen</th>
                         <th>Last seen</th>
                     </tr>
@@ -123,7 +140,9 @@ class SessionsView {
         `;
 
         list.querySelectorAll('.session-row').forEach(row => {
-            row.addEventListener('click', () => {
+            row.addEventListener('click', (e) => {
+                // Ignore clicks on the nav buttons.
+                if (e.target.closest('.session-nav-btns')) return;
                 const sid = row.dataset.sessionId;
                 if (window.app && window.app.views && window.app.views.traces &&
                     typeof window.app.views.traces.openSessionDiagnoseModal === 'function') {
@@ -137,6 +156,20 @@ class SessionsView {
                     // Fallback: navigate to traces tab pre-filtered by session.
                     window.app.navigateToTracesBySession(sid);
                 }
+            });
+        });
+
+        // Cross-nav button handlers.
+        list.querySelectorAll('.session-nav-traces').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                window.app.navigateToTracesBySession(btn.dataset.sid);
+            });
+        });
+        list.querySelectorAll('.session-nav-logs').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                window.app.navigateToLogsBySession(btn.dataset.sid);
             });
         });
     }

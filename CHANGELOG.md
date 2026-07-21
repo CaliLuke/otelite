@@ -15,6 +15,36 @@ have to work around), not implementation detail.
 
 ### Added
 
+- **Sessions list: Duration column.** Each session row now shows wall-clock
+  duration (last − first event) so you can see at a glance how long a session
+  ran without opening the detail modal.
+
+- **Sessions list: Traces / Logs cross-nav buttons.** Hovering a session row
+  reveals inline *Traces* and *Logs* buttons that jump directly to the
+  respective view pre-filtered to that session — no need to open the Session
+  Report first.
+
+- **Traces list: slow-trace duration highlight.** Trace durations over 30 s now
+  appear in amber so long-running traces stand out without scanning the numbers.
+
+- **Traces list: session and model badges.** Trace rows now show colour-coded
+  `session` and model-name pills when those attributes are present on the trace.
+
+- **Waterfall: slow-span `slow` badge.** Any span taking more than 5 s in the
+  waterfall now shows an amber `slow` badge and the duration value is
+  highlighted, immediately drawing attention to the bottleneck spans.
+
+- **Waterfall: LLM and tool badge colour coding.** The inline GenAI badge
+  in waterfall rows is now indigo for LLM inference spans and green for tool
+  calls, visually separating thinking time from tool execution time.
+
+- **Waterfall: cache state pills inline.** LLM spans in the waterfall now
+  show `COLD`/`WARM`/`HOT` cache state pills alongside the token counts so
+  you can spot cold-start rebuilds without opening the span detail.
+
+- **Span detail: trace_id is now a clickable link** to the Logs view
+  pre-filtered to that trace, completing the span → logs navigation path.
+
 - **Session modal now shows token counts per interaction.** Claude Code sessions
   previously showed blank input/output/cache columns in the interaction table
   because the session root span carries no tokens. Counts are now aggregated
