@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.50] - 2026-07-21
+
 ### Added
 
 - **Session modal now shows token counts per interaction.** Claude Code sessions
