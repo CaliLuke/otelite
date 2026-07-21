@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.51] - 2026-07-21
+
 ### Added
 
 - **CLI `diagnose`: performance summary block.** `otelite diagnose <session>` now
