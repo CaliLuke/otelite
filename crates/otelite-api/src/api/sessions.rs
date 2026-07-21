@@ -319,7 +319,37 @@ pub async fn list_sessions(
                 None => continue,
             };
             interaction_count += 1;
-            let genai = GenAiSpanInfo::from_attributes(&root.attributes);
+            let mut genai = GenAiSpanInfo::from_attributes(&root.attributes);
+
+            // Claude Code: root span (claude_code.interaction) carries no token
+            // counts — aggregate across child LLM spans, same as diagnose does.
+            if genai.input_tokens.is_none() && genai.output_tokens.is_none() {
+                let llm_spans: Vec<&Span> = spans
+                    .iter()
+                    .filter(|s| {
+                        s.name.contains("llm_request")
+                            || s.attributes.keys().any(|k| k.starts_with("gen_ai."))
+                    })
+                    .collect();
+                if !llm_spans.is_empty() {
+                    let first_genai = GenAiSpanInfo::from_attributes(&llm_spans[0].attributes);
+                    if genai.model.is_none() {
+                        genai.model = first_genai.model;
+                    }
+                    let mut t_in: u64 = 0;
+                    let mut t_out: u64 = 0;
+                    for s in &llm_spans {
+                        let sg = GenAiSpanInfo::from_attributes(&s.attributes);
+                        t_in += sg.input_tokens.unwrap_or(0);
+                        t_out += sg.output_tokens.unwrap_or(0);
+                    }
+                    if t_in > 0 || t_out > 0 {
+                        genai.input_tokens = Some(t_in);
+                        genai.output_tokens = Some(t_out);
+                    }
+                }
+            }
+
             if let Some(m) = genai.model.as_deref().or_else(|| {
                 root.attributes
                     .get("gen_ai.request.model")

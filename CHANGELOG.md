@@ -11,7 +11,17 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ## [0.1.51] - 2026-07-21
+=======
+### Fixed
+
+- **Sessions list: input/output token columns now show real values for Claude
+  Code sessions.** The sessions list was always showing 0 tokens because it read
+  token counts only from the root `claude_code.interaction` span, which carries
+  none. Token counts are now aggregated from child `llm_request` spans, matching
+  the fix already applied to the Session Report modal.
+>>>>>>> 8216d01 (fix: sessions list token columns always 0 for Claude Code)
 
 ### Added
 
