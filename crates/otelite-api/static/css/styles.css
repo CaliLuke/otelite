@@ -2494,6 +2494,76 @@ body {
 }
 .error-rate-list .finish-reason-name { width: 200px; }
 .tool-usage-warn { color: var(--warning-color, #f59e0b); }
+.latency-ratio-warn td { background: rgba(245, 158, 11, 0.05); }
+.latency-ratio-high { color: #d97706; font-weight: 600; }
+.tool-usage-time-warn td { background: rgba(245, 158, 11, 0.06); }
+
+/* Tool total-time bar column */
+.tool-total-cell { display: flex; align-items: center; gap: 6px; }
+.tool-total-bar-track { flex: 1; background: var(--border-color, #e5e7eb); border-radius: 3px; height: 10px; min-width: 60px; }
+.tool-total-bar-fill { height: 10px; border-radius: 3px; background: var(--accent-color, #3b82d4); }
+.tool-total-bar-fill.tool-total-bar-warn { background: #f59e0b; }
+.tool-total-label { white-space: nowrap; font-size: 0.85em; color: var(--text-secondary); min-width: 52px; text-align: right; }
+
+/* Cache state badges */
+.cache-state-badge {
+    display: inline-block;
+    font-size: 0.75em;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    border-radius: 3px;
+    padding: 1px 5px;
+    cursor: default;
+}
+.cache-state-cold    { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; }
+.cache-state-warming { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; }
+.cache-state-hot     { background: #f0fdf4; color: #166534; border: 1px solid #86efac; }
+
+
+/* Anomaly alert strip (Overview page) */
+.ov-anomaly-strip-inner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 0 14px;
+}
+.ov-anomaly-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 5px;
+    border: 1px solid;
+    padding: 5px 10px;
+    font-size: 13px;
+    line-height: 1.4;
+}
+.ov-anomaly-warn {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    color: #78350f;
+}
+.ov-anomaly-info {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1e40af;
+}
+.ov-anomaly-icon { font-size: 14px; flex-shrink: 0; }
+.ov-anomaly-text { flex: 1; }
+.ov-anomaly-action {
+    background: none;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    padding: 1px 7px;
+    font-size: 12px;
+    cursor: pointer;
+    color: inherit;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.ov-anomaly-action:hover { opacity: 0.75; }
+
+
+
 .trunc-rate-green { color: #22c55e; }
 .trunc-rate-yellow { color: #f59e0b; }
 .trunc-rate-red { color: #ef4444; font-weight: 600; }

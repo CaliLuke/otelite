@@ -721,19 +721,22 @@ class AnalyticsView {
             const ratioP95 = s.output_input_ratio_p95 != null ? `${Number(s.output_input_ratio_p95).toFixed(2)}×` : null;
             const ratioCell = (ratioP50 != null && ratioP95 != null) ? `${ratioP50} / ${ratioP95}` : '—';
 
+            // Flag rows where output volume is extremely high — this is often
+            // the primary cause of slow sessions (generation takes minutes).
+            const ratioHigh = (s.output_input_ratio_p95 || 0) > 200;
             return `
-                <tr>
+                <tr${ratioHigh ? ' class="latency-ratio-warn"' : ''}>
                     <td>${this._esc(s.model || '—')}</td>
-                    <td>${fmt(s.count || 0)}</td>
-                    <td>${this._esc(this._formatDuration(s.avg_ms))}</td>
-                    <td>${this._esc(this._formatDuration(s.p50_ms))}</td>
-                    <td>${this._esc(this._formatDuration(s.p95_ms))}</td>
-                    <td>${this._esc(this._formatDuration(s.p99_ms))}</td>
-                    <td>${this._esc(ttftP50)}</td>
-                    <td>${this._esc(ttftP95)}</td>
-                    <td>${this._esc(tpsCell)}</td>
-                    <td>${this._esc(ctxCell)}</td>
-                    <td>${this._esc(ratioCell)}</td>
+                    <td class="num">${fmt(s.count || 0)}</td>
+                    <td class="num">${this._esc(this._formatDuration(s.avg_ms))}</td>
+                    <td class="num">${this._esc(this._formatDuration(s.p50_ms))}</td>
+                    <td class="num">${this._esc(this._formatDuration(s.p95_ms))}</td>
+                    <td class="num">${this._esc(this._formatDuration(s.p99_ms))}</td>
+                    <td class="num">${this._esc(ttftP50)}</td>
+                    <td class="num">${this._esc(ttftP95)}</td>
+                    <td class="num">${this._esc(tpsCell)}</td>
+                    <td class="num">${this._esc(ctxCell)}</td>
+                    <td class="num${ratioHigh ? ' latency-ratio-high' : ''}">${this._esc(ratioCell)}</td>
                 </tr>`;
         }).join('');
         return `
@@ -1107,10 +1110,32 @@ class AnalyticsView {
         });
     }
 
+    /**
+     * Compute a cache-state label for a span row.
+     * COLD  — cache_read=0 and cache_creation>50K (full context rebuild)
+     * WARMING — cache_read present but <50% of token budget
+     * HOT   — cache_read>80% of (cache_read + cache_creation + input_tokens)
+     */
+    _cacheStateLabel(row) {
+        const read   = row.cache_read_tokens     || 0;
+        const create = row.cache_creation_tokens || 0;
+        const input  = row.input_tokens          || 0;
+        const total  = read + create + input;
+        if (total === 0) return null;
+        if (read === 0 && create > 50_000) return 'cold';
+        const hitPct = read / total;
+        if (hitPct >= 0.8) return 'hot';
+        if (hitPct >= 0.3) return 'warming';
+        if (read === 0) return null;   // small request, no cache signal
+        return 'warming';
+    }
+
     _renderSpanTable(spans, { extraCol, emptyMsg }) {
         if (!spans.length) return `<div class="empty-state-hint">${emptyMsg}</div>`;
         const fmt = n => Number(n).toLocaleString();
         const anySession = spans.some(r => r.session_id);
+        // Show cache column whenever we have cache token data on any row
+        const anyCacheData = spans.some(r => (r.cache_creation_tokens || 0) + (r.cache_read_tokens || 0) > 0);
 
         const extraHeader = {
             cost:         '<th>Cost</th>',
@@ -1135,6 +1160,22 @@ class AnalyticsView {
                 ? `<a href="#" onclick="window.app.navigateToTrace('${this._esc(row.trace_id)}'); return false;" title="${this._esc(row.trace_id)}">${this._esc(String(row.trace_id).slice(0, 8))}</a>`
                 : '—';
 
+            // Cache state badge
+            const cacheState = anyCacheData ? this._cacheStateLabel(row) : null;
+            const cacheLabels = {
+                cold:    ['COLD',    'cache-state-cold',    'Full context rebuild — no cache reads, high creation cost'],
+                warming: ['WARMING', 'cache-state-warming', 'Partial cache hit — context still filling'],
+                hot:     ['HOT',     'cache-state-hot',     '>80% of tokens served from cache'],
+            };
+            const cacheBadge = cacheState
+                ? (() => {
+                    const [label, cls, tip] = cacheLabels[cacheState];
+                    const read   = fmt(row.cache_read_tokens     || 0);
+                    const create = fmt(row.cache_creation_tokens || 0);
+                    return `<td><span class="cache-state-badge ${cls}" title="${tip}&#10;read: ${read} · created: ${create}">${label}</span></td>`;
+                })()
+                : (anyCacheData ? '<td>—</td>' : '');
+
             let extraCell = '';
             if (extraCol === 'cost') {
                 extraCell = `<td class="${costClass}">${costStr}</td>`;
@@ -1158,8 +1199,9 @@ class AnalyticsView {
                 <td>${this._esc(timeStr)}</td>
                 <td>${this._esc(row.model || '—')}</td>
                 ${anySession ? `<td>${sessionCell}</td>` : ''}
-                <td>${fmt(row.input_tokens ?? 0)}</td>
-                <td>${fmt(row.output_tokens ?? 0)}</td>
+                <td class="num">${fmt(row.input_tokens ?? 0)}</td>
+                <td class="num">${fmt(row.output_tokens ?? 0)}</td>
+                ${anyCacheData ? cacheBadge : ''}
                 ${extraCell}
                 <td>${traceCell}</td>
             </tr>`;
@@ -1170,6 +1212,7 @@ class AnalyticsView {
                 <th>Time</th><th>Model</th>
                 ${anySession ? '<th>Session</th>' : ''}
                 <th>Input</th><th>Output</th>
+                ${anyCacheData ? '<th title="COLD = no cache reads, full context rebuild. WARMING = partial hit. HOT = >80% from cache.">Cache</th>' : ''}
                 ${extraHeader}
                 <th>Trace</th>
             </tr></thead>

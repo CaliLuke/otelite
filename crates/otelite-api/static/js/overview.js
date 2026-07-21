@@ -28,6 +28,7 @@ class OverviewView {
         if (!container) return;
 
         container.innerHTML = `
+            <div id="ov-anomaly-strip"></div>
             <div class="overview-grid">
                 ${this._widgetSlot('errors', 'Recent errors', 'Errored traces in the last 24 h')}
                 ${this._widgetSlot('sessions', 'Active sessions', 'Sessions seen in the last 24 h')}
@@ -44,6 +45,9 @@ class OverviewView {
         lazy(document.getElementById('ov-widget-models'), () => this._loadModels());
         lazy(document.getElementById('ov-widget-latency'), () => this._loadLatency());
         lazy(document.getElementById('ov-widget-tokens'), () => this._loadTokens());
+
+        // Fire the anomaly strip independently — it doesn't block the widgets.
+        this._loadAnomalyStrip();
     }
 
     _widgetSlot(id, title, hint) {
@@ -236,6 +240,120 @@ class OverviewView {
             this._wireCta('tokens');
         } catch (err) {
             this._setError('tokens', `Couldn't load token burn: ${err.message}`);
+        }
+    }
+
+    /**
+     * Anomaly alert strip: surfaces the most actionable issues from the last
+     * 24 h without requiring the user to open Analytics. Fires two parallel
+     * fetches (top spans + tool usage) and builds a compact horizontal list of
+     * alert chips. Silent on failure — never blocks the main widgets.
+     */
+    async _loadAnomalyStrip() {
+        const strip = document.getElementById('ov-anomaly-strip');
+        if (!strip) return;
+        try {
+            const params = this._windowParams();
+            const [topSpans, toolUsage, latencyStats] = await Promise.all([
+                this.api.getTopSpans({ ...params, limit: 5, sort_by: 'duration' }).catch(() => []),
+                this.api.getToolUsage({ ...params, limit: 30 }).catch(() => []),
+                this.api.getLatencyStats(params).catch(() => []),
+            ]);
+
+            const alerts = [];
+
+            // 1. Any span >5 min is an outlier worth surfacing immediately.
+            const slow = (topSpans || []).filter(s => (s.duration || 0) / 1e9 > 300);
+            if (slow.length > 0) {
+                const worst = slow[0];
+                const durS = Math.round((worst.duration || 0) / 1e9);
+                const tid = String(worst.trace_id || '').slice(0, 8);
+                alerts.push({
+                    level: 'warn',
+                    icon: '⏱',
+                    text: `Slow call: ${durS}s on ${worst.model || '?'} — ${tid}`,
+                    action: worst.trace_id ? () => window.app.navigateToTrace(worst.trace_id) : null,
+                    actionLabel: 'View trace',
+                });
+            }
+
+            // 2. Any COLD-start span (expensive full context rebuild).
+            const coldSpans = (topSpans || []).filter(s =>
+                (s.cache_read_tokens || 0) === 0 && (s.cache_creation_tokens || 0) > 50_000
+            );
+            if (coldSpans.length > 0) {
+                alerts.push({
+                    level: 'warn',
+                    icon: '❄',
+                    text: `Cold context: ${coldSpans.length} request${coldSpans.length > 1 ? 's' : ''} rebuilt full context (no cache reads)`,
+                    action: () => window.app.switchView('analytics'),
+                    actionLabel: 'Cost →',
+                });
+            }
+
+            // 3. Tools consuming outsized total wall-clock time (>5 min total).
+            const slowTools = (toolUsage || [])
+                .map(t => ({ ...t, totalMs: t.total_duration_ms || 0 }))
+                .filter(t => t.totalMs > 300_000)
+                .sort((a, b) => b.totalMs - a.totalMs)
+                .slice(0, 2);
+            for (const t of slowTools) {
+                const mins = (t.totalMs / 60_000).toFixed(1);
+                const name = String(t.tool_name || '?').replace('mcp__', '').replace(/__.*/, '…');
+                alerts.push({
+                    level: 'info',
+                    icon: '🔧',
+                    text: `${name}: ${mins} min total across ${t.count} calls`,
+                    action: () => window.app.switchView('analytics'),
+                    actionLabel: 'Behavior →',
+                });
+            }
+
+            // 4. High output/input ratio — session is generating more than it reads.
+            for (const s of (latencyStats || [])) {
+                if ((s.output_input_ratio_p95 || 0) > 500) {
+                    alerts.push({
+                        level: 'info',
+                        icon: '📝',
+                        text: `${s.model}: p95 output/input ratio ${Math.round(s.output_input_ratio_p95)}× — responses are very long`,
+                        action: () => window.app.switchView('analytics'),
+                        actionLabel: 'Latency →',
+                    });
+                    break; // one message is enough
+                }
+            }
+
+            if (alerts.length === 0) {
+                strip.innerHTML = '';
+                return;
+            }
+
+            const chips = alerts.map(a => {
+                const actionHtml = a.action
+                    ? `<button class="ov-anomaly-action">${this._escape(a.actionLabel)}</button>`
+                    : '';
+                return `<div class="ov-anomaly-chip ov-anomaly-${a.level}" data-idx="${alerts.indexOf(a)}">
+                    <span class="ov-anomaly-icon">${a.icon}</span>
+                    <span class="ov-anomaly-text">${this._escape(a.text)}</span>
+                    ${actionHtml}
+                </div>`;
+            }).join('');
+
+            strip.innerHTML = `<div class="ov-anomaly-strip-inner">${chips}</div>`;
+
+            // Wire action buttons.
+            strip.querySelectorAll('[data-idx]').forEach(chip => {
+                const btn = chip.querySelector('.ov-anomaly-action');
+                const idx = parseInt(chip.dataset.idx, 10);
+                if (btn && alerts[idx]?.action) {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        alerts[idx].action();
+                    });
+                }
+            });
+        } catch (_e) {
+            // Anomaly strip is best-effort — never show an error here.
         }
     }
 
