@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.52] - 2026-07-21
+
 ### Fixed
 
 - **Sessions list: input/output token columns now show real values for Claude
