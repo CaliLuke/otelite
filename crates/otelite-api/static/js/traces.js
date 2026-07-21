@@ -105,6 +105,7 @@ class TracesView {
             <div class="attr-filter-bar" id="attr-filter-bar-traces">
                 <span class="quick-filter-label">Quick:</span>
                 <button id="quick-filter-errors-traces" class="btn btn-secondary btn-sm">Errors only</button>
+                <button id="quick-filter-slow-traces" class="btn btn-secondary btn-sm" title="Show traces taking longer than 30 seconds">Slow (&gt;30s)</button>
                 <select id="model-filter-traces" class="filter-select hidden">
                     <option value="">All models</option>
                 </select>
@@ -261,6 +262,15 @@ class TracesView {
         document.getElementById('attr-val-traces').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') this._addAttrFilter();
         });
+        document.getElementById('quick-filter-slow-traces').addEventListener('click', () => {
+            // Client-side filter: keep only traces whose duration exceeds 30 s.
+            // We re-use the synthetic 'error' filter mechanism — add a 'slow' key
+            // that the client filter matches on duration.
+            this.attrFilters.push({ key: 'slow', op: 'exists', value: '' });
+            this._renderAttrChips();
+            this.renderTraces();
+        });
+
         document.getElementById('quick-filter-errors-traces').addEventListener('click', () => {
             this.attrFilters.push({ key: 'error', op: '=', value: 'true' });
             this._renderAttrChips();
@@ -401,7 +411,7 @@ class TracesView {
             // Server only supports '=' and '!=' for attrs. Forward those; keep exists/!exists client-side.
             // 'error' stays synthetic client-side.
             const serverAttrs = this.attrFilters.filter(f =>
-                (f.op === '=' || f.op === '!=') && f.key !== 'error'
+                (f.op === '=' || f.op === '!=') && f.key !== 'error' && f.key !== 'slow'
             );
             if (serverAttrs.length > 0) {
                 params.attrs = JSON.stringify(serverAttrs);
@@ -429,9 +439,9 @@ class TracesView {
         // Populate attr key autocomplete from loaded data
         this._updateAttrKeyDatalist();
 
-        // Server applies '=' and '!=' (except synthetic 'error'). Remaining filters apply client-side.
+        // Server applies '=' and '!=' (except synthetic 'error'/'slow'). Remaining filters apply client-side.
         const clientFilters = this.attrFilters.filter(f =>
-            f.op === 'exists' || f.op === '!exists' || f.key === 'error'
+            f.op === 'exists' || f.op === '!exists' || f.key === 'error' || f.key === 'slow'
         );
         const displayTraces = clientFilters.length > 0
             ? this.traces.filter(trace => this._matchesAttrFilters(trace, clientFilters))
@@ -2097,6 +2107,14 @@ class TracesView {
         const attrs = trace.attributes || {};
         for (const f of filters) {
             // Synthetic 'error' key maps to has_errors boolean
+            if (f.key === 'slow') {
+                // Synthetic: trace duration > 30 s
+                const durationMs = (trace.duration || 0) / 1_000_000;
+                const isSlow = durationMs > 30_000;
+                if (f.op === 'exists' && !isSlow) return false;
+                if (f.op === '!exists' && isSlow) return false;
+                continue;
+            }
             if (f.key === 'error') {
                 const traceErrStr = String(trace.has_errors);
                 switch (f.op) {

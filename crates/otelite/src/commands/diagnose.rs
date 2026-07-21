@@ -181,12 +181,69 @@ pub async fn handle_diagnose(
     }
     println!();
 
+    // ── Performance findings summary ──────────────────────────────────────────
+    let total_dur_ms: i64 = interactions.iter().map(|i| i.duration_ms).sum();
+    let slow_count = interactions
+        .iter()
+        .filter(|i| i.duration_ms > 30_000)
+        .count();
+    let cold_count = interactions
+        .iter()
+        .filter(|i| i.cache_read.unwrap_or(0) == 0 && i.cache_creation.unwrap_or(0) > 50_000)
+        .count();
+    let total_output: u64 = interactions.iter().filter_map(|i| i.output_tokens).sum();
+    let dur_sorted: Vec<i64> = {
+        let mut v: Vec<i64> = interactions.iter().map(|i| i.duration_ms).collect();
+        v.sort_unstable();
+        v
+    };
+    let p95_ms = dur_sorted
+        .get(dur_sorted.len() * 95 / 100)
+        .copied()
+        .unwrap_or(0);
+
+    println!("Performance summary:");
+    println!("  Total LLM time : {}", format_duration(total_dur_ms));
+    println!("  p95 turn time  : {}", format_duration(p95_ms));
+    println!(
+        "  Slowest turn   : {}",
+        format_duration(dur_sorted.last().copied().unwrap_or(0))
+    );
+    if slow_count > 0 {
+        println!("  Slow turns(>30s): {}/{}", slow_count, total);
+    }
+    if cold_count > 0 {
+        println!(
+            "  Cold starts    : {} turn(s) — no cache reads, full context rebuilt",
+            cold_count
+        );
+    }
+    if total_output > 50_000 {
+        println!(
+            "  Total output   : {} tokens — generation volume is the likely latency driver",
+            format_tokens(total_output)
+        );
+    }
+    if p95_ms > 60_000 {
+        println!("  ⚠  p95 > 60s — most turns are slow, not just outliers");
+    }
+    println!();
+
     // ── Per-interaction table ─────────────────────────────────────────────────
     println!(
-        "{:>4}  {:8}  {:>10}  {:>7}  {:>7}  {:>6}  {:>8}  {:>8}  {:<14}  Trace",
-        "#", "Time", "Input tok", "Cache+", "Cached", "TTFT", "Duration", "Out tok", "Status"
+        "{:>4}  {:8}  {:>10}  {:>7}  {:>7}  {:>6}  {:>8}  {:>8}  {:<6}  {:<14}  Trace",
+        "#",
+        "Time",
+        "Input tok",
+        "Cache+",
+        "Cached",
+        "TTFT",
+        "Duration",
+        "Out tok",
+        "Cache",
+        "Status"
     );
-    println!("{}", "-".repeat(93));
+    println!("{}", "-".repeat(100));
 
     for ia in &interactions {
         let tok_str = ia
@@ -210,6 +267,24 @@ pub async fn handle_diagnose(
             .map(|t| format!("{:.1}s", t))
             .unwrap_or_else(|| "—".to_string());
         let dur_str = format_duration(ia.duration_ms);
+        // Cache state label
+        let cache_label = {
+            let read = ia.cache_read.unwrap_or(0);
+            let create = ia.cache_creation.unwrap_or(0);
+            let inp = ia.input_tokens.unwrap_or(0);
+            let total_toks = read + create + inp;
+            if total_toks == 0 {
+                "  —  "
+            } else if read == 0 && create > 50_000 {
+                " COLD"
+            } else if total_toks > 0 && read * 100 / total_toks >= 80 {
+                "  HOT"
+            } else if read > 0 {
+                " WARM"
+            } else {
+                "  —  "
+            }
+        };
         let status = if ia.is_stall {
             "ERROR [stall]"
         } else if ia.is_error {
@@ -218,7 +293,7 @@ pub async fn handle_diagnose(
             "OK"
         };
         println!(
-            "{:>4}  {:8}  {:>10}  {:>7}  {:>7}  {:>6}  {:>8}  {:>8}  {:<14}  {}",
+            "{:>4}  {:8}  {:>10}  {:>7}  {:>7}  {:>6}  {:>8}  {:>8}  {:>6}  {:<14}  {}",
             ia.index,
             ia.time,
             tok_str,
@@ -227,6 +302,7 @@ pub async fn handle_diagnose(
             ttft_str,
             dur_str,
             out_str,
+            cache_label,
             status,
             &ia.trace_id[..12],
         );
@@ -364,5 +440,163 @@ fn format_duration(ms: i64) -> String {
         format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
     } else {
         format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_tokens ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_tokens_zero() {
+        assert_eq!(format_tokens(0), "0");
+    }
+
+    #[test]
+    fn test_format_tokens_small() {
+        assert_eq!(format_tokens(999), "999");
+    }
+
+    #[test]
+    fn test_format_tokens_thousands() {
+        assert_eq!(format_tokens(1_000), "1.0K");
+        assert_eq!(format_tokens(15_300), "15.3K");
+        assert_eq!(format_tokens(999_999), "1000.0K");
+    }
+
+    #[test]
+    fn test_format_tokens_millions() {
+        assert_eq!(format_tokens(1_000_000), "1.0M");
+        assert_eq!(format_tokens(2_500_000), "2.5M");
+    }
+
+    // ── format_duration ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(0), "0.0s");
+        assert_eq!(format_duration(1_500), "1.5s");
+        assert_eq!(format_duration(59_999), "60.0s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes() {
+        assert_eq!(format_duration(60_000), "1m00s");
+        assert_eq!(format_duration(90_000), "1m30s");
+        assert_eq!(format_duration(3_661_000), "61m01s");
+    }
+
+    // ── cache_label logic ────────────────────────────────────────────────────
+    // Mirrors the inline logic in the per-interaction table render loop.
+
+    fn cache_label_for(read: u64, create: u64, inp: u64) -> &'static str {
+        let total_toks = read + create + inp;
+        if total_toks == 0 {
+            "  —  "
+        } else if read == 0 && create > 50_000 {
+            " COLD"
+        } else if total_toks > 0 && read * 100 / total_toks >= 80 {
+            "  HOT"
+        } else if read > 0 {
+            " WARM"
+        } else {
+            "  —  "
+        }
+    }
+
+    #[test]
+    fn test_cache_label_cold() {
+        // No reads, large cache creation → COLD (full context rebuild)
+        assert_eq!(cache_label_for(0, 100_000, 50_000), " COLD");
+    }
+
+    #[test]
+    fn test_cache_label_hot() {
+        // Cache read is ≥80% of total tokens
+        let read = 80_000u64;
+        let create = 5_000u64;
+        let inp = 15_000u64;
+        assert_eq!(cache_label_for(read, create, inp), "  HOT");
+    }
+
+    #[test]
+    fn test_cache_label_warm() {
+        // Has some reads but <80%
+        assert_eq!(cache_label_for(30_000, 10_000, 60_000), " WARM");
+    }
+
+    #[test]
+    fn test_cache_label_no_data() {
+        // All zeros
+        assert_eq!(cache_label_for(0, 0, 0), "  —  ");
+    }
+
+    #[test]
+    fn test_cache_label_small_creation_not_cold() {
+        // Small cache creation (≤50K) with no reads → not COLD, falls to "  —  "
+        assert_eq!(cache_label_for(0, 49_999, 10_000), "  —  ");
+    }
+
+    // ── perf summary p95 index ────────────────────────────────────────────────
+
+    #[test]
+    fn test_p95_index_single_element() {
+        let mut v = [1_000i64];
+        v.sort_unstable();
+        let p95 = v.get(v.len() * 95 / 100).copied().unwrap_or(0);
+        assert_eq!(p95, 1_000);
+    }
+
+    #[test]
+    fn test_p95_index_twenty_elements() {
+        // 20 elements: p95 index = 20*95/100 = 19 → last element
+        let mut v: Vec<i64> = (1..=20).map(|i| i * 1_000).collect();
+        v.sort_unstable();
+        let p95 = v.get(v.len() * 95 / 100).copied().unwrap_or(0);
+        assert_eq!(p95, 20_000);
+    }
+
+    #[test]
+    fn test_cold_and_slow_counts() {
+        // Verify the slow_count and cold_count formulas used in the summary
+        struct FakeIa {
+            duration_ms: i64,
+            cache_read: Option<u64>,
+            cache_creation: Option<u64>,
+        }
+        let interactions = [
+            FakeIa {
+                duration_ms: 5_000,
+                cache_read: Some(80_000),
+                cache_creation: Some(0),
+            },
+            FakeIa {
+                duration_ms: 35_000,
+                cache_read: Some(0),
+                cache_creation: Some(120_000),
+            },
+            FakeIa {
+                duration_ms: 45_000,
+                cache_read: Some(0),
+                cache_creation: Some(80_000),
+            },
+            FakeIa {
+                duration_ms: 20_000,
+                cache_read: Some(50_000),
+                cache_creation: Some(10_000),
+            },
+        ];
+        let slow_count = interactions
+            .iter()
+            .filter(|i| i.duration_ms > 30_000)
+            .count();
+        let cold_count = interactions
+            .iter()
+            .filter(|i| i.cache_read.unwrap_or(0) == 0 && i.cache_creation.unwrap_or(0) > 50_000)
+            .count();
+        assert_eq!(slow_count, 2); // 35s and 45s
+        assert_eq!(cold_count, 2); // 120K and 80K creation with no reads
     }
 }

@@ -162,6 +162,24 @@ class App {
     }
 
     /**
+     * Open the Session Report modal for a session ID without switching tabs.
+     * Falls back to navigating to Traces filtered by session if the modal helper
+     * isn't available yet (e.g. traces view hasn't rendered).
+     */
+    navigateToSessionReport(sessionId) {
+        if (this.views.traces &&
+            typeof this.views.traces.openSessionDiagnoseModal === 'function') {
+            if (!this.renderedViews.has('traces')) {
+                this.views.traces.render();
+                this.renderedViews.add('traces');
+            }
+            this.views.traces.openSessionDiagnoseModal(sessionId);
+        } else {
+            this.navigateToTracesBySession(sessionId);
+        }
+    }
+
+    /**
      * Dispatch custom event for view change
      */
     dispatchViewChange(viewName) {

@@ -11,6 +11,41 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **CLI `diagnose`: performance summary block.** `otelite diagnose <session>` now
+  prints a summary before the per-interaction table: Total LLM time, p95 turn
+  time, slowest turn, slow-turn count (>30 s), cold-start count, and a warning
+  when total output exceeds 50 K tokens or p95 exceeds 60 s.
+
+- **CLI `diagnose`: cache-state column.** The per-interaction table gains a
+  `Cache` column showing `COLD` / `WARM` / `HOT` / `—` for each turn so you can
+  quickly see which interactions rebuilt context from scratch.
+
+- **TUI Latency table: o/i ratio p95 column.** The latency usage table now
+  includes an `o/i p95 ⚠` column — rows where the p95 output/input token ratio
+  exceeds 200× are highlighted yellow-bold, flagging generation-dominated turns
+  as the likely slowness driver.
+
+- **TUI Latency table: slow p95 highlight.** Rows where p95 duration exceeds
+  30 s are highlighted amber so the slowest model tiers stand out at a glance.
+
+- **Web Traces: "Slow >30 s" quick-filter button.** A one-click filter above the
+  trace list lets you instantly narrow to traces longer than 30 seconds without
+  typing an attribute filter.
+
+- **Web Logs: session badge in log rows.** Non-LLM log entries now show a compact
+  session ID pill in the collapsed header row; clicking it opens the Session
+  Report modal for that session.
+
+- **Web Analytics: session cell navigates to Session Report modal.** Clicking a
+  session ID in the Top Spans or latency group tables now opens the full Session
+  Report instead of jumping to raw logs.
+
+- **Web Analytics: conversation nav in group table fixed.** Conversation cells
+  in the Analytics group table now correctly navigate to traces-by-conversation
+  (was navigating to logs-by-session for both sessions and conversations).
+
 ## [0.1.50] - 2026-07-21
 
 ### Added

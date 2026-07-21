@@ -205,15 +205,15 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
         ),
         Cell::from("p95ms").style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("tok/s*p50").style(
+        Cell::from("tok/s p50").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("tok/s*p95").style(
+        Cell::from("tok/s p95").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -228,9 +228,14 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("out/in p50").style(
+        Cell::from("o/i p50").style(
             Style::default()
                 .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("o/i p95 ⚠").style(
+            Style::default()
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("TTFT p50").style(
@@ -260,11 +265,30 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
             } else {
                 "—".to_string()
             };
-            Row::new(vec![
+            // Flag rows where p95 output/input ratio is extreme — primary slowness signal.
+            let ratio_high = latency_ratio_is_high(s.output_input_ratio_p95);
+            let ratio_str_p95 = s
+                .output_input_ratio_p95
+                .map_or("—".to_string(), |v| format!("{:.2}×", v));
+            let ratio_p95_cell = if ratio_high {
+                Cell::from(ratio_str_p95).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Cell::from(ratio_str_p95)
+            };
+            let p95_dur_cell = if latency_p95_is_slow(s.p95_ms) {
+                Cell::from(s.p95_ms.to_string()).style(Style::default().fg(Color::Yellow))
+            } else {
+                Cell::from(s.p95_ms.to_string())
+            };
+            let row = Row::new(vec![
                 Cell::from(truncate(model, 28)),
                 Cell::from(s.count.to_string()),
                 Cell::from(s.p50_ms.to_string()),
-                Cell::from(s.p95_ms.to_string()),
+                p95_dur_cell,
                 Cell::from(
                     s.derived_tokens_per_sec_p50
                         .map_or("—".to_string(), |v| format!("{:.0}", v)),
@@ -285,26 +309,33 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
                     s.output_input_ratio_p50
                         .map_or("—".to_string(), |v| format!("{:.2}×", v)),
                 ),
+                ratio_p95_cell,
                 Cell::from(ttft_p50),
                 Cell::from(ttft_p95),
-            ])
+            ]);
+            if ratio_high {
+                row.style(Style::default().fg(Color::Yellow))
+            } else {
+                row
+            }
         })
         .collect();
 
     let table = Table::new(
         rows,
         [
-            Constraint::Min(20),
-            Constraint::Length(5),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(8),
+            Constraint::Min(20),   // Model
+            Constraint::Length(5), // N
+            Constraint::Length(6), // p50ms
+            Constraint::Length(6), // p95ms
+            Constraint::Length(9), // tok/s p50
+            Constraint::Length(9), // tok/s p95
+            Constraint::Length(7), // ctx p50
+            Constraint::Length(7), // ctx p95
+            Constraint::Length(8), // o/i p50
+            Constraint::Length(8), // o/i p95 (highlighted if >200×)
+            Constraint::Length(8), // TTFT p50
+            Constraint::Length(8), // TTFT p95
         ],
     )
     .header(header)
@@ -752,5 +783,125 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..max.saturating_sub(1)])
+    }
+}
+
+// ── Pure helpers — extracted so they can be unit-tested without a Frame ──────
+
+/// Returns true when the p95 output/input ratio is high enough to warrant a
+/// warning highlight in the latency table.  Mirrors the web UI amber threshold.
+pub(crate) fn latency_ratio_is_high(ratio_p95: Option<f64>) -> bool {
+    ratio_p95.map_or(false, |r| r > 200.0)
+}
+
+/// Returns true when the p95 duration warrants a warning highlight.
+pub(crate) fn latency_p95_is_slow(p95_ms: i64) -> bool {
+    p95_ms > 30_000
+}
+
+/// Returns true when a tool's total wall-clock time is heavy (>5 min).
+pub(crate) fn tool_total_is_heavy(total_duration_ms: i64) -> bool {
+    total_duration_ms > 300_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otelite_core::api::LatencyStats;
+
+    fn make_latency(p95_ms: i64, ratio_p95: Option<f64>) -> LatencyStats {
+        LatencyStats {
+            model: Some("test-model".to_string()),
+            count: 10,
+            avg_ms: (p95_ms / 2) as f64,
+            p50_ms: p95_ms / 2,
+            p95_ms,
+            p99_ms: p95_ms,
+            ttft_p50_ms: None,
+            ttft_p95_ms: None,
+            ttft_p99_ms: None,
+            ttft_count: 0,
+            derived_tokens_per_sec_p50: None,
+            derived_tokens_per_sec_p95: None,
+            derived_tokens_per_sec_p99: None,
+            input_tokens_p50: None,
+            input_tokens_p95: None,
+            input_tokens_p99: None,
+            output_input_ratio_p50: None,
+            output_input_ratio_p95: ratio_p95,
+            output_input_ratio_p99: None,
+        }
+    }
+
+    #[test]
+    fn test_latency_ratio_high_above_threshold() {
+        let s = make_latency(5_000, Some(250.0));
+        assert!(latency_ratio_is_high(s.output_input_ratio_p95));
+    }
+
+    #[test]
+    fn test_latency_ratio_high_at_threshold_not_flagged() {
+        let s = make_latency(5_000, Some(200.0));
+        // threshold is >200, not >=200
+        assert!(!latency_ratio_is_high(s.output_input_ratio_p95));
+    }
+
+    #[test]
+    fn test_latency_ratio_none_not_flagged() {
+        let s = make_latency(5_000, None);
+        assert!(!latency_ratio_is_high(s.output_input_ratio_p95));
+    }
+
+    #[test]
+    fn test_latency_p95_slow_above_30s() {
+        let s = make_latency(31_000, None);
+        assert!(latency_p95_is_slow(s.p95_ms));
+    }
+
+    #[test]
+    fn test_latency_p95_slow_at_30s_not_flagged() {
+        let s = make_latency(30_000, None);
+        assert!(!latency_p95_is_slow(s.p95_ms));
+    }
+
+    #[test]
+    fn test_tool_heavy_above_5min() {
+        let total_ms = 301_000i64;
+        assert!(tool_total_is_heavy(total_ms));
+    }
+
+    #[test]
+    fn test_tool_heavy_at_5min_not_flagged() {
+        let total_ms = 300_000i64;
+        assert!(!tool_total_is_heavy(total_ms));
+    }
+
+    #[test]
+    fn test_tool_light_not_heavy() {
+        let total_ms = 60_000i64;
+        assert!(!tool_total_is_heavy(total_ms));
+    }
+
+    #[test]
+    fn test_fmt_tokens_boundaries() {
+        assert_eq!(fmt_tokens(0), "0");
+        assert_eq!(fmt_tokens(999), "999");
+        assert_eq!(fmt_tokens(1_000), "1.0k");
+        assert_eq!(fmt_tokens(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        let s = "abcdefghijklmnopqrstuvwxyz";
+        let t = truncate(s, 10);
+        // truncate keeps max-1 bytes then appends '…' (3 UTF-8 bytes) → max+2 bytes total
+        assert!(t.len() <= 12, "len was {}", t.len());
+        assert!(t.ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_short_string_unchanged() {
+        let s = "short";
+        assert_eq!(truncate(s, 20), "short");
     }
 }

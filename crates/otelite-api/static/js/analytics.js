@@ -877,11 +877,22 @@ class AnalyticsView {
             return `<h3>Tool usage</h3><div class="empty-state-hint">No tool-use spans in this window.</div>`;
         }
         const fmt = n => Number(n).toLocaleString();
-        const rows = toolUsage.map(t => {
+        // Sort by total wall-clock time descending so the most expensive tools surface first.
+        const sorted = [...toolUsage].sort((a, b) => (b.total_duration_ms || 0) - (a.total_duration_ms || 0));
+        const maxTotalMs = sorted.reduce((m, t) => Math.max(m, t.total_duration_ms || 0), 1);
+        const rows = sorted.map(t => {
             const count = t.count || 0;
             const succ = t.success_count || 0;
             const rate = count > 0 ? (succ / count) * 100 : 0;
             const warn = rate < 90;
+            const totalMs = t.total_duration_ms || 0;
+            const barPct = Math.max(2, (totalMs / maxTotalMs) * 100);
+            const totalStr = totalMs >= 60000
+                ? `${(totalMs / 60000).toFixed(1)} min`
+                : totalMs >= 1000
+                    ? `${(totalMs / 1000).toFixed(1)} s`
+                    : `${fmt(totalMs)} ms`;
+            const isHeavy = totalMs > 300_000; // >5 min total
             return `
                 <tr class="${warn ? 'tool-usage-warn' : ''}">
                     <td>${this._esc(t.tool_name || '—')}</td>
@@ -889,13 +900,22 @@ class AnalyticsView {
                     <td>${rate.toFixed(1)}%</td>
                     <td>${fmt(t.error_count || 0)}</td>
                     <td>${this._esc(this._formatDuration(t.avg_duration_ms))}</td>
+                    <td class="${isHeavy ? 'tool-total-heavy' : ''}">
+                        <div class="tool-total-cell">
+                            <div class="tool-time-bar-track">
+                                <div class="tool-time-bar-fill${isHeavy ? ' tool-time-bar-heavy' : ''}" style="width:${barPct.toFixed(1)}%"></div>
+                            </div>
+                            <span class="tool-total-label">${this._esc(totalStr)}</span>
+                        </div>
+                    </td>
                 </tr>`;
         }).join('');
         return `
             <h3>Tool usage</h3>
+            <p class="table-hint">Sorted by total wall-clock time. Amber rows have success rate &lt; 90%; red total bar = &gt;5 min aggregate.</p>
             <table class="data-table tool-usage-table">
                 <thead><tr>
-                    <th>Tool</th><th>Calls</th><th>Success rate</th><th>Errors</th><th>Avg duration</th>
+                    <th>Tool</th><th>Calls</th><th>Success rate</th><th>Errors</th><th>Avg duration</th><th>Total time ▼</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
@@ -1154,7 +1174,10 @@ class AnalyticsView {
 
             const timeStr = formatTs(new Date((row.start_time ?? 0) / 1_000_000));
             const sessionCell = row.session_id
-                ? `<a href="#" onclick="window.app.navigateToLogsBySession('${this._esc(row.session_id)}'); return false;" title="${this._esc(row.session_id)}">${this._esc(String(row.session_id).slice(0, 8))}</a>`
+                ? `<span class="top-spans-session-cell">
+                    <a href="#" onclick="window.app.navigateToSessionReport('${this._esc(row.session_id)}'); return false;" title="Session Report: ${this._esc(row.session_id)}">${this._esc(String(row.session_id).slice(0, 8))}</a>
+                    <a href="#" class="cell-nav-link" onclick="window.app.navigateToLogsBySession('${this._esc(row.session_id)}'); return false;" title="View logs for this session">logs</a>
+                   </span>`
                 : '—';
             const traceCell = row.trace_id
                 ? `<a href="#" onclick="window.app.navigateToTrace('${this._esc(row.trace_id)}'); return false;" title="${this._esc(row.trace_id)}">${this._esc(String(row.trace_id).slice(0, 8))}</a>`
@@ -1227,9 +1250,10 @@ class AnalyticsView {
             const cost = r.cost ?? null;
             const costStr = cost === null ? '—' : `$${cost.toFixed(4)}`;
             const id = String(r[idField] || '—');
+            // Session IDs → Session Report modal; conversation IDs → traces filtered by conversation.
             const navFn = idField === 'session_id'
-                ? `window.app.navigateToLogsBySession('${this._esc(id)}')`
-                : `window.app.navigateToLogsBySession('${this._esc(id)}')`;
+                ? `window.app.navigateToSessionReport('${this._esc(id)}')`
+                : `window.app.navigateToTracesByConversation('${this._esc(id)}')`;
             const idCell = id === '—' ? id
                 : `<a href="#" onclick="${navFn}; return false;" title="${this._esc(id)}">${this._esc(id.slice(0, 24))}${id.length > 24 ? '…' : ''}</a>`;
             return `<tr>

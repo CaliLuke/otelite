@@ -515,9 +515,15 @@ class LogsView {
                     <span class="log-col-tokens">${this.escapeHtml(String(finishReason))}</span>
                     <span class="log-body-preview">${bodyPreview}</span>`;
         } else {
+            // Show a compact session badge in the collapsed header when present —
+            // avoids having to expand every row to identify which session it belongs to.
+            const sessionBadge = attrs['session.id']
+                ? `<span class="log-session-badge" title="Session: ${this.escapeHtml(attrs['session.id'])}" onclick="window.app.navigateToSessionReport('${this.escapeHtml(attrs['session.id'])}');event.stopPropagation();" style="cursor:pointer;">${this.escapeHtml(String(attrs['session.id']).slice(0, 8))}</span>`
+                : '';
             headerCols = `
                     <span class="log-timestamp">${formatTs(timestamp)}</span>
                     <span class="log-severity ${severityClass}">${log.severity}</span>
+                    ${sessionBadge}
                     <span class="log-body-preview">${bodyPreview}</span>
                     ${log.trace_id ? `<span class="log-trace-id" title="Trace ID">${this.escapeHtml(log.trace_id.substring(0, 8))}...</span>` : ''}`;
         }
