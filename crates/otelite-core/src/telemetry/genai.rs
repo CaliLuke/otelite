@@ -101,13 +101,16 @@ impl GenAiSpanInfo {
         // Extract operation
         info.operation = attrs.get("gen_ai.operation.name").cloned();
 
-        // Extract token counts
+        // Extract token counts — try OTel semconv names first, then the bare
+        // names that Claude Code emits (input_tokens, output_tokens, etc.).
         info.input_tokens = attrs
             .get("gen_ai.usage.input_tokens")
+            .or_else(|| attrs.get("input_tokens"))
             .and_then(|s| s.parse().ok());
 
         info.output_tokens = attrs
             .get("gen_ai.usage.output_tokens")
+            .or_else(|| attrs.get("output_tokens"))
             .and_then(|s| s.parse().ok());
 
         // Total tokens: use explicit value if present, otherwise compute from input+output
@@ -134,12 +137,16 @@ impl GenAiSpanInfo {
             info.finish_reasons = parse_finish_reasons(reasons_str);
         }
 
-        // Extract cache token counts
+        // Extract cache token counts — OTel semconv names then Claude Code bare names.
         info.cache_creation_tokens = attrs
             .get("gen_ai.usage.cache_creation.input_tokens")
+            .or_else(|| attrs.get("gen_ai.usage.cache_creation_input_tokens"))
+            .or_else(|| attrs.get("cache_creation_tokens"))
             .and_then(|v| v.parse().ok());
         info.cache_read_tokens = attrs
             .get("gen_ai.usage.cache_read.input_tokens")
+            .or_else(|| attrs.get("gen_ai.usage.cache_read_input_tokens"))
+            .or_else(|| attrs.get("cache_read_tokens"))
             .and_then(|v| v.parse().ok());
 
         // Extract response ID

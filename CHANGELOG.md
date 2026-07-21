@@ -21,6 +21,14 @@ have to work around), not implementation detail.
   none. Token counts are now aggregated from child `llm_request` spans, matching
   the fix already applied to the Session Report modal.
 
+- **Token counts now populated for all instrumentations that emit bare attribute
+  names.** `GenAiSpanInfo` previously only recognised OTel semconv names
+  (`gen_ai.usage.input_tokens` etc.). Claude Code and other instrumentation
+  libraries emit bare names (`input_tokens`, `output_tokens`,
+  `cache_creation_tokens`, `cache_read_tokens`). Both forms are now accepted,
+  semconv-prefixed names taking priority. This fixes zero-token display across
+  sessions, diagnose, analytics, and the TUI for Claude Code traces.
+
 ## [0.1.51] - 2026-07-21
 
 ### Added
