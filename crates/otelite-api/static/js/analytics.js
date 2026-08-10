@@ -154,6 +154,7 @@ class AnalyticsView {
                                 <li>Most expensive → Cost → top calls table</li>
                                 <li>Failing tool? → Behavior → tool usage → success rate</li>
                                 <li>Opus vs Sonnet speed → Latency → latency-by-model</li>
+                                <li>Why is it slow? → Latency → 🔍 Latency diagnosis card</li>
                                 <li>Cache savings → Cost → cache hit rate</li>
                             </ul>
                         </div>
@@ -560,7 +561,9 @@ class AnalyticsView {
             ]);
 
             const convCard = this._buildConversationDepthCard(conversationDepth);
-            const cards = convCard ? `<div class="usage-summary-cards">${convCard}</div>` : '';
+            const insightCards = this._buildLatencyInsightCards(latencyStats || []);
+            const allCards = [convCard, insightCards].filter(Boolean).join('');
+            const cards = allCards ? `<div class="usage-summary-cards">${allCards}</div>` : '';
 
             const html = [
                 cards,
@@ -574,6 +577,79 @@ class AnalyticsView {
         } catch (err) {
             this._setSectionError('latency', err);
         }
+    }
+
+    /**
+     * Build insight cards for the Latency section header.
+     *
+     * Computes the ratio of TTFT to total duration per model. When the median
+     * ratio is > 0.85 across models with TTFT data, the wait is almost entirely
+     * Anthropic/provider-side inference time — not tooling, context size, or
+     * local overhead. We surface this as a plain-language diagnosis card so
+     * users don't have to interpret the numbers themselves.
+     *
+     * @param {Array} latencyStats - rows from /api/genai/latency_stats
+     * @returns {string} HTML for one or more diagnosis cards, or '' if not enough data
+     */
+    _buildLatencyInsightCards(latencyStats) {
+        // Only consider models with TTFT data and at least 5 calls
+        const withTtft = latencyStats.filter(s =>
+            s.ttft_count > 0 &&
+            s.ttft_p50_ms != null &&
+            s.p50_ms != null &&
+            s.p50_ms > 0 &&
+            (s.count || 0) >= 5
+        );
+        if (withTtft.length === 0) return '';
+
+        // Compute TTFT/duration ratio at p50 per model
+        const ratios = withTtft.map(s => ({
+            model: s.model || '—',
+            ratio: s.ttft_p50_ms / s.p50_ms,
+            p50_ms: s.p50_ms,
+            ttft_p50_ms: s.ttft_p50_ms,
+            p95_ms: s.p95_ms,
+            count: s.count,
+        }));
+
+        const medianRatio = ratios.slice().sort((a, b) => a.ratio - b.ratio)[Math.floor(ratios.length / 2)].ratio;
+
+        if (medianRatio < 0.85) return '';
+
+        // Build per-model lines for the detail
+        const modelLines = ratios.map(r => {
+            const ratioStr = (r.ratio * 100).toFixed(0);
+            const ttftStr = this._formatDuration(r.ttft_p50_ms);
+            const totalStr = this._formatDuration(r.p50_ms);
+            return `<li><strong>${this._esc(r.model)}</strong>: TTFT ${ttftStr} of ${totalStr} total (${ratioStr}% inference)</li>`;
+        }).join('');
+
+        const overallPct = (medianRatio * 100).toFixed(0);
+
+        return `
+            <div class="usage-gauge-card latency-insight-card">
+                <div class="usage-card-label">
+                    🔍 Latency diagnosis
+                </div>
+                <div class="usage-card-value">${overallPct}% inference</div>
+                <div class="gauge-bar">
+                    <div class="gauge-fill" style="width:${Math.min(medianRatio * 100, 100).toFixed(1)}%"></div>
+                </div>
+                <div class="gauge-hint">
+                    Time-to-first-token accounts for ~${overallPct}% of total response time.
+                    The wait is almost entirely provider-side inference, not local tooling,
+                    context size, or network overhead.
+                </div>
+                <details class="latency-insight-detail">
+                    <summary>Per-model breakdown</summary>
+                    <ul class="latency-insight-model-list">${modelLines}</ul>
+                    <p class="latency-insight-tip">
+                        💡 To reduce average latency, route lighter turns to a faster model
+                        (e.g. Sonnet instead of Opus). Context size, tool count, and prompt
+                        length are <em>not</em> the bottleneck here.
+                    </p>
+                </details>
+            </div>`;
     }
 
     async _loadReliabilitySection() {

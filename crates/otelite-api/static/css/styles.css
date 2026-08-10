@@ -2799,6 +2799,35 @@ body {
     vertical-align: middle;
 }
 
+/* Latency diagnosis insight card */
+.latency-insight-card {
+    min-width: 260px;
+    max-width: 420px;
+}
+.latency-insight-detail {
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+}
+.latency-insight-detail summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+    user-select: none;
+}
+.latency-insight-detail summary:hover {
+    color: var(--text-primary);
+}
+.latency-insight-model-list {
+    margin: 0.4rem 0 0.4rem 1.2rem;
+    padding: 0;
+    color: var(--text-primary);
+    line-height: 1.6;
+}
+.latency-insight-tip {
+    margin: 0.4rem 0 0;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
 /* Overview landing page */
 .overview-grid {
     display: grid;
