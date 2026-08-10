@@ -11,6 +11,10 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Internal
+
+- Harden `release.yml` against Semgrep SAST: replace `curl | sh` rustup install with `dtolnay/rust-toolchain` action (no user-visible change).
+
 ## [0.1.55] - 2026-08-10
 
 ### Internal
