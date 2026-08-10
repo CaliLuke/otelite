@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.53] - 2026-08-10
+
 ### Fixed
 
 - **Model Mix panel and all GenAI analytics now show Claude Code data.** Claude
