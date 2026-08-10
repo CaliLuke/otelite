@@ -105,3 +105,124 @@ async fn test_get_token_usage_response_structure() {
     assert!(usage.by_model.is_empty() || !usage.by_model.is_empty());
     assert!(usage.by_system.is_empty() || !usage.by_system.is_empty());
 }
+
+#[tokio::test]
+async fn test_get_tool_approvals_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/genai/tool_approvals")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let stats: otelite_core::api::ToolApprovalStats = serde_json::from_slice(&body).unwrap();
+    assert_eq!(stats.total, 0);
+    assert_eq!(stats.auto_accepted, 0);
+}
+
+#[tokio::test]
+async fn test_get_stop_reasons_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/genai/stop_reasons")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reasons: Vec<otelite_core::api::StopReasonCount> = serde_json::from_slice(&body).unwrap();
+    assert!(reasons.is_empty());
+}
+
+#[tokio::test]
+async fn test_get_context_type_split_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/genai/context_type_split")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let split: Vec<otelite_core::api::ContextTypeSplit> = serde_json::from_slice(&body).unwrap();
+    // context_type_split returns empty vec for empty DB
+    assert!(split.is_empty());
+}
+
+#[tokio::test]
+async fn test_get_tool_errors_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/genai/tool_errors")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let errors: Vec<otelite_core::api::ToolErrorEntry> = serde_json::from_slice(&body).unwrap();
+    assert!(errors.is_empty());
+}
+
+#[tokio::test]
+async fn test_get_hour_of_day_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/genai/hour_of_day")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let buckets: Vec<otelite_core::api::HourOfDayBucket> = serde_json::from_slice(&body).unwrap();
+    // Empty DB returns 24 zero-filled buckets (one per hour)
+    assert_eq!(buckets.len(), 24);
+    assert!(buckets
+        .iter()
+        .all(|b| b.llm_calls == 0 && b.tool_calls == 0));
+}

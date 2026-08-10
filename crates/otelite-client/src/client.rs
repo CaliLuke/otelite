@@ -998,4 +998,126 @@ mod tests {
         mock.assert_async().await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_fetch_tool_approvals_success() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/tool_approvals")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"total":10,"auto_accepted":8,"user_accepted":1,"rejected":1,"unknown":0,"top_rejected":[]}"#)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_tool_approvals(vec![]).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let stats = result.unwrap();
+        assert_eq!(stats.total, 10);
+        assert_eq!(stats.auto_accepted, 8);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_stop_reasons_success() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/stop_reasons")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"reason":"tool_use","count":85},{"reason":"end_turn","count":15}]"#)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_stop_reasons(vec![]).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let reasons = result.unwrap();
+        assert_eq!(reasons.len(), 2);
+        assert_eq!(reasons[0].reason, "tool_use");
+        assert_eq!(reasons[0].count, 85);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_context_type_split_success() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/context_type_split")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"context":"code","calls":42,"input_tokens":1000,"output_tokens":500,"avg_ms":120.5}]"#)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_context_type_split(vec![]).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let split = result.unwrap();
+        assert_eq!(split.len(), 1);
+        assert_eq!(split[0].context, "code");
+        assert_eq!(split[0].calls, 42);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_tool_errors_success() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/tool_errors")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"tool_name":"bash","error_message":"Permission denied","count":3}]"#)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_tool_errors(vec![]).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let errors = result.unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].tool_name, "bash");
+        assert_eq!(errors[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_hour_of_day_success() {
+        let mut server = Server::new_async().await;
+        // Return 24 buckets as the real endpoint does
+        let body: String = (0u32..24)
+            .map(|h| format!(r#"{{"hour":{h},"llm_calls":{},"tool_calls":{}}}"#, h * 2, h))
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!("[{body}]");
+        let mock = server
+            .mock("GET", "/api/genai/hour_of_day")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_hour_of_day(vec![]).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let buckets = result.unwrap();
+        assert_eq!(buckets.len(), 24);
+        assert_eq!(buckets[0].hour, 0);
+        assert_eq!(buckets[0].llm_calls, 0);
+        assert_eq!(buckets[23].hour, 23);
+        assert_eq!(buckets[23].llm_calls, 46);
+    }
 }

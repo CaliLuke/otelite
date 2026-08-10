@@ -58,6 +58,11 @@ use utoipa::OpenApi;
         crate::api::genai::get_latency_by_context,
         crate::api::genai::get_error_types,
         crate::api::genai::get_model_drift,
+        crate::api::genai::get_tool_approvals,
+        crate::api::genai::get_stop_reasons,
+        crate::api::genai::get_context_type_split,
+        crate::api::genai::get_tool_errors,
+        crate::api::genai::get_hour_of_day,
     ),
     components(
         schemas(
