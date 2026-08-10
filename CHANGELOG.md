@@ -11,6 +11,12 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Internal
+
+- Pin all GitHub Actions `uses:` references in `release.yml` to full commit SHAs
+  and replace `curl | sh` cargo-dist installer with a checksum-verified download
+  (resolves remaining Semgrep SAST findings in the release workflow).
+
 ## [0.1.54] - 2026-08-10
 
 ### Internal
