@@ -11,6 +11,18 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.54] - 2026-08-10
+
+### Added
+
+- **TUI Usage view: tool approvals, stop reasons, context type split, tool
+  errors, and hour-of-day activity panels.** The Usage tab now shows five new
+  panels: approval rate breakdown (auto/manual/rejected), stop reason
+  distribution (tool_use vs end_turn), context type split with avg latency,
+  per-tool error counts, and an activity-by-hour-of-day table. Panels are shown
+  only when data is available; all fetches are best-effort so the view degrades
+  gracefully when the server is not running these endpoints.
+
 ## [0.1.53] - 2026-08-10
 
 ### Fixed

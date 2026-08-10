@@ -573,6 +573,22 @@ impl App {
                         self.usage_state.set_error(e.to_string());
                     },
                 }
+                // best-effort — Claude Code only; ignore errors silently
+                if let Ok(resp) = self.api_client.fetch_tool_approvals(vec![]).await {
+                    self.usage_state.tool_approvals = Some(resp);
+                }
+                if let Ok(resp) = self.api_client.fetch_stop_reasons(vec![]).await {
+                    self.usage_state.stop_reasons = resp;
+                }
+                if let Ok(resp) = self.api_client.fetch_context_type_split(vec![]).await {
+                    self.usage_state.context_split = resp;
+                }
+                if let Ok(resp) = self.api_client.fetch_tool_errors(vec![]).await {
+                    self.usage_state.tool_errors = resp;
+                }
+                if let Ok(resp) = self.api_client.fetch_hour_of_day(vec![]).await {
+                    self.usage_state.hour_of_day = resp;
+                }
 
                 if !had_error {
                     self.usage_state.clear_error();

@@ -451,6 +451,81 @@ impl ApiClient {
         }
         Ok(response.json().await?)
     }
+
+    pub async fn fetch_tool_approvals(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::ToolApprovalStats> {
+        let url = format!("{}/api/genai/tool_approvals", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch tool approvals: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_stop_reasons(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::StopReasonCount>> {
+        let url = format!("{}/api/genai/stop_reasons", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch stop reasons: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_context_type_split(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::ContextTypeSplit>> {
+        let url = format!("{}/api/genai/context_type_split", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch context type split: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_tool_errors(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::ToolErrorEntry>> {
+        let url = format!("{}/api/genai/tool_errors", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch tool errors: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_hour_of_day(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::HourOfDayBucket>> {
+        let url = format!("{}/api/genai/hour_of_day", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch hour of day: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
 }
 
 #[cfg(test)]

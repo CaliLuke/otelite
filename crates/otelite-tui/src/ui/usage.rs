@@ -132,6 +132,15 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     let show_tools = !state.tool_usage.is_empty();
     let show_errors = !state.error_types.is_empty();
     let show_drift = state.model_drift.iter().any(|p| p.differs);
+    let show_approvals = state
+        .tool_approvals
+        .as_ref()
+        .map(|a| a.total > 0)
+        .unwrap_or(false);
+    let show_stop = !state.stop_reasons.is_empty();
+    let show_ctx = !state.context_split.is_empty();
+    let show_tool_errs = !state.tool_errors.is_empty();
+    let show_hour = state.hour_of_day.iter().any(|b| b.llm_calls > 0);
 
     let mut constraints = vec![Constraint::Min(5)]; // latency always shown
     if show_tools {
@@ -145,6 +154,15 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     }
     if show_conv {
         constraints.push(Constraint::Length(5));
+    }
+    if show_approvals || show_stop {
+        constraints.push(Constraint::Length(7));
+    }
+    if show_ctx || show_tool_errs {
+        constraints.push(Constraint::Length(6));
+    }
+    if show_hour {
+        constraints.push(Constraint::Length(9));
     }
 
     let sections = Layout::default()
@@ -169,7 +187,21 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     }
     if show_conv {
         render_conv_depth(frame, sections[idx], state);
+        idx += 1;
     }
+    if show_approvals || show_stop {
+        render_approvals_stop_row(frame, sections[idx], state, show_approvals, show_stop);
+        idx += 1;
+    }
+    if show_ctx || show_tool_errs {
+        render_ctx_tool_errs_row(frame, sections[idx], state, show_ctx, show_tool_errs);
+        idx += 1;
+    }
+    if show_hour {
+        render_hour_of_day(frame, sections[idx], state);
+        // idx += 1; // last section
+    }
+    let _ = idx; // suppress unused warning if all sections are omitted
 }
 
 fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
@@ -802,6 +834,273 @@ pub(crate) fn latency_p95_is_slow(p95_ms: i64) -> bool {
 /// Returns true when a tool's total wall-clock time is heavy (>5 min).
 pub(crate) fn tool_total_is_heavy(total_duration_ms: i64) -> bool {
     total_duration_ms > 300_000
+}
+
+fn render_approvals_stop_row(
+    frame: &mut Frame,
+    area: Rect,
+    state: &UsageState,
+    show_approvals: bool,
+    show_stop: bool,
+) {
+    let halves = if show_approvals && show_stop {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
+            .split(area)
+    };
+
+    if show_approvals && show_stop {
+        render_tool_approvals(frame, halves[0], state);
+        render_stop_reasons(frame, halves[1], state);
+    } else if show_approvals {
+        render_tool_approvals(frame, halves[0], state);
+    } else {
+        render_stop_reasons(frame, halves[0], state);
+    }
+}
+
+fn render_tool_approvals(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Tool Approvals ");
+    let Some(ref stats) = state.tool_approvals else {
+        frame.render_widget(Paragraph::new("No data").block(block), area);
+        return;
+    };
+    if stats.total == 0 {
+        frame.render_widget(Paragraph::new("No tool decisions").block(block), area);
+        return;
+    }
+    let auto_pct = stats.auto_accepted as f64 / stats.total as f64 * 100.0;
+    let text = format!(
+        "Auto-accept: {} ({:.1}%)  User: {}  Rejected: {}  Unknown: {}",
+        stats.auto_accepted, auto_pct, stats.user_accepted, stats.rejected, stats.unknown,
+    );
+    frame.render_widget(Paragraph::new(text).block(block), area);
+}
+
+fn render_stop_reasons(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Stop Reasons ");
+    if state.stop_reasons.is_empty() {
+        frame.render_widget(Paragraph::new("No data").block(block), area);
+        return;
+    }
+    let total: usize = state.stop_reasons.iter().map(|r| r.count).sum();
+    let lines: Vec<Line> = state
+        .stop_reasons
+        .iter()
+        .filter(|r| r.reason != "(none)")
+        .map(|r| {
+            let pct = if total > 0 {
+                r.count as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            Line::from(format!("{}: {} ({:.1}%)", r.reason, r.count, pct))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_ctx_tool_errs_row(
+    frame: &mut Frame,
+    area: Rect,
+    state: &UsageState,
+    show_ctx: bool,
+    show_tool_errs: bool,
+) {
+    let halves = if show_ctx && show_tool_errs {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
+            .split(area)
+    };
+
+    if show_ctx && show_tool_errs {
+        render_context_split(frame, halves[0], state);
+        render_tool_errors_table(frame, halves[1], state);
+    } else if show_ctx {
+        render_context_split(frame, halves[0], state);
+    } else {
+        render_tool_errors_table(frame, halves[0], state);
+    }
+}
+
+fn render_context_split(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Context Split ");
+    if state.context_split.is_empty() {
+        frame.render_widget(Paragraph::new("No context data").block(block), area);
+        return;
+    }
+    let header = Row::new(vec![
+        Cell::from("Context").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Calls").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Avg ms").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let rows: Vec<Row> = state
+        .context_split
+        .iter()
+        .map(|r| {
+            Row::new(vec![
+                Cell::from(r.context.clone()),
+                Cell::from(r.calls.to_string()),
+                Cell::from(if r.avg_ms > 0.0 {
+                    format!("{}", r.avg_ms.round() as i64)
+                } else {
+                    "—".to_string()
+                }),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(6),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(block);
+    frame.render_widget(table, area);
+}
+
+fn render_tool_errors_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Top Tool Errors ");
+    if state.tool_errors.is_empty() {
+        frame.render_widget(Paragraph::new("No tool errors").block(block), area);
+        return;
+    }
+    let header = Row::new(vec![
+        Cell::from("Tool").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Error").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("N").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let rows: Vec<Row> = state
+        .tool_errors
+        .iter()
+        .map(|r| {
+            Row::new(vec![
+                Cell::from(truncate(&r.tool_name, 16)),
+                Cell::from(truncate(&r.error_message, 40)),
+                Cell::from(r.count.to_string()),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(12),
+            Constraint::Min(20),
+            Constraint::Length(5),
+        ],
+    )
+    .header(header)
+    .block(block);
+    frame.render_widget(table, area);
+}
+
+fn render_hour_of_day(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Activity by Hour of Day (UTC) ");
+    let active: Vec<_> = state
+        .hour_of_day
+        .iter()
+        .filter(|b| b.llm_calls > 0 || b.tool_calls > 0)
+        .collect();
+    if active.is_empty() {
+        frame.render_widget(Paragraph::new("No hourly data").block(block), area);
+        return;
+    }
+    let max_llm = active.iter().map(|b| b.llm_calls).max().unwrap_or(1).max(1);
+    let header = Row::new(vec![
+        Cell::from("Hour").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("LLM").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Bar").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Tools").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let rows: Vec<Row> = active
+        .iter()
+        .map(|b| {
+            let bar_len = (b.llm_calls * 15 / max_llm).max(if b.llm_calls > 0 { 1 } else { 0 });
+            Row::new(vec![
+                Cell::from(format!("{:02}:00", b.hour)),
+                Cell::from(b.llm_calls.to_string()),
+                Cell::from("█".repeat(bar_len)),
+                Cell::from(b.tool_calls.to_string()),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Min(10),
+            Constraint::Length(6),
+        ],
+    )
+    .header(header)
+    .block(block);
+    frame.render_widget(table, area);
 }
 
 #[cfg(test)]
