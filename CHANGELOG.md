@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.55] - 2026-08-10
+
 ### Internal
 
 - Pin all GitHub Actions `uses:` references in `release.yml` to full commit SHAs
