@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.54] - 2026-08-10
+
 ### Internal
 
 - Pin all GitHub Actions `uses:` references to full commit SHAs (supply-chain
