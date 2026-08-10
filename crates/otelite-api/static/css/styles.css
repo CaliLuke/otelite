@@ -3138,6 +3138,27 @@ body {
     gap: 0.4rem;
     min-width: 120px;
 }
+/* Hour-of-day activity bars */
+.hour-of-day-table td { vertical-align: middle; }
+.hour-bar-track {
+    display: inline-block;
+    width: 80px;
+    height: 10px;
+    background: var(--border-color);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.hour-bar-llm {
+    height: 100%;
+    background: var(--link-color);
+    border-radius: 2px;
+}
+.hour-bar-tool {
+    height: 100%;
+    background: #e67e22;
+    border-radius: 2px;
+}
+
 .tool-time-bar-track {
     flex: 1;
     background: var(--border-color, #2a2a38);

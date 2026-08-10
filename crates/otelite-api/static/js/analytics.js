@@ -466,12 +466,14 @@ class AnalyticsView {
         try {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
-            const [costSeries, topSpans, cacheHitRate, retryStats, errorRate] = await Promise.all([
+            const [costSeries, topSpans, cacheHitRate, retryStats, errorRate,
+                   contextTypeSplit] = await Promise.all([
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
                 this.api.getCacheHitRate(params).catch(() => null),
                 this.api.getRetryStats(params).catch(() => null),
                 this.api.getErrorRate(params).catch(() => []),
+                this.api.getContextTypeSplit(params).catch(() => null),
             ]);
 
             const summary = this.lastSummary || { summary: {} };
@@ -499,6 +501,7 @@ class AnalyticsView {
                 this._buildTopNSection(topSpans || [], errorRate || []),
                 this._buildCacheHitRate(cacheHitRate || []),
                 this._buildByModelByProvider(summary),
+                this._buildContextTypeSplit(contextTypeSplit || []),
             ].filter(Boolean).join('');
 
             this._setSectionBody('cost', html);
@@ -577,12 +580,14 @@ class AnalyticsView {
         this._setSectionLoading('reliability');
         try {
             const params = this._baseParams();
-            const [finishReasons, errorRate, errorTypes, truncationRate, modelDrift] = await Promise.all([
+            const [finishReasons, errorRate, errorTypes, truncationRate, modelDrift,
+                   stopReasons] = await Promise.all([
                 this.api.getFinishReasons(params),
                 this.api.getErrorRate(params),
                 this.api.getErrorTypes(params).catch(() => null),
                 this.api.getTruncationRate(params).catch(() => null),
                 this.api.getModelDrift(params).catch(() => null),
+                this.api.getStopReasons(params).catch(() => null),
             ]);
 
             const reasons = Array.isArray(finishReasons) ? finishReasons : [];
@@ -606,6 +611,7 @@ class AnalyticsView {
             const html = [
                 truncCard,
                 this._buildFinishReasons(reasons),
+                this._buildStopReasons(stopReasons || []),
                 this._buildTruncationRate(truncationRate || []),
                 this._buildErrorRate(errorRate || []),
                 this._buildErrorTypes(errorTypes || []),
@@ -623,16 +629,23 @@ class AnalyticsView {
         this._setSectionLoading('behavior');
         try {
             const params = this._baseParams();
-            const [toolUsage, retrievalStats, requestParamProfile, callsSeries] = await Promise.all([
+            const [toolUsage, retrievalStats, requestParamProfile, callsSeries,
+                   toolApprovals, toolErrors, hourOfDay] = await Promise.all([
                 this.api.getToolUsage(params),
                 this.api.getRetrievalStats(params).catch(() => null),
                 this.api.getRequestParamProfile(params).catch(() => null),
                 this.api.getCallsSeries(params).catch(() => null),
+                this.api.getToolApprovals(params).catch(() => null),
+                this.api.getToolErrors(params).catch(() => null),
+                this.api.getHourOfDay(params).catch(() => null),
             ]);
 
             const html = [
                 this._buildCallsChart(callsSeries || []),
+                this._buildHourOfDay(hourOfDay || []),
                 this._buildToolUsage(toolUsage || []),
+                this._buildToolApprovals(toolApprovals),
+                this._buildToolErrors(toolErrors || []),
                 this._buildRetrievalStats(retrievalStats),
                 this._buildRequestParamProfile(requestParamProfile),
             ].filter(Boolean).join('');
@@ -1585,6 +1598,136 @@ class AnalyticsView {
                 </svg>
                 ${axisHtml}
             </div>`;
+    }
+
+    _buildToolApprovals(stats) {
+        if (!stats || !stats.total) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const autoRate = stats.total > 0 ? (stats.auto_accepted / stats.total * 100) : 0;
+        const rejectRate = stats.total > 0 ? (stats.rejected / stats.total * 100) : 0;
+        const gauge = `
+            <div class="usage-summary-cards">
+                <div class="usage-gauge-card">
+                    <div class="usage-card-label">Auto-accept rate</div>
+                    <div class="usage-card-value">${autoRate.toFixed(1)}%</div>
+                    <div class="gauge-bar"><div class="gauge-fill" style="width:${autoRate.toFixed(2)}%"></div></div>
+                    <div class="gauge-hint">${fmt(stats.auto_accepted)} auto · ${fmt(stats.user_accepted)} user · ${fmt(stats.rejected)} rejected · ${fmt(stats.unknown)} unknown</div>
+                </div>
+            </div>`;
+        const topRows = (stats.top_rejected || []).map(e => `
+            <tr>
+                <td>${this._esc(e.tool_name || '—')}</td>
+                <td>${fmt(e.count)}</td>
+                <td class="${rejectRate > 5 ? 'tool-usage-warn' : ''}">${(e.count / stats.total * 100).toFixed(1)}%</td>
+            </tr>`).join('');
+        const topTable = topRows ? `
+            <h4>Top rejected tools</h4>
+            <table class="data-table">
+                <thead><tr><th>Tool</th><th>Rejections</th><th>% of all decisions</th></tr></thead>
+                <tbody>${topRows}</tbody>
+            </table>` : '';
+        return `
+            <h3>Tool approval decisions</h3>
+            ${gauge}
+            ${topTable}`;
+    }
+
+    _buildToolErrors(rows) {
+        if (!rows || !rows.length) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const sorted = [...rows].sort((a, b) => (b.count || 0) - (a.count || 0));
+        const tableRows = sorted.map(r => `
+            <tr>
+                <td>${this._esc(r.tool_name || '—')}</td>
+                <td title="${this._esc(r.error_message || '')}">${this._esc((r.error_message || '').length > 80 ? r.error_message.slice(0, 80) + '…' : (r.error_message || '—'))}</td>
+                <td>${fmt(r.count || 0)}</td>
+            </tr>`).join('');
+        return `
+            <h3>Top tool errors</h3>
+            <p class="table-hint">Failed tool executions grouped by tool and error message (first 120 chars).</p>
+            <table class="data-table">
+                <thead><tr><th>Tool</th><th>Error</th><th>Count</th></tr></thead>
+                <tbody>${tableRows}</tbody>
+            </table>`;
+    }
+
+    _buildHourOfDay(buckets) {
+        if (!Array.isArray(buckets) || !buckets.length) return '';
+        const maxLlm = buckets.reduce((m, b) => Math.max(m, b.llm_calls), 1);
+        const maxTool = buckets.reduce((m, b) => Math.max(m, b.tool_calls), 1);
+        const maxVal = Math.max(maxLlm, maxTool, 1);
+        const rows = buckets.map(b => {
+            const llmW = Math.max(1, Math.round((b.llm_calls / maxVal) * 80));
+            const toolW = Math.max(0, Math.round((b.tool_calls / maxVal) * 80));
+            return `
+                <tr>
+                    <td class="num">${String(b.hour).padStart(2, '0')}:00</td>
+                    <td>
+                        <div class="hour-bar-track">
+                            <div class="hour-bar-llm" style="width:${llmW}px" title="${b.llm_calls} LLM calls"></div>
+                        </div>
+                    </td>
+                    <td class="num">${b.llm_calls > 0 ? b.llm_calls.toLocaleString() : ''}</td>
+                    <td>
+                        <div class="hour-bar-track">
+                            <div class="hour-bar-tool" style="width:${toolW}px" title="${b.tool_calls} tool calls"></div>
+                        </div>
+                    </td>
+                    <td class="num">${b.tool_calls > 0 ? b.tool_calls.toLocaleString() : ''}</td>
+                </tr>`;
+        }).join('');
+        return `
+            <h3>Activity by hour of day (UTC)</h3>
+            <p class="table-hint">Blue = LLM calls · Orange = tool executions. All-time distribution.</p>
+            <table class="data-table hour-of-day-table">
+                <thead><tr>
+                    <th>Hour</th><th>LLM calls</th><th></th><th>Tool calls</th><th></th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+    }
+
+    _buildStopReasons(rows) {
+        // Filter out '(none)' rows where nothing meaningful is set
+        const meaningful = (rows || []).filter(r => r.reason && r.reason !== '(none)');
+        if (!meaningful.length) return '';
+        const total = meaningful.reduce((acc, r) => acc + (r.count || 0), 0);
+        const sorted = [...meaningful].sort((a, b) => (b.count || 0) - (a.count || 0));
+        const barRows = sorted.map(r => {
+            const pct = total > 0 ? (r.count / total * 100) : 0;
+            return `
+                <div class="finish-reason-row">
+                    <div class="finish-reason-name">${this._esc(r.reason || '—')}</div>
+                    <div class="finish-reason-bar"><div class="finish-reason-fill" style="width:${pct.toFixed(2)}%"></div></div>
+                    <div class="finish-reason-count">${Number(r.count).toLocaleString()} (${pct.toFixed(1)}%)</div>
+                </div>`;
+        }).join('');
+        return `
+            <h3>Stop reasons (claude_code)</h3>
+            <p class="table-hint">Claude Code <code>stop_reason</code> attribute — tool_use means the model paused to run a tool; end_turn means the model finished naturally.</p>
+            <div class="finish-reasons-list">${barRows}</div>`;
+    }
+
+    _buildContextTypeSplit(rows) {
+        if (!rows || !rows.length) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const tableRows = rows.map(r => `
+            <tr>
+                <td>${this._esc(r.context || '—')}</td>
+                <td class="num">${fmt(r.calls || 0)}</td>
+                <td class="num">${fmt(r.input_tokens || 0)}</td>
+                <td class="num">${fmt(r.output_tokens || 0)}</td>
+                <td class="num">${r.avg_ms > 0 ? Math.round(r.avg_ms).toLocaleString() + ' ms' : '—'}</td>
+            </tr>`).join('');
+        return `
+            <h3>Usage by request context</h3>
+            <p class="table-hint">Grouped by <code>llm_request.context</code> — e.g. <em>interaction</em> (direct user message) vs <em>sub_agent</em> (background task).</p>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Context</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th><th>Avg latency</th>
+                </tr></thead>
+                <tbody>${tableRows}</tbody>
+            </table>`;
     }
 
     _esc(str) {

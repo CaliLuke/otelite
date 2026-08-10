@@ -3124,4 +3124,174 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].body, "matching log body");
     }
+
+    static SPAN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn next_id() -> String {
+        let n = SPAN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("id-{n}")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_llm_span(
+        conn: &Connection,
+        model: &str,
+        input: i64,
+        output: i64,
+        stop_reason: Option<&str>,
+        context: Option<&str>,
+    ) {
+        let attrs = serde_json::json!({
+            "model": model,
+            "input_tokens": input,
+            "output_tokens": output,
+            "stop_reason": stop_reason,
+            "llm_request.context": context,
+        });
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'claude_code.llm_request', 0, 1000000000, 2000000000, ?, '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), attrs.to_string()],
+        ).unwrap();
+    }
+
+    fn insert_tool_decision(conn: &Connection, decision: &str, source: &str, tool_name: &str) {
+        let attrs = serde_json::json!({
+            "decision": decision,
+            "source": source,
+            "tool_name": tool_name,
+        });
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'claude_code.tool.blocked_on_user', 0, 1000000000, 2000000000, ?, '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), attrs.to_string()],
+        ).unwrap();
+    }
+
+    fn insert_failed_tool(conn: &Connection, tool_name: &str, error: &str) {
+        let attrs = serde_json::json!({
+            "tool_name": tool_name,
+            "success": "false",
+            "error": error,
+        });
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'claude_code.tool.execution', 0, 1000000000, 2000000000, ?, '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), attrs.to_string()],
+        ).unwrap();
+    }
+
+    #[test]
+    fn test_query_tool_approvals_empty() {
+        let conn = setup_test_db();
+        let stats = query_tool_approvals(&conn, None, None).unwrap();
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.auto_accepted, 0);
+        assert_eq!(stats.rejected, 0);
+    }
+
+    #[test]
+    fn test_query_tool_approvals_counts() {
+        let conn = setup_test_db();
+        insert_tool_decision(&conn, "accept", "config", "Bash");
+        insert_tool_decision(&conn, "accept", "config", "Read");
+        insert_tool_decision(&conn, "accept", "user", "Write");
+        insert_tool_decision(&conn, "reject", "user", "Bash");
+
+        let stats = query_tool_approvals(&conn, None, None).unwrap();
+        assert_eq!(stats.total, 4);
+        assert_eq!(stats.auto_accepted, 2); // accept + source=config
+        assert_eq!(stats.user_accepted, 1); // accept + source=user
+        assert_eq!(stats.rejected, 1);
+        assert_eq!(stats.top_rejected.len(), 1);
+        assert_eq!(stats.top_rejected[0].tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_query_stop_reasons_empty() {
+        let conn = setup_test_db();
+        let rows = query_stop_reasons(&conn, None, None).unwrap();
+        // No LLM spans → empty or only (none) bucket
+        assert!(rows.iter().all(|r| r.reason == "(none)" || r.count == 0));
+    }
+
+    #[test]
+    fn test_query_stop_reasons_with_data() {
+        let conn = setup_test_db();
+        insert_llm_span(&conn, "claude-sonnet", 100, 50, Some("tool_use"), None);
+        insert_llm_span(&conn, "claude-sonnet", 200, 80, Some("end_turn"), None);
+        insert_llm_span(&conn, "claude-sonnet", 150, 60, Some("tool_use"), None);
+
+        let rows = query_stop_reasons(&conn, None, None).unwrap();
+        let tool_use = rows
+            .iter()
+            .find(|r| r.reason == "tool_use")
+            .map(|r| r.count);
+        let end_turn = rows
+            .iter()
+            .find(|r| r.reason == "end_turn")
+            .map(|r| r.count);
+        assert_eq!(tool_use, Some(2));
+        assert_eq!(end_turn, Some(1));
+    }
+
+    #[test]
+    fn test_query_context_type_split_empty() {
+        let conn = setup_test_db();
+        let rows = query_context_type_split(&conn, None, None).unwrap();
+        // Empty DB → either empty or single (unknown) row
+        assert!(rows.is_empty() || rows.iter().all(|r| r.context == "(unknown)"));
+    }
+
+    #[test]
+    fn test_query_context_type_split_groups_by_context() {
+        let conn = setup_test_db();
+        insert_llm_span(&conn, "model-a", 100, 50, None, Some("interaction"));
+        insert_llm_span(&conn, "model-b", 200, 80, None, Some("interaction"));
+        insert_llm_span(&conn, "model-c", 150, 60, None, Some("sub_agent"));
+
+        let rows = query_context_type_split(&conn, None, None).unwrap();
+        let interaction = rows.iter().find(|r| r.context == "interaction");
+        let sub_agent = rows.iter().find(|r| r.context == "sub_agent");
+        assert!(interaction.is_some(), "interaction row missing");
+        assert_eq!(interaction.unwrap().calls, 2);
+        assert!(sub_agent.is_some(), "sub_agent row missing");
+        assert_eq!(sub_agent.unwrap().calls, 1);
+    }
+
+    #[test]
+    fn test_query_tool_errors_empty() {
+        let conn = setup_test_db();
+        let rows = query_tool_errors(&conn, None, None, 10).unwrap();
+        assert_eq!(rows.len(), 0);
+    }
+
+    #[test]
+    fn test_query_tool_errors_with_data() {
+        let conn = setup_test_db();
+        insert_failed_tool(&conn, "Bash", "Shell command failed");
+        insert_failed_tool(&conn, "Bash", "Shell command failed");
+        insert_failed_tool(&conn, "Read", "File not found");
+
+        let rows = query_tool_errors(&conn, None, None, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tool_name, "Bash");
+        assert_eq!(rows[0].count, 2);
+        assert_eq!(rows[1].tool_name, "Read");
+    }
+
+    #[test]
+    fn test_query_hour_of_day_returns_24_buckets() {
+        let conn = setup_test_db();
+        let rows = query_hour_of_day(&conn, None, None).unwrap();
+        assert_eq!(rows.len(), 24);
+        assert_eq!(rows[0].hour, 0);
+        assert_eq!(rows[23].hour, 23);
+    }
+
+    #[test]
+    fn test_query_hour_of_day_empty_db_all_zero() {
+        let conn = setup_test_db();
+        let rows = query_hour_of_day(&conn, None, None).unwrap();
+        assert!(rows.iter().all(|r| r.llm_calls == 0 && r.tool_calls == 0));
+    }
 }
