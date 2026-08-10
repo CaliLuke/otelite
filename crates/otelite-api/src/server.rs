@@ -108,6 +108,12 @@ use utoipa::OpenApi;
             crate::api::genai::RetrievalStatsQuery,
             crate::api::genai::PricingMetadata,
             otelite_core::agent_frameworks::AgentFrameworkRecognizer,
+            otelite_core::api::ToolApprovalStats,
+            otelite_core::api::ToolApprovalEntry,
+            otelite_core::api::StopReasonCount,
+            otelite_core::api::ContextTypeSplit,
+            otelite_core::api::ToolErrorEntry,
+            otelite_core::api::HourOfDayBucket,
         )
     ),
     tags(

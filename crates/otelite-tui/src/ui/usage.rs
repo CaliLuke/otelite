@@ -893,7 +893,12 @@ fn render_stop_reasons(frame: &mut Frame, area: Rect, state: &UsageState) {
         frame.render_widget(Paragraph::new("No data").block(block), area);
         return;
     }
-    let total: usize = state.stop_reasons.iter().map(|r| r.count).sum();
+    let total: usize = state
+        .stop_reasons
+        .iter()
+        .filter(|r| r.reason != "(none)")
+        .map(|r| r.count)
+        .sum();
     let lines: Vec<Line> = state
         .stop_reasons
         .iter()

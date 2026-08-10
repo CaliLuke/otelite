@@ -1120,4 +1120,94 @@ mod tests {
         assert_eq!(buckets[23].hour, 23);
         assert_eq!(buckets[23].llm_calls, 46);
     }
+
+    #[tokio::test]
+    async fn test_fetch_tool_approvals_server_error() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/tool_approvals")
+            .with_status(500)
+            .create_async()
+            .await;
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_tool_approvals(vec![]).await;
+        mock.assert_async().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ApiError(msg) => assert!(msg.contains("500")),
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_stop_reasons_server_error() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/stop_reasons")
+            .with_status(500)
+            .create_async()
+            .await;
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_stop_reasons(vec![]).await;
+        mock.assert_async().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ApiError(msg) => assert!(msg.contains("500")),
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_context_type_split_server_error() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/context_type_split")
+            .with_status(500)
+            .create_async()
+            .await;
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_context_type_split(vec![]).await;
+        mock.assert_async().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ApiError(msg) => assert!(msg.contains("500")),
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_tool_errors_server_error() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/tool_errors")
+            .with_status(500)
+            .create_async()
+            .await;
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_tool_errors(vec![]).await;
+        mock.assert_async().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ApiError(msg) => assert!(msg.contains("500")),
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_hour_of_day_server_error() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/hour_of_day")
+            .with_status(500)
+            .create_async()
+            .await;
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_hour_of_day(vec![]).await;
+        mock.assert_async().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::ApiError(msg) => assert!(msg.contains("500")),
+            _ => panic!("Expected ApiError"),
+        }
+    }
 }

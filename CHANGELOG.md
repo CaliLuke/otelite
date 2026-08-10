@@ -15,6 +15,21 @@ have to work around), not implementation detail.
 
 ### Added
 
+- **CLI `otelite usage`: five new flags for Claude Code analytics.**
+  `--tool-approvals` shows the auto-accept / user / rejected decision breakdown.
+  `--stop-reasons` shows the `stop_reason` distribution (tool_use vs end_turn).
+  `--context-split` shows token usage grouped by `llm_request.context`
+  (interaction vs sub_agent). `--tool-errors [N]` lists the top N failed tool
+  executions by error message. `--hour-of-day` shows an activity-by-hour table
+  (UTC, 0–23, LLM calls + tool calls).
+
+- **Dashboard: five new analytics panels.** The Behavior section gains Tool
+  Approval Decisions (auto-accept rate gauge + top rejected tools), Top Tool
+  Errors table, and Activity by Hour of Day bar chart. The Reliability section
+  gains a Stop Reasons bar chart (claude_code `stop_reason` attribute). The
+  Cost section gains a Usage by Request Context table grouped by
+  `llm_request.context`. All panels degrade gracefully when no data is present.
+
 - **TUI Usage view: tool approvals, stop reasons, context type split, tool
   errors, and hour-of-day activity panels.** The Usage tab now shows five new
   panels: approval rate breakdown (auto/manual/rejected), stop reason
@@ -22,6 +37,15 @@ have to work around), not implementation detail.
   per-tool error counts, and an activity-by-hour-of-day table. Panels are shown
   only when data is available; all fetches are best-effort so the view degrades
   gracefully when the server is not running these endpoints.
+
+### Fixed
+
+- **`query_hour_of_day` time-range filter now uses `end_time` column** (was
+  accidentally using `start_time` for the upper-bound filter, causing wrong
+  counts when a time window was specified).
+- **`query_tool_errors` now matches boolean `false`** as well as the string
+  `"false"` for the `success` attribute, so spans instrumented with a JSON
+  boolean are included.
 
 ## [0.1.53] - 2026-08-10
 

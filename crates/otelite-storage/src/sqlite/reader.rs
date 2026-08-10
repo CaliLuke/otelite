@@ -2885,7 +2885,7 @@ pub fn query_hour_of_day(
         params.push(Box::new(s));
     }
     if let Some(e) = end_time {
-        time_filter.push_str(" AND start_time <= ?");
+        time_filter.push_str(" AND end_time <= ?");
         params.push(Box::new(e));
     }
 
@@ -3202,6 +3202,7 @@ mod tests {
         assert_eq!(stats.auto_accepted, 2); // accept + source=config
         assert_eq!(stats.user_accepted, 1); // accept + source=user
         assert_eq!(stats.rejected, 1);
+        assert_eq!(stats.unknown, 0);
         assert_eq!(stats.top_rejected.len(), 1);
         assert_eq!(stats.top_rejected[0].tool_name, "Bash");
     }
@@ -3210,8 +3211,8 @@ mod tests {
     fn test_query_stop_reasons_empty() {
         let conn = setup_test_db();
         let rows = query_stop_reasons(&conn, None, None).unwrap();
-        // No LLM spans → empty or only (none) bucket
-        assert!(rows.iter().all(|r| r.reason == "(none)" || r.count == 0));
+        // No LLM spans → empty vec (no stop_reason attribute, no groupable rows)
+        assert_eq!(rows.len(), 0);
     }
 
     #[test]
@@ -3238,8 +3239,8 @@ mod tests {
     fn test_query_context_type_split_empty() {
         let conn = setup_test_db();
         let rows = query_context_type_split(&conn, None, None).unwrap();
-        // Empty DB → either empty or single (unknown) row
-        assert!(rows.is_empty() || rows.iter().all(|r| r.context == "(unknown)"));
+        // Empty DB → no rows (nothing to group by context)
+        assert!(rows.is_empty());
     }
 
     #[test]
@@ -3277,6 +3278,7 @@ mod tests {
         assert_eq!(rows[0].tool_name, "Bash");
         assert_eq!(rows[0].count, 2);
         assert_eq!(rows[1].tool_name, "Read");
+        assert_eq!(rows[1].count, 1);
     }
 
     #[test]
@@ -3293,5 +3295,38 @@ mod tests {
         let conn = setup_test_db();
         let rows = query_hour_of_day(&conn, None, None).unwrap();
         assert!(rows.iter().all(|r| r.llm_calls == 0 && r.tool_calls == 0));
+    }
+
+    #[test]
+    fn test_query_hour_of_day_data_driven() {
+        let conn = setup_test_db();
+        // Unix timestamp for 2024-01-01 14:00:00 UTC in nanoseconds → hour 14
+        // 1704117600 seconds * 1_000_000_000 ns/s
+        let ts_ns: i64 = 1_704_117_600_000_000_000;
+        let attrs = serde_json::json!({"model": "test", "input_tokens": 10, "output_tokens": 5});
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'claude_code.llm_request', 0, ?, ?, ?, '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), ts_ns, ts_ns + 1_000_000_000, attrs.to_string()],
+        ).unwrap();
+        // Insert a tool execution at the same hour
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'claude_code.tool.execution', 0, ?, ?, '{}', '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), ts_ns, ts_ns + 500_000_000],
+        ).unwrap();
+
+        let rows = query_hour_of_day(&conn, None, None).unwrap();
+        assert_eq!(rows.len(), 24);
+        assert_eq!(rows[14].hour, 14);
+        assert_eq!(rows[14].llm_calls, 1, "hour 14 should have 1 LLM call");
+        assert_eq!(rows[14].tool_calls, 1, "hour 14 should have 1 tool call");
+        // All other hours should be zero
+        for (i, b) in rows.iter().enumerate() {
+            if i != 14 {
+                assert_eq!(b.llm_calls, 0, "hour {i} should have 0 LLM calls");
+                assert_eq!(b.tool_calls, 0, "hour {i} should have 0 tool calls");
+            }
+        }
     }
 }
