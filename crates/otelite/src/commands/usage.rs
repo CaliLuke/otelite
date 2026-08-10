@@ -96,6 +96,26 @@ pub struct UsageCommand {
     /// Show latency broken down by input-token context size bin (and model)
     #[arg(long)]
     pub latency_context: bool,
+
+    /// Show tool approval/rejection decision summary (Claude Code)
+    #[arg(long)]
+    pub tool_approvals: bool,
+
+    /// Show Claude Code stop_reason distribution (tool_use / end_turn / …)
+    #[arg(long)]
+    pub stop_reasons: bool,
+
+    /// Show token usage grouped by llm_request.context (interaction / sub_agent / …)
+    #[arg(long)]
+    pub context_split: bool,
+
+    /// Show top tool errors from failed tool executions (Claude Code)
+    #[arg(long, value_name = "N", default_missing_value = "20")]
+    pub tool_errors: Option<usize>,
+
+    /// Show hour-of-day activity distribution (0–23 UTC, LLM + tool calls)
+    #[arg(long)]
+    pub hour_of_day: bool,
 }
 
 // ── serialisable output types (used for --format json) ───────────────────────
@@ -159,6 +179,16 @@ struct UsageOutput {
     latency_series: Option<Vec<otelite_core::api::LatencySeriesPoint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_context: Option<Vec<otelite_core::api::LatencyByContextBin>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_approvals: Option<otelite_core::api::ToolApprovalStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reasons: Option<Vec<otelite_core::api::StopReasonCount>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_split: Option<Vec<otelite_core::api::ContextTypeSplit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_errors: Option<Vec<otelite_core::api::ToolErrorEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hour_of_day: Option<Vec<otelite_core::api::HourOfDayBucket>>,
 }
 
 // ── pricing fetch ─────────────────────────────────────────────────────────────
@@ -453,6 +483,73 @@ impl UsageCommand {
                 None
             };
 
+        // --tool-approvals
+        let tool_approvals: Option<otelite_core::api::ToolApprovalStats> = if self.tool_approvals {
+            Some(
+                storage
+                    .query_tool_approvals(Some(start_time), Some(end_time))
+                    .await
+                    .map_err(|e| {
+                        Error::ApiError(format!("Failed to query tool approvals: {}", e))
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        // --stop-reasons
+        let stop_reasons: Option<Vec<otelite_core::api::StopReasonCount>> = if self.stop_reasons {
+            Some(
+                storage
+                    .query_stop_reasons(Some(start_time), Some(end_time))
+                    .await
+                    .map_err(|e| Error::ApiError(format!("Failed to query stop reasons: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
+        // --context-split
+        let context_split: Option<Vec<otelite_core::api::ContextTypeSplit>> = if self.context_split
+        {
+            Some(
+                storage
+                    .query_context_type_split(Some(start_time), Some(end_time))
+                    .await
+                    .map_err(|e| {
+                        Error::ApiError(format!("Failed to query context split: {}", e))
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        // --tool-errors
+        let tool_errors: Option<Vec<otelite_core::api::ToolErrorEntry>> = if let Some(n) =
+            self.tool_errors
+        {
+            Some(
+                storage
+                    .query_tool_errors(Some(start_time), Some(end_time), n)
+                    .await
+                    .map_err(|e| Error::ApiError(format!("Failed to query tool errors: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
+        // --hour-of-day
+        let hour_of_day: Option<Vec<otelite_core::api::HourOfDayBucket>> = if self.hour_of_day {
+            Some(
+                storage
+                    .query_hour_of_day(Some(start_time), Some(end_time))
+                    .await
+                    .map_err(|e| Error::ApiError(format!("Failed to query hour of day: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
         // --by-session
         let by_session: Option<Vec<SessionRow>> = if self.by_session {
             let spans = storage
@@ -519,6 +616,11 @@ impl UsageCommand {
                     model_drift,
                     latency_series,
                     latency_context,
+                    tool_approvals,
+                    stop_reasons,
+                    context_split,
+                    tool_errors,
+                    hour_of_day,
                 };
                 let json = if matches!(format, OutputFormat::JsonCompact) {
                     serde_json::to_string(&output)
@@ -607,6 +709,31 @@ impl UsageCommand {
 
                 if let Some(ref bins) = latency_context {
                     display_latency_context(bins);
+                    println!();
+                }
+
+                if let Some(ref stats) = tool_approvals {
+                    display_tool_approvals(stats);
+                    println!();
+                }
+
+                if let Some(ref rows) = stop_reasons {
+                    display_stop_reasons(rows);
+                    println!();
+                }
+
+                if let Some(ref rows) = context_split {
+                    display_context_split(rows);
+                    println!();
+                }
+
+                if let Some(ref rows) = tool_errors {
+                    display_tool_errors(rows);
+                    println!();
+                }
+
+                if let Some(ref buckets) = hour_of_day {
+                    display_hour_of_day(buckets);
                     println!();
                 }
 
@@ -1298,6 +1425,181 @@ fn display_model_drift(rows: &[otelite_core::api::ModelDriftPair]) {
     }
 
     println!("Model Drift — provider served a different model than requested:");
+    println!("{}", table);
+}
+
+fn display_tool_approvals(stats: &otelite_core::api::ToolApprovalStats) {
+    let total = stats.total;
+    if total == 0 {
+        println!("Tool Approvals: no data");
+        return;
+    }
+    let auto_pct = stats.auto_accepted as f64 / total as f64 * 100.0;
+    let reject_pct = stats.rejected as f64 / total as f64 * 100.0;
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("Decision").fg(Color::Cyan),
+        Cell::new("Count").fg(Color::Cyan),
+        Cell::new("Rate").fg(Color::Cyan),
+    ]);
+    table.add_row(vec![
+        "Auto-accept (config)",
+        &stats.auto_accepted.to_string(),
+        &format!("{:.1}%", auto_pct),
+    ]);
+    table.add_row(vec![
+        "User-accept",
+        &stats.user_accepted.to_string(),
+        &format!("{:.1}%", stats.user_accepted as f64 / total as f64 * 100.0),
+    ]);
+    table.add_row(vec![
+        "Rejected",
+        &stats.rejected.to_string(),
+        &format!("{:.1}%", reject_pct),
+    ]);
+    table.add_row(vec![
+        "Unknown",
+        &stats.unknown.to_string(),
+        &format!("{:.1}%", stats.unknown as f64 / total as f64 * 100.0),
+    ]);
+    println!("Tool Approval Decisions ({} total):", total);
+    println!("{}", table);
+
+    if !stats.top_rejected.is_empty() {
+        let mut t2 = Table::new();
+        t2.load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+        t2.set_header(vec![
+            Cell::new("Tool").fg(Color::Cyan),
+            Cell::new("Rejections").fg(Color::Cyan),
+        ]);
+        for e in &stats.top_rejected {
+            t2.add_row(vec![&e.tool_name, &e.count.to_string()]);
+        }
+        println!("Top Rejected Tools:");
+        println!("{}", t2);
+    }
+}
+
+fn display_stop_reasons(rows: &[otelite_core::api::StopReasonCount]) {
+    if rows.is_empty() {
+        println!("Stop Reasons: no data");
+        return;
+    }
+    let total: usize = rows.iter().map(|r| r.count).sum();
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("Reason").fg(Color::Cyan),
+        Cell::new("Count").fg(Color::Cyan),
+        Cell::new("%").fg(Color::Cyan),
+    ]);
+    for r in rows {
+        let pct = if total > 0 {
+            r.count as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        table.add_row(vec![
+            r.reason.as_str(),
+            &r.count.to_string(),
+            &format!("{:.1}%", pct),
+        ]);
+    }
+    println!("Stop Reasons:");
+    println!("{}", table);
+}
+
+fn display_context_split(rows: &[otelite_core::api::ContextTypeSplit]) {
+    if rows.is_empty() {
+        println!("Context split: no data");
+        return;
+    }
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("Context").fg(Color::Cyan),
+        Cell::new("Calls").fg(Color::Cyan),
+        Cell::new("Input tokens").fg(Color::Cyan),
+        Cell::new("Output tokens").fg(Color::Cyan),
+        Cell::new("Avg latency").fg(Color::Cyan),
+    ]);
+    for r in rows {
+        let avg = if r.avg_ms > 0.0 {
+            format!("{} ms", r.avg_ms.round() as i64)
+        } else {
+            "—".to_string()
+        };
+        table.add_row(vec![
+            r.context.as_str(),
+            &r.calls.to_string(),
+            &format_number(r.input_tokens),
+            &format_number(r.output_tokens),
+            &avg,
+        ]);
+    }
+    println!("Usage by Request Context (llm_request.context):");
+    println!("{}", table);
+}
+
+fn display_tool_errors(rows: &[otelite_core::api::ToolErrorEntry]) {
+    if rows.is_empty() {
+        println!("Tool Errors: none");
+        return;
+    }
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("Tool").fg(Color::Cyan),
+        Cell::new("Error (truncated)").fg(Color::Cyan),
+        Cell::new("Count").fg(Color::Cyan),
+    ]);
+    for r in rows {
+        let msg = truncate(&r.error_message, 60);
+        table.add_row(vec![r.tool_name.as_str(), &msg, &r.count.to_string()]);
+    }
+    println!("Top Tool Errors:");
+    println!("{}", table);
+}
+
+fn display_hour_of_day(buckets: &[otelite_core::api::HourOfDayBucket]) {
+    let max_llm = buckets
+        .iter()
+        .map(|b| b.llm_calls)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("Hour (UTC)").fg(Color::Cyan),
+        Cell::new("LLM calls").fg(Color::Cyan),
+        Cell::new("Bar").fg(Color::Cyan),
+        Cell::new("Tool calls").fg(Color::Cyan),
+    ]);
+    for b in buckets {
+        let bar_len = (b.llm_calls * 20 / max_llm).max(if b.llm_calls > 0 { 1 } else { 0 });
+        let bar = "█".repeat(bar_len);
+        table.add_row(vec![
+            &format!("{:02}:00", b.hour),
+            &b.llm_calls.to_string(),
+            &bar,
+            &b.tool_calls.to_string(),
+        ]);
+    }
+    println!("Activity by Hour of Day:");
     println!("{}", table);
 }
 
