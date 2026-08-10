@@ -11,6 +11,16 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Model Mix panel and all GenAI analytics now show Claude Code data.** Claude
+  Code spans (`claude_code.llm_request`) use flat `model`/`input_tokens` attributes
+  instead of the standard `gen_ai.*` markers. The LLM span guard now includes a
+  span-name prefix match so every analytics query — Overview Model Mix, Cost,
+  Latency, Reliability, Behavior — picks up Claude Code telemetry correctly.
+  Add any vendor-specific span name prefix to `VENDOR_SPAN_NAME_PREFIXES` in
+  `semconv.rs` to support future non-standard instrumentations without touching SQL.
+
 ## [0.1.52] - 2026-07-21
 
 ### Fixed

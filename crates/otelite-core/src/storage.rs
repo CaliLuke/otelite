@@ -14,6 +14,7 @@ use crate::api::{
     RetrievalStats, RetryStats, SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
     TopSpanSort, TruncationRateByModel,
 };
+// New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
 use crate::telemetry::{LogRecord, Metric, Span};
@@ -339,4 +340,40 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<Vec<ModelDriftPair>>;
+
+    /// Approval/rejection summary for tool gating events.
+    async fn query_tool_approvals(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<crate::api::ToolApprovalStats>;
+
+    /// Distribution of stop_reason values across LLM spans.
+    async fn query_stop_reasons(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<crate::api::StopReasonCount>>;
+
+    /// Token usage broken down by llm_request.context type.
+    async fn query_context_type_split(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<crate::api::ContextTypeSplit>>;
+
+    /// Top error messages from failed tool executions.
+    async fn query_tool_errors(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<crate::api::ToolErrorEntry>>;
+
+    /// Hour-of-day activity buckets (UTC).
+    async fn query_hour_of_day(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<crate::api::HourOfDayBucket>>;
 }

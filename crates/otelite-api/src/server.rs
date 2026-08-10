@@ -255,6 +255,11 @@ impl DashboardServer {
             .route("/api/genai/latency_by_context", get(crate::api::genai::get_latency_by_context))
             .route("/api/genai/error_types", get(crate::api::genai::get_error_types))
             .route("/api/genai/model_drift", get(crate::api::genai::get_model_drift))
+            .route("/api/genai/tool_approvals", get(crate::api::genai::get_tool_approvals))
+            .route("/api/genai/stop_reasons", get(crate::api::genai::get_stop_reasons))
+            .route("/api/genai/context_type_split", get(crate::api::genai::get_context_type_split))
+            .route("/api/genai/tool_errors", get(crate::api::genai::get_tool_errors))
+            .route("/api/genai/hour_of_day", get(crate::api::genai::get_hour_of_day))
             // API routes - Sessions
             .route("/api/sessions", get(crate::api::sessions::list_sessions))
             .route("/api/sessions/{session_id}/diagnose", get(crate::api::sessions::get_session_diagnose))

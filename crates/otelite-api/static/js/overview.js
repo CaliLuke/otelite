@@ -155,15 +155,15 @@ class OverviewView {
         try {
             const params = this._windowParams();
             const resp = await this.api.getTokenUsage(params);
-            const rows = (resp.rows || resp.usage || resp || []);
-            const list = Array.isArray(rows) ? rows : [];
+            // /api/genai/usage returns { summary, by_model, by_system }
+            const list = Array.isArray(resp.by_model) ? resp.by_model : [];
             if (list.length === 0) {
                 this._setBody('models', '<div class="overview-empty">No GenAI activity yet.</div>');
                 return;
             }
             const totals = list.map(r => ({
-                model: r.model || r.gen_ai_request_model || 'unknown',
-                count: r.request_count || r.requests || r.count || 0,
+                model: r.model || 'unknown',
+                count: r.requests || 0,
             })).filter(r => r.count > 0);
             totals.sort((a, b) => b.count - a.count);
             const max = totals[0]?.count || 1;
@@ -254,10 +254,12 @@ class OverviewView {
         if (!strip) return;
         try {
             const params = this._windowParams();
-            const [topSpans, toolUsage, latencyStats] = await Promise.all([
+            const [topSpans, toolUsage, latencyStats, finishReasons, modelDrift] = await Promise.all([
                 this.api.getTopSpans({ ...params, limit: 5, sort_by: 'duration' }).catch(() => []),
                 this.api.getToolUsage({ ...params, limit: 30 }).catch(() => []),
                 this.api.getLatencyStats(params).catch(() => []),
+                this.api.getFinishReasons(params).catch(() => []),
+                this.api.getModelDrift(params).catch(() => []),
             ]);
 
             const alerts = [];
@@ -321,6 +323,35 @@ class OverviewView {
                     });
                     break; // one message is enough
                 }
+            }
+
+            // 5. Truncated responses — any finish_reason=max_tokens is actionable.
+            const truncCount = (finishReasons || [])
+                .filter(r => r.reason === 'max_tokens' || r.reason === 'length')
+                .reduce((sum, r) => sum + (r.count || 0), 0);
+            if (truncCount > 0) {
+                alerts.push({
+                    level: 'warn',
+                    icon: '✂',
+                    text: `${truncCount} response${truncCount > 1 ? 's' : ''} truncated (finish_reason=max_tokens) — outputs cut short`,
+                    action: () => window.app.switchView('analytics'),
+                    actionLabel: 'Reliability →',
+                });
+            }
+
+            // 6. Silent model rerouting — provider returned a different model than requested.
+            const drifted = (modelDrift || []).filter(d => d.differs);
+            if (drifted.length > 0) {
+                const example = drifted[0];
+                const req = String(example.request_model || '?').replace(/^.*\//, '');
+                const resp = String(example.response_model || '?').replace(/^.*\//, '');
+                alerts.push({
+                    level: 'warn',
+                    icon: '🔀',
+                    text: `Model drift: ${drifted.length} request→response pair${drifted.length > 1 ? 's' : ''} rerouted (e.g. ${req} → ${resp})`,
+                    action: () => window.app.switchView('analytics'),
+                    actionLabel: 'Reliability →',
+                });
             }
 
             if (alerts.length === 0) {

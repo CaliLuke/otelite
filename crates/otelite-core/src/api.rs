@@ -967,3 +967,69 @@ pub struct SessionListResponse {
     pub sessions: Vec<SessionSummary>,
     pub total: usize,
 }
+
+/// Summary counts for tool approval events (claude_code.tool.blocked_on_user spans).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ToolApprovalStats {
+    /// Approved automatically by config (decision = "accept", source = "config").
+    pub auto_accepted: usize,
+    /// Approved interactively by the user.
+    pub user_accepted: usize,
+    /// Rejected by the user.
+    pub rejected: usize,
+    /// Decision unknown / yolo mode (no approval prompt was shown).
+    pub unknown: usize,
+    /// Total approval events.
+    pub total: usize,
+    /// Top tools that were explicitly rejected (tool_name + count).
+    pub top_rejected: Vec<ToolApprovalEntry>,
+}
+
+/// A single tool name with a count, used in approval stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ToolApprovalEntry {
+    pub tool_name: String,
+    pub count: usize,
+}
+
+/// Distribution of LLM request stop / finish reasons (claude_code `stop_reason` field).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct StopReasonCount {
+    /// The stop_reason value, e.g. "tool_use", "end_turn", "max_tokens".
+    pub reason: String,
+    pub count: usize,
+}
+
+/// LLM token usage broken down by request context type (e.g. "interaction" vs "sub-agent").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ContextTypeSplit {
+    /// Value of the `llm_request.context` attribute, or "(unknown)" when absent.
+    pub context: String,
+    pub calls: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub avg_ms: f64,
+}
+
+/// Aggregated error message for a tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ToolErrorEntry {
+    pub tool_name: String,
+    pub error_message: String,
+    pub count: usize,
+}
+
+/// Hour-of-day usage bucket (0–23) with call counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct HourOfDayBucket {
+    /// Hour of day in UTC, 0–23.
+    pub hour: u8,
+    pub llm_calls: usize,
+    pub tool_calls: usize,
+}

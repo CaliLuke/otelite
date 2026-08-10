@@ -2661,44 +2661,47 @@ body {
     border: 1px solid var(--border-color);
     border-left: 3px solid var(--accent-color);
     border-radius: 4px;
-    padding: 0.5rem 0.75rem;
+    padding: 0.35rem 0.75rem;
 }
 .tips-panel summary {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     font-weight: 600;
     cursor: pointer;
     user-select: none;
     color: var(--accent-color);
     list-style: none;
-}
-.tips-panel summary::before {
-    content: "💡 ";
+    padding: 0.15rem 0;
 }
 .tips-panel summary::marker, .tips-panel summary::-webkit-details-marker {
     display: none;
 }
-.tips-panel[open] summary::after {
-    content: " (click to hide)";
-    font-weight: 400;
-    color: var(--text-secondary);
-    font-size: 0.75rem;
-}
 .tips-panel-body {
-    margin-top: 0.5rem;
-    font-size: 0.85rem;
-    color: var(--text-primary);
-    line-height: 1.5;
-}
-.tips-panel-body ul { margin: 0; padding-left: 1.25rem; }
-.tips-panel-body li { margin: 0.2rem 0; }
-.tips-panel-body h4 {
+    margin-top: 0.4rem;
+    padding-bottom: 0.4rem;
     font-size: 0.8rem;
-    color: var(--text-secondary);
+    color: var(--text-primary);
+    line-height: 1.45;
+}
+.tips-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 1.5rem;
+}
+@media (max-width: 640px) {
+    .tips-grid { grid-template-columns: 1fr; }
+}
+.tips-col strong {
+    display: block;
+    font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    margin-top: 0.5rem;
-    margin-bottom: 0.25rem;
+    color: var(--text-secondary);
+    margin-top: 0.4rem;
+    margin-bottom: 0.15rem;
 }
+.tips-col strong:first-child { margin-top: 0; }
+.tips-panel-body ul { margin: 0 0 0.25rem; padding-left: 1.1rem; }
+.tips-panel-body li { margin: 0.1rem 0; }
 
 /* Pricing disclaimer shown at top of the Usage view */
 .pricing-disclaimer {
@@ -2778,6 +2781,23 @@ body {
 .latency-chart-bar-p95:hover { opacity: 0.5; }
 .latency-chart-bar-avg { fill: var(--accent-color, #3b82f6); }
 .latency-chart-bar-avg:hover { fill: #8b5cf6; }
+/* TTFT overlay line — orange, clearly separate from the blue bars */
+.latency-ttft-line {
+    stroke: #f97316;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+}
+/* Small coloured dot in the chart heading that identifies the TTFT line */
+.latency-ttft-legend {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 400;
+    color: #f97316;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+}
 
 /* Overview landing page */
 .overview-grid {

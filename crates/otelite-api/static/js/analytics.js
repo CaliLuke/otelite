@@ -15,6 +15,21 @@ function formatTs(date) {
            `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
 }
 
+/**
+ * Build an x-axis label for a chart bucket timestamp (nanoseconds).
+ * When the data spans more than one calendar day, prepend the date so the
+ * axis is readable for multi-day windows with sub-day buckets.
+ * @param {number} tsNs   - bucket timestamp in nanoseconds
+ * @param {boolean} multiDay - true when the chart's data crosses a day boundary
+ */
+function chartAxisLabel(tsNs, multiDay) {
+    const d = new Date(tsNs / 1_000_000);
+    const p = n => String(n).padStart(2, '0');
+    const time = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    if (multiDay) return `${p(d.getMonth()+1)}-${p(d.getDate())} ${time}`;
+    return time;
+}
+
 class AnalyticsView {
     constructor(apiClient) {
         this.api = apiClient;
@@ -108,35 +123,41 @@ class AnalyticsView {
     }
 
     _renderTipsPanel() {
-        const dismissed = localStorage.getItem('otelite_tips_dismissed_analytics') === 'true';
-        const openAttr = dismissed ? '' : ' open';
+        // Collapsed by default; user must explicitly open it
+        const shown = localStorage.getItem('otelite_tips_shown_analytics') === 'true';
+        const openAttr = shown ? ' open' : '';
         return `
             <details class="tips-panel" id="tips-panel-analytics"${openAttr}>
-                <summary>Tips</summary>
+                <summary>💡 Tips &amp; shortcuts</summary>
                 <div class="tips-panel-body">
-                    <h4>Layout</h4>
-                    <ul>
-                        <li>Sections are collapsed by default — expand only what you need; charts fetch lazily on first open</li>
-                        <li>Top-spans table is under <strong>Cost</strong> — use the sort dropdown to switch between most expensive / slowest / truncated / etc.</li>
-                    </ul>
-                    <h4>Widget tips</h4>
-                    <ul>
-                        <li>Cost is estimated from a Claude 4.x pricing table — unknown models show "—"</li>
-                        <li>Cost-over-time bucket auto-scales with your time window (1m for ≤1h up to 1d for ≥7d)</li>
-                        <li>Click session / prompt / trace cells in the Top expensive calls table to drill in</li>
-                        <li>Truncation gauge turns red if any response ended with <code>finish_reason=max_tokens</code></li>
-                        <li>Tool rows go amber if success rate &lt; 90%</li>
-                    </ul>
-                    <h4>Debugging recipes</h4>
-                    <ul>
-                        <li>What did this prompt cost? — Logs → click any <code>prompt.id</code> → summary banner</li>
-                        <li>All activity for a session — click <code>session.id</code> anywhere</li>
-                        <li>Any truncation? — Reliability → finish_reasons → <code>max_tokens</code> bar</li>
-                        <li>Top expensive calls — Cost → top calls table</li>
-                        <li>Which tool is failing? — Behavior → tool usage table → success rate column</li>
-                        <li>Is Opus slower than Sonnet? — Latency → latency-by-model</li>
-                        <li>How much is cache saving? — Cost → cache hit rate</li>
-                    </ul>
+                    <div class="tips-grid">
+                        <div class="tips-col">
+                            <strong>Layout</strong>
+                            <ul>
+                                <li>Sections lazy-load on first expand</li>
+                                <li>Top-spans table is under <strong>Cost</strong> — sort dropdown switches view</li>
+                            </ul>
+                            <strong>Widgets</strong>
+                            <ul>
+                                <li>Cost from LiteLLM pricing — unknown models show "—"</li>
+                                <li>Bucket auto-scales with time window</li>
+                                <li>Truncation gauge goes red on <code>finish_reason=max_tokens</code></li>
+                                <li>Tool rows amber if success rate &lt; 90%</li>
+                            </ul>
+                        </div>
+                        <div class="tips-col">
+                            <strong>Recipes</strong>
+                            <ul>
+                                <li>Prompt cost → Logs → click <code>prompt.id</code></li>
+                                <li>Session history → click <code>session.id</code> anywhere</li>
+                                <li>Truncation? → Reliability → finish_reasons</li>
+                                <li>Most expensive → Cost → top calls table</li>
+                                <li>Failing tool? → Behavior → tool usage → success rate</li>
+                                <li>Opus vs Sonnet speed → Latency → latency-by-model</li>
+                                <li>Cache savings → Cost → cache hit rate</li>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
             </details>
         `;
@@ -146,10 +167,10 @@ class AnalyticsView {
         const panel = document.getElementById('tips-panel-analytics');
         if (!panel) return;
         panel.addEventListener('toggle', () => {
-            if (!panel.open) {
-                localStorage.setItem('otelite_tips_dismissed_analytics', 'true');
+            if (panel.open) {
+                localStorage.setItem('otelite_tips_shown_analytics', 'true');
             } else {
-                localStorage.removeItem('otelite_tips_dismissed_analytics');
+                localStorage.removeItem('otelite_tips_shown_analytics');
             }
         });
     }
@@ -761,32 +782,47 @@ class AnalyticsView {
         for (const p of points) {
             const ts = p.timestamp;
             const n = p.count || 1;
-            const existing = bucketMap.get(ts) || { timestamp: ts, count: 0, sum_avg: 0, max_p95: 0, details: [] };
+            const existing = bucketMap.get(ts) || {
+                timestamp: ts, count: 0, sum_avg: 0, max_p95: 0,
+                sum_ttft: 0, ttft_n: 0, details: [],
+            };
             existing.count += n;
             existing.sum_avg += (p.avg_ms || 0) * n;
             existing.max_p95 = Math.max(existing.max_p95, p.p95_ms || 0);
+            if (p.avg_ttft_ms != null) {
+                existing.sum_ttft += p.avg_ttft_ms * n;
+                existing.ttft_n   += n;
+            }
             existing.details.push(p);
             bucketMap.set(ts, existing);
         }
         const buckets = Array.from(bucketMap.values())
             .sort((a, b) => a.timestamp - b.timestamp)
-            .map(b => ({ ...b, avg_ms: b.count > 0 ? b.sum_avg / b.count : 0 }));
+            .map(b => ({
+                ...b,
+                avg_ms:    b.count > 0 ? b.sum_avg / b.count : 0,
+                avg_ttft:  b.ttft_n  > 0 ? b.sum_ttft / b.ttft_n : null,
+            }));
 
         const maxVal = buckets.reduce((m, b) => Math.max(m, b.max_p95), 0);
         if (maxVal === 0) return `<h3>Latency over time</h3><div class="empty-state-hint">No latency data in this window.</div>`;
 
         const width = 100, barGap = 0.5, chartHeight = 100;
         const barWidth = Math.max((width - barGap * (buckets.length - 1)) / buckets.length, 0.1);
+        // Centre of each bar on the x-axis (used for the TTFT polyline points).
+        const barCentreX = i => i * (barWidth + barGap) + barWidth / 2;
 
         const bars = buckets.map((b, i) => {
             const x = i * (barWidth + barGap);
             const p95H = (b.max_p95 / maxVal) * chartHeight;
             const avgH = Math.min((b.avg_ms / maxVal) * chartHeight, p95H);
             const tsDate = new Date(b.timestamp / 1_000_000);
-            const modelLines = b.details.map(d =>
-                `  ${d.model || d.name || '(all)'}: avg ${Math.round(d.avg_ms)}ms · p95 ${d.p95_ms}ms · ${d.count} calls`
-            ).join('\n');
-            const tip = `${formatTs(tsDate)}\navg ${Math.round(b.avg_ms)}ms  p95 ${b.max_p95}ms\n${b.count} calls\n${modelLines}`;
+            const modelLines = b.details.map(d => {
+                const ttftStr = d.avg_ttft_ms != null ? ` · ttft ${Math.round(d.avg_ttft_ms)}ms` : '';
+                return `  ${d.model || d.name || '(all)'}: avg ${Math.round(d.avg_ms)}ms · p95 ${d.p95_ms}ms · ${d.count} calls${ttftStr}`;
+            }).join('\n');
+            const ttftStr = b.avg_ttft != null ? `\nttft avg ${Math.round(b.avg_ttft)}ms` : '';
+            const tip = `${formatTs(tsDate)}\navg ${Math.round(b.avg_ms)}ms  p95 ${b.max_p95}ms${ttftStr}\n${b.count} calls\n${modelLines}`;
             const p95Rect = `<rect class="latency-chart-bar-p95" x="${x.toFixed(3)}" y="${(chartHeight - p95H).toFixed(3)}" width="${barWidth.toFixed(3)}" height="${p95H.toFixed(3)}"><title>${this._esc(tip)}</title></rect>`;
             const avgRect = avgH > 0
                 ? `<rect class="latency-chart-bar-avg" x="${x.toFixed(3)}" y="${(chartHeight - avgH).toFixed(3)}" width="${barWidth.toFixed(3)}" height="${avgH.toFixed(3)}"><title>${this._esc(tip)}</title></rect>`
@@ -794,12 +830,30 @@ class AnalyticsView {
             return p95Rect + avgRect;
         }).join('');
 
-        const labelFor = i => {
-            const d = new Date(buckets[i].timestamp / 1_000_000);
-            const pad = n => String(n).padStart(2, '0');
-            if ((bucketSecs || 3600) >= 86400) return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-            return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        };
+        // TTFT overlay polyline — only rendered when at least two buckets have data.
+        // Uses its own y-scale so short TTFT values don't disappear at the bottom.
+        const ttftBuckets = buckets.filter(b => b.avg_ttft != null);
+        let ttftPolyline = '';
+        if (ttftBuckets.length >= 2) {
+            const maxTtft = ttftBuckets.reduce((m, b) => Math.max(m, b.avg_ttft), 0);
+            if (maxTtft > 0) {
+                const pts = buckets
+                    .map((b, i) => {
+                        if (b.avg_ttft == null) return null;
+                        const cx = barCentreX(i).toFixed(3);
+                        const cy = (chartHeight - (b.avg_ttft / maxTtft) * chartHeight).toFixed(3);
+                        return `${cx},${cy}`;
+                    })
+                    .filter(Boolean)
+                    .join(' ');
+                ttftPolyline = `<polyline class="latency-ttft-line" points="${pts}" fill="none"/>`;
+            }
+        }
+
+        const multiDay = buckets.length > 1 &&
+            new Date(buckets[0].timestamp / 1_000_000).toDateString() !==
+            new Date(buckets[buckets.length - 1].timestamp / 1_000_000).toDateString();
+        const labelFor = i => chartAxisLabel(buckets[i].timestamp, multiDay);
         let axisHtml = '';
         if (buckets.length > 0) {
             const left = this._esc(labelFor(0));
@@ -812,12 +866,19 @@ class AnalyticsView {
             </div>`;
         }
         const peakP95 = buckets.reduce((m, b) => Math.max(m, b.max_p95), 0);
+        const ttftLegend = ttftPolyline
+            ? `<span class="latency-ttft-legend">— TTFT avg (own scale)</span>`
+            : '';
+        const hint = ttftPolyline
+            ? 'Solid bar = avg; faded = p95; orange line = TTFT avg (own y-scale). Hover for per-model breakdown.'
+            : 'Solid bar = avg; faded extension = p95. Hover for per-model breakdown.';
         return `
-            <h3>Latency over time — peak p95 ${peakP95.toLocaleString()} ms</h3>
-            <p class="table-hint">Solid bar = avg; faded extension = p95. Hover for per-model breakdown.</p>
+            <h3>Latency over time — peak p95 ${peakP95.toLocaleString()} ms ${ttftLegend}</h3>
+            <p class="table-hint">${hint}</p>
             <div class="cost-chart">
                 <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
                     ${bars}
+                    ${ttftPolyline}
                 </svg>
                 ${axisHtml}
             </div>`;
@@ -1011,12 +1072,10 @@ class AnalyticsView {
             return `<rect class="cost-chart-bar" x="${x.toFixed(3)}" y="${y.toFixed(3)}" width="${barWidth.toFixed(3)}" height="${h.toFixed(3)}"><title>${this._esc(title)}</title></rect>`;
         }).join('');
 
-        const labelFor = i => {
-            const d = new Date(buckets[i].timestamp / 1_000_000);
-            const pad = n => String(n).padStart(2, '0');
-            if (bucketSecs >= 86400) return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-            return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        };
+        const multiDay = buckets.length > 1 &&
+            new Date(buckets[0].timestamp / 1_000_000).toDateString() !==
+            new Date(buckets[buckets.length - 1].timestamp / 1_000_000).toDateString();
+        const labelFor = i => chartAxisLabel(buckets[i].timestamp, multiDay);
 
         let axisHtml = '';
         if (buckets.length > 0) {
@@ -1045,10 +1104,10 @@ class AnalyticsView {
             </div>`;
     }
 
-    // ── Top-N section: dropdown-driven (replaces the old 8-tab switcher) ─────
+    // ── Top-N section: tab-driven ─────────────────────────────────────────────
 
     _buildTopNSection(topSpans, errorRate) {
-        const sortOptions = [
+        const tabs = [
             { id: 'cost',      label: 'Most expensive' },
             { id: 'slow',      label: 'Slowest' },
             { id: 'truncated', label: 'Truncated' },
@@ -1059,9 +1118,16 @@ class AnalyticsView {
             { id: 'errors',    label: 'Error runs' },
         ];
 
-        const opts = sortOptions.map(o =>
-            `<option value="${o.id}"${o.id === this.topNSort ? ' selected' : ''}>${o.label}</option>`
+        // Ensure active tab is valid; fall back to 'cost'.
+        if (!tabs.find(t => t.id === this.topNSort)) this.topNSort = 'cost';
+
+        const tabButtons = tabs.map(t =>
+            `<button class="top-n-tab${t.id === this.topNSort ? ' active' : ''}" data-tab="${t.id}">${t.label}</button>`
         ).join('');
+
+        // Cache the eagerly-fetched data so switching back is free.
+        this._topNCostCache = topSpans || [];
+        this._topNErrorCache = errorRate || [];
 
         let initialContent = '';
         if (this.topNSort === 'cost') {
@@ -1072,33 +1138,35 @@ class AnalyticsView {
             initialContent = `<div class="empty-state-hint">Loading…</div>`;
         }
 
-        // Cache the initial cost data so the dropdown handler can return to it
-        // without an extra fetch.
-        this._topNCostCache = topSpans || [];
-        this._topNErrorCache = errorRate || [];
-
         return `
             <div class="top-n-section">
-                <h3>Top 20 calls
-                    <select id="top-n-sort" class="filter-select" style="margin-left:0.75rem;font-size:0.85em">${opts}</select>
-                </h3>
+                <h3>Top 20 calls</h3>
+                <div class="top-n-tabs" id="top-n-tabs">${tabButtons}</div>
                 <div id="top-n-content">${initialContent}</div>
             </div>`;
     }
 
     _attachTopNDropdownHandler(params) {
-        const sel = document.getElementById('top-n-sort');
-        if (!sel) return;
-        sel.addEventListener('change', async (e) => {
-            this.topNSort = e.target.value;
+        const tabBar = document.getElementById('top-n-tabs');
+        if (!tabBar) return;
+
+        const switchTab = async (id) => {
+            this.topNSort = id;
+
+            // Update active styling.
+            tabBar.querySelectorAll('.top-n-tab').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.tab === id);
+            });
+
             const content = document.getElementById('top-n-content');
             if (!content) return;
 
-            if (this.topNSort === 'cost') {
+            // Return cached data for the two eagerly-fetched tabs.
+            if (id === 'cost') {
                 content.innerHTML = this._renderSpanTable(this._topNCostCache, { extraCol: 'cost', emptyMsg: 'No expensive calls in this window.' });
                 return;
             }
-            if (this.topNSort === 'errors') {
+            if (id === 'errors') {
                 content.innerHTML = this._renderErrorRunsTable(this._topNErrorCache);
                 return;
             }
@@ -1113,21 +1181,31 @@ class AnalyticsView {
                 cache:     p => this.api.getTopSpans({...p, sort_by: 'cache_efficiency'}),
             };
             try {
-                const data = await fetchers[this.topNSort]({ ...params, limit: 20 });
+                const data = await fetchers[id]({ ...params, limit: 20 });
                 let html;
-                if (this.topNSort === 'sessions') {
+                if (id === 'sessions') {
                     html = this._renderGroupTable(data || [], 'session_id', 'Session ID');
-                } else if (this.topNSort === 'convs') {
+                } else if (id === 'convs') {
                     html = this._renderGroupTable(data || [], 'conversation_id', 'Conversation ID');
                 } else {
-                    const extraCol = {slow: 'duration', truncated: 'finish_reason', verbose: 'ratio', cache: 'cache_rate'}[this.topNSort] || 'cost';
+                    const extraCol = {slow: 'duration', truncated: 'finish_reason', verbose: 'ratio', cache: 'cache_rate'}[id] || 'cost';
                     html = this._renderSpanTable(data || [], { extraCol, emptyMsg: 'No matching spans in this window.' });
                 }
                 content.innerHTML = html;
             } catch (err) {
                 content.innerHTML = `<div class="empty-state-hint">Failed to load: ${this._esc(err.message)}</div>`;
             }
+        };
+
+        tabBar.addEventListener('click', e => {
+            const btn = e.target.closest('.top-n-tab');
+            if (btn && btn.dataset.tab) switchTab(btn.dataset.tab);
         });
+
+        // If the active tab is not one of the eagerly-cached ones, load it now.
+        if (this.topNSort !== 'cost' && this.topNSort !== 'errors') {
+            switchTab(this.topNSort);
+        }
     }
 
     /**
@@ -1481,11 +1559,10 @@ class AnalyticsView {
             return `<rect class="cost-chart-bar" x="${x.toFixed(3)}" y="${y.toFixed(3)}" width="${barWidth.toFixed(3)}" height="${h.toFixed(3)}"><title>${this._esc(title)}</title></rect>`;
         }).join('');
 
-        const labelFor = i => {
-            const d = new Date(buckets[i].timestamp / 1_000_000);
-            const pad = n => String(n).padStart(2, '0');
-            return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        };
+        const multiDay = buckets.length > 1 &&
+            new Date(buckets[0].timestamp / 1_000_000).toDateString() !==
+            new Date(buckets[buckets.length - 1].timestamp / 1_000_000).toDateString();
+        const labelFor = i => chartAxisLabel(buckets[i].timestamp, multiDay);
 
         let axisHtml = '';
         if (buckets.length > 0) {

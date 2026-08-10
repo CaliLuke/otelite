@@ -7,10 +7,11 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
-    CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown, FinishReasonCount,
-    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile,
-    RetrievalStats, RetryStats, SessionCostRow, TokenUsageResponse, ToolUsage, TopSpan,
+    CacheHitRateByModel, CallsSeriesPoint, ContextTypeSplit, ConversationCostRow,
+    ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown,
+    FinishReasonCount, HourOfDayBucket, LatencyByContextBin, LatencySeriesPoint, LatencyStats,
+    ModelDriftPair, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
+    StopReasonCount, TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan,
     TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
@@ -1005,6 +1006,162 @@ pub async fn get_model_drift(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::storage_error(format!(
                     "query model drift: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// Tool approval/rejection summary (claude_code.tool.blocked_on_user spans).
+#[utoipa::path(
+    get,
+    path = "/api/genai/tool_approvals",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Tool approval statistics", body = ToolApprovalStats),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_tool_approvals(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<ToolApprovalStats>, (StatusCode, Json<ErrorResponse>)> {
+    let stats = state
+        .storage
+        .query_tool_approvals(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query tool approvals: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(stats))
+}
+
+/// Distribution of stop_reason values across LLM spans.
+#[utoipa::path(
+    get,
+    path = "/api/genai/stop_reasons",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Stop reason distribution", body = Vec<StopReasonCount>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_stop_reasons(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<Vec<StopReasonCount>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_stop_reasons(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query stop reasons: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// Token usage broken down by llm_request.context type.
+#[utoipa::path(
+    get,
+    path = "/api/genai/context_type_split",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Context type token split", body = Vec<ContextTypeSplit>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_context_type_split(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<Vec<ContextTypeSplit>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_context_type_split(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query context type split: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// Top error messages from failed tool executions.
+#[utoipa::path(
+    get,
+    path = "/api/genai/tool_errors",
+    params(ToolUsageQuery),
+    responses(
+        (status = 200, description = "Tool error messages", body = Vec<ToolErrorEntry>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_tool_errors(
+    State(state): State<AppState>,
+    Query(query): Query<ToolUsageQuery>,
+) -> Result<Json<Vec<ToolErrorEntry>>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = query.limit.unwrap_or(30).clamp(1, 100);
+    let rows = state
+        .storage
+        .query_tool_errors(query.start_time, query.end_time, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query tool errors: {}",
+                    e
+                ))),
+            )
+        })?;
+    Ok(Json(rows))
+}
+
+/// Hour-of-day activity distribution (UTC).
+#[utoipa::path(
+    get,
+    path = "/api/genai/hour_of_day",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Hour-of-day buckets", body = Vec<HourOfDayBucket>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_hour_of_day(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<Vec<HourOfDayBucket>>, (StatusCode, Json<ErrorResponse>)> {
+    let rows = state
+        .storage
+        .query_hour_of_day(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query hour of day: {}",
                     e
                 ))),
             )

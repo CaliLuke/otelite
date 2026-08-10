@@ -77,6 +77,14 @@ pub const LLM_SPAN_MARKER_KEYS: &[&str] = &[
 /// OpenInference span-kind values that count as LLM activity for analytics.
 pub const OPENINFERENCE_LLM_KINDS: &[&str] = &["LLM", "EMBEDDING"];
 
+/// Span name prefixes for instrumentations that don't use the standard GenAI
+/// attribute markers. Each entry is used as a LIKE pattern (`<prefix>%`).
+///
+/// Claude Code emits `claude_code.llm_request` spans with flat `model`,
+/// `input_tokens`, `output_tokens` attributes but no `gen_ai.*` / `llm.*`
+/// marker attributes, so the normal guard misses them entirely.
+pub const VENDOR_SPAN_NAME_PREFIXES: &[&str] = &["claude_code.llm_request"];
+
 /// Build a `COALESCE(json_extract(col, '$."k1"'), ...)` expression over `keys`.
 pub fn coalesce_extract(attributes_col: &str, keys: &[&str]) -> String {
     coalesce_inner(attributes_col, keys, None)
@@ -109,7 +117,8 @@ fn coalesce_inner(attributes_col: &str, keys: &[&str], cast: Option<&str>) -> St
 }
 
 /// Parenthesised OR-chain that matches any span carrying a known LLM marker.
-/// Includes the OpenInference `openinference.span.kind` IN (...) clause.
+/// Includes the OpenInference `openinference.span.kind` IN (...) clause and
+/// vendor-specific span-name prefix patterns.
 pub fn llm_span_guard(attributes_col: &str) -> String {
     let mut clauses: Vec<String> = LLM_SPAN_MARKER_KEYS
         .iter()
@@ -131,6 +140,9 @@ pub fn llm_span_guard(attributes_col: &str) -> String {
         col = attributes_col,
         kinds = kinds
     ));
+    for prefix in VENDOR_SPAN_NAME_PREFIXES {
+        clauses.push(format!("name LIKE '{}%'", prefix));
+    }
     format!("({})", clauses.join(" OR "))
 }
 
@@ -165,5 +177,15 @@ mod tests {
         assert!(sql.contains("'LLM'"));
         assert!(sql.contains("'EMBEDDING'"));
         assert!(sql.starts_with('(') && sql.ends_with(')'));
+    }
+
+    #[test]
+    fn llm_span_guard_includes_vendor_span_name_prefixes() {
+        let sql = llm_span_guard("attributes");
+        // Claude Code spans must be matched even without gen_ai.* attributes.
+        assert!(
+            sql.contains("name LIKE 'claude_code.llm_request%'"),
+            "expected claude_code.llm_request LIKE clause in: {sql}"
+        );
     }
 }

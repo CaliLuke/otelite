@@ -2622,6 +2622,336 @@ pub fn query_model_drift(
     Ok(rows)
 }
 
+// ── New analytics queries ─────────────────────────────────────────────────────
+
+/// Approval/rejection summary for claude_code.tool.blocked_on_user spans.
+pub fn query_tool_approvals(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<otelite_core::api::ToolApprovalStats> {
+    let mut where_clause = String::from("WHERE name = 'claude_code.tool.blocked_on_user'");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(s) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(s));
+    }
+    if let Some(e) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(e));
+    }
+
+    let sql = format!(
+        "SELECT
+            json_extract(attributes, '$.decision') AS decision,
+            json_extract(attributes, '$.source')   AS source,
+            json_extract(attributes, '$.tool_name') AS tool_name,
+            COUNT(*) AS cnt
+         FROM spans
+         {where_clause}
+         GROUP BY decision, source, tool_name
+         ORDER BY cnt DESC"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare tool_approvals query: {e}"))
+    })?;
+
+    struct Row {
+        decision: Option<String>,
+        source: Option<String>,
+        tool_name: Option<String>,
+        cnt: usize,
+    }
+    let rows: Vec<Row> = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok(Row {
+                decision: r.get(0)?,
+                source: r.get(1)?,
+                tool_name: r.get(2)?,
+                cnt: r.get::<_, i64>(3)? as usize,
+            })
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to execute tool_approvals: {e}")))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| StorageError::QueryError(format!("Failed to parse tool_approvals: {e}")))?;
+
+    let mut stats = otelite_core::api::ToolApprovalStats::default();
+    let mut rejected_map: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for row in rows {
+        let decision = row.decision.as_deref().unwrap_or("unknown");
+        let source = row.source.as_deref().unwrap_or("unknown");
+        match decision {
+            "accept" if source == "config" => stats.auto_accepted += row.cnt,
+            "accept" => stats.user_accepted += row.cnt,
+            "reject" => {
+                stats.rejected += row.cnt;
+                if let Some(t) = &row.tool_name {
+                    *rejected_map.entry(t.clone()).or_default() += row.cnt;
+                }
+            },
+            _ => stats.unknown += row.cnt,
+        }
+        stats.total += row.cnt;
+    }
+
+    let mut top: Vec<_> = rejected_map
+        .into_iter()
+        .map(|(tool_name, count)| otelite_core::api::ToolApprovalEntry { tool_name, count })
+        .collect();
+    top.sort_by_key(|a| std::cmp::Reverse(a.count));
+    top.truncate(10);
+    stats.top_rejected = top;
+    Ok(stats)
+}
+
+/// Distribution of stop_reason values across LLM spans.
+pub fn query_stop_reasons(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::StopReasonCount>> {
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(s) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(s));
+    }
+    if let Some(e) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(e));
+    }
+
+    let sql = format!(
+        "SELECT
+            COALESCE(
+                json_extract(attributes, '$.stop_reason'),
+                json_extract(attributes, '$.\"gen_ai.response.finish_reason\"'),
+                '(none)'
+            ) AS reason,
+            COUNT(*) AS cnt
+         FROM spans
+         {where_clause}
+         GROUP BY reason
+         ORDER BY cnt DESC"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare stop_reasons query: {e}"))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok(otelite_core::api::StopReasonCount {
+                reason: r.get(0)?,
+                count: r.get::<_, i64>(1)? as usize,
+            })
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to execute stop_reasons: {e}")))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| StorageError::QueryError(format!("Failed to parse stop_reasons: {e}")))?;
+    Ok(rows)
+}
+
+/// Token usage broken down by llm_request.context attribute.
+pub fn query_context_type_split(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::ContextTypeSplit>> {
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(s) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(s));
+    }
+    if let Some(e) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(e));
+    }
+
+    let sql = format!(
+        "SELECT
+            COALESCE(json_extract(attributes, '$.\"llm_request.context\"'), '(unknown)') AS context,
+            COUNT(*) AS calls,
+            COALESCE(SUM({input}), 0)  AS input_tokens,
+            COALESCE(SUM({output}), 0) AS output_tokens,
+            AVG((end_time - start_time) / 1000000.0) AS avg_ms
+         FROM spans
+         {where_clause}
+         GROUP BY context
+         ORDER BY calls DESC",
+        input = exprs.input,
+        output = exprs.output,
+    );
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare context_type_split query: {e}"))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok(otelite_core::api::ContextTypeSplit {
+                context: r.get(0)?,
+                calls: r.get::<_, i64>(1)? as usize,
+                input_tokens: r.get::<_, i64>(2)? as u64,
+                output_tokens: r.get::<_, i64>(3)? as u64,
+                avg_ms: r.get::<_, f64>(4).unwrap_or(0.0),
+            })
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute context_type_split: {e}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse context_type_split: {e}"))
+        })?;
+    Ok(rows)
+}
+
+/// Top error messages from failed tool executions.
+pub fn query_tool_errors(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: usize,
+) -> Result<Vec<otelite_core::api::ToolErrorEntry>> {
+    let mut where_clause = String::from(
+        "WHERE name = 'claude_code.tool.execution'
+           AND json_extract(attributes, '$.success') = 'false'
+           AND json_extract(attributes, '$.error') IS NOT NULL",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(s) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(s));
+    }
+    if let Some(e) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(e));
+    }
+
+    // Truncate long error messages at 120 chars for grouping
+    let sql = format!(
+        "SELECT
+            COALESCE(json_extract(attributes, '$.tool_name'), '(unknown)') AS tool_name,
+            SUBSTR(json_extract(attributes, '$.error'), 1, 120)           AS error_msg,
+            COUNT(*) AS cnt
+         FROM spans
+         {where_clause}
+         GROUP BY tool_name, error_msg
+         ORDER BY cnt DESC
+         LIMIT ?"
+    );
+
+    params.push(Box::new(limit as i64));
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare tool_errors query: {e}"))
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok(otelite_core::api::ToolErrorEntry {
+                tool_name: r.get(0)?,
+                error_message: r.get(1)?,
+                count: r.get::<_, i64>(2)? as usize,
+            })
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to execute tool_errors: {e}")))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| StorageError::QueryError(format!("Failed to parse tool_errors: {e}")))?;
+    Ok(rows)
+}
+
+/// Hour-of-day activity buckets (0–23, UTC).
+pub fn query_hour_of_day(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::HourOfDayBucket>> {
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    let mut time_filter = String::new();
+    if let Some(s) = start_time {
+        time_filter.push_str(" AND start_time >= ?");
+        params.push(Box::new(s));
+    }
+    if let Some(e) = end_time {
+        time_filter.push_str(" AND start_time <= ?");
+        params.push(Box::new(e));
+    }
+
+    // Duplicate params for the two sub-queries (SQLite doesn't support named params easily here)
+    let llm_filter = format!("WHERE name = 'claude_code.llm_request'{}", time_filter);
+    let tool_filter = format!("WHERE name = 'claude_code.tool.execution'{}", time_filter);
+
+    // Build hour table by merging two separate queries in Rust — simpler than a FULL OUTER JOIN
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let llm_sql = format!(
+        "SELECT CAST(strftime('%H', start_time/1000000000, 'unixepoch') AS INTEGER) AS h, COUNT(*) AS cnt
+         FROM spans {llm_filter} GROUP BY h"
+    );
+    let tool_sql = format!(
+        "SELECT CAST(strftime('%H', start_time/1000000000, 'unixepoch') AS INTEGER) AS h, COUNT(*) AS cnt
+         FROM spans {tool_filter} GROUP BY h"
+    );
+
+    let mut llm_by_hour = [0usize; 24];
+    let mut tool_by_hour = [0usize; 24];
+
+    {
+        let mut stmt = conn.prepare(&llm_sql).map_err(|e| {
+            StorageError::QueryError(format!("Failed to prepare hour_of_day llm query: {e}"))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| StorageError::QueryError(format!("{e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::QueryError(format!("{e}")))?;
+        for (h, cnt) in rows {
+            if (0..24).contains(&(h as usize)) {
+                llm_by_hour[h as usize] = cnt as usize;
+            }
+        }
+    }
+    {
+        let mut stmt = conn.prepare(&tool_sql).map_err(|e| {
+            StorageError::QueryError(format!("Failed to prepare hour_of_day tool query: {e}"))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| StorageError::QueryError(format!("{e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::QueryError(format!("{e}")))?;
+        for (h, cnt) in rows {
+            if (0..24).contains(&(h as usize)) {
+                tool_by_hour[h as usize] = cnt as usize;
+            }
+        }
+    }
+
+    Ok((0u8..24u8)
+        .map(|h| otelite_core::api::HourOfDayBucket {
+            hour: h,
+            llm_calls: llm_by_hour[h as usize],
+            tool_calls: tool_by_hour[h as usize],
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

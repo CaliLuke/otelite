@@ -538,6 +538,67 @@ impl StorageBackend for SqliteBackend {
         reader::query_model_drift(conn, start_time, end_time).map_err(StorageError::from)
     }
 
+    async fn query_tool_approvals(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<otelite_core::api::ToolApprovalStats> {
+        let conn_guard = self.conn.lock();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_tool_approvals(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
+    async fn query_stop_reasons(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::StopReasonCount>> {
+        let conn_guard = self.conn.lock();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_stop_reasons(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
+    async fn query_context_type_split(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::ContextTypeSplit>> {
+        let conn_guard = self.conn.lock();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_context_type_split(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
+    async fn query_tool_errors(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<otelite_core::api::ToolErrorEntry>> {
+        let conn_guard = self.conn.lock();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_tool_errors(conn, start_time, end_time, limit).map_err(StorageError::from)
+    }
+
+    async fn query_hour_of_day(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::HourOfDayBucket>> {
+        let conn_guard = self.conn.lock();
+        let conn = conn_guard
+            .as_ref()
+            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        reader::query_hour_of_day(conn, start_time, end_time).map_err(StorageError::from)
+    }
+
     async fn close(&mut self) -> Result<()> {
         if let Some(handle) = self.purge_handle.lock().take() {
             handle.abort();

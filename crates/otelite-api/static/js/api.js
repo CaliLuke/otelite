@@ -203,6 +203,11 @@ class ApiClient {
     async getModelDrift(params = {})  { return this.get('/genai/model_drift', params); }
     async getLatencyByContext(params = {}) { return this.get('/genai/latency_by_context', params); }
     async getLatencySeries(params = {}) { return this.get('/genai/latency_series', { bucket_secs: 3600, ...params }); }
+    async getToolApprovals(params = {}) { return this.get('/genai/tool_approvals', params); }
+    async getStopReasons(params = {})   { return this.get('/genai/stop_reasons', params); }
+    async getContextTypeSplit(params = {}) { return this.get('/genai/context_type_split', params); }
+    async getToolErrors(params = {})    { return this.get('/genai/tool_errors', params); }
+    async getHourOfDay(params = {})     { return this.get('/genai/hour_of_day', params); }
 
     /**
      * Fetch session diagnose report
