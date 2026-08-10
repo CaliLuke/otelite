@@ -11,6 +11,15 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Internal
+
+- Pin all GitHub Actions `uses:` references to full commit SHAs (supply-chain
+  hardening; resolves Semgrep SAST mutable-tag findings across ci.yml,
+  security.yml, bump-and-tag.yml, publish.yml).
+- Update `quinn-proto` to 0.11.16 (fixes RUSTSEC-2026-0185 — remote memory
+  exhaustion via unbounded out-of-order stream reassembly, severity 7.5 high).
+- Update `anyhow` to latest (mitigates RUSTSEC-2026-0190 unsoundness warning).
+
 ## [0.1.54] - 2026-08-10
 
 ### Added
