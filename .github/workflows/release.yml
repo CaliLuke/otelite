@@ -136,14 +136,9 @@ jobs:
           submodules: recursive
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
-        # nosemgrep: yaml.github-actions.security.gha-curl-pipe-shell.gha-curl-pipe-shell
-        # rustup does not publish stable per-release SHAs; the URL is versioned by rustup itself.
-        # This step only runs inside an explicit matrix container, not on standard GitHub runners.
-        run: |
-          if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        with:
+          toolchain: stable
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
