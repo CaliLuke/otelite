@@ -22,6 +22,13 @@ have to work around), not implementation detail.
   raw trace view. Token and cost totals remain unavailable when Codex does not
   emit usage attributes.
 
+### Fixed
+
+- **`otelite status` and `otelite stop` now recognise macOS launchd services
+  and locally run Otelite processes.** Service-managed daemons report their
+  launchd supervisor instead of appearing stopped, and local `serve` processes
+  can be stopped without a PID file.
+
 ## [0.1.56] - 2026-08-10
 
 ### Internal
