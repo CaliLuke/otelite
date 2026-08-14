@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.58] - 2026-08-14
+
 ### Added
 
 - **Codex CLI model calls now appear in Analytics.** Request counts and latency
