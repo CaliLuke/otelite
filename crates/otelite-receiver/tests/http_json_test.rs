@@ -12,10 +12,14 @@ use otelite_storage::{sqlite::SqliteBackend, StorageBackend, StorageConfig};
 use reqwest::StatusCode;
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::time::sleep;
 
-/// Helper to start HTTP server on random port and return the address
-async fn start_test_server() -> (String, HttpServer) {
+/// Starts an HTTP server with isolated file-backed SQLite storage.
+///
+/// The returned directory must remain alive until the server has processed all
+/// requests because SQLite opens the database lazily.
+async fn start_test_server() -> (String, HttpServer, TempDir) {
     let mut config = ReceiverConfig::new();
     // Use port 0 to let OS assign a random available port
     config.http_addr = "127.0.0.1:0".parse().expect("Failed to parse address");
@@ -23,7 +27,9 @@ async fn start_test_server() -> (String, HttpServer) {
     let server = HttpServer::new(config);
 
     // Create storage backend
-    let mut storage = SqliteBackend::new(StorageConfig::default());
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let storage_config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
+    let mut storage = SqliteBackend::new(storage_config);
     storage
         .initialize()
         .await
@@ -39,12 +45,12 @@ async fn start_test_server() -> (String, HttpServer) {
         .await
         .expect("Failed to get local address");
 
-    (format!("http://{}", addr), server)
+    (format!("http://{}", addr), server, temp_dir)
 }
 
 #[tokio::test]
 async fn test_http_json_metrics_success() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
     let json_data = create_metrics_json();
@@ -65,7 +71,7 @@ async fn test_http_json_metrics_success() {
 
 #[tokio::test]
 async fn test_http_json_logs_success() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
     let json_data = create_logs_json();
@@ -86,7 +92,7 @@ async fn test_http_json_logs_success() {
 
 #[tokio::test]
 async fn test_http_json_traces_success() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
     let json_data = create_traces_json();
@@ -107,7 +113,7 @@ async fn test_http_json_traces_success() {
 
 #[tokio::test]
 async fn test_http_json_invalid_json() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
     let invalid_json = create_invalid_json();
@@ -126,7 +132,7 @@ async fn test_http_json_invalid_json() {
 
 #[tokio::test]
 async fn test_http_json_malformed_structure() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
     let malformed_json = create_malformed_json();
@@ -145,7 +151,7 @@ async fn test_http_json_malformed_structure() {
 
 #[tokio::test]
 async fn test_http_json_empty_body() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
 
@@ -165,7 +171,7 @@ async fn test_http_json_empty_body() {
 
 #[tokio::test]
 async fn test_http_json_charset_handling() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
     let json_data = create_metrics_json();
@@ -184,7 +190,7 @@ async fn test_http_json_charset_handling() {
 
 #[tokio::test]
 async fn test_http_json_all_signals() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
 
@@ -221,7 +227,7 @@ async fn test_http_json_all_signals() {
 
 #[tokio::test]
 async fn test_http_json_concurrent_requests() {
-    let (base_url, _server) = start_test_server().await;
+    let (base_url, _server, _temp_dir) = start_test_server().await;
 
     let client = reqwest::Client::new();
     let mut handles = vec![];

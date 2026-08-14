@@ -17,6 +17,11 @@ have to work around), not implementation detail.
 
 - **Latency diagnosis card** in the Analytics → Latency section: when TTFT (time-to-first-token) accounts for ≥ 85% of total response time, a plain-language card appears explaining that the wait is provider-side inference — not local tooling, context size, or network overhead — and suggests routing lighter turns to a faster model. Expands to show the per-model TTFT/duration ratio. Visible automatically with no new configuration required.
 
+- **Codex CLI model calls now appear in Analytics.** Request counts and latency
+  are derived from Codex’s native sampling-request spans without changing the
+  raw trace view. Token and cost totals remain unavailable when Codex does not
+  emit usage attributes.
+
 ## [0.1.56] - 2026-08-10
 
 ### Internal

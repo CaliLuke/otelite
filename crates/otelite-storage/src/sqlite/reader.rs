@@ -553,6 +553,10 @@ struct TokenExprs {
     /// Parenthesised OR-chain identifying LLM spans (also includes the
     /// OpenInference `openinference.span.kind` clause).
     llm_span_guard: String,
+    /// LLM calls with reliable request-count and duration semantics. Includes
+    /// Codex's completed sampling spans, but not token, cost, or outcome
+    /// analytics because Codex does not emit those attributes.
+    request_span_guard: String,
 }
 
 fn token_exprs() -> TokenExprs {
@@ -573,13 +577,13 @@ fn token_exprs() -> TokenExprs {
         model: semconv::coalesce_extract("attributes", semconv::MODEL_KEYS),
         system: semconv::coalesce_extract("attributes", semconv::SYSTEM_KEYS),
         llm_span_guard: semconv::llm_span_guard("attributes"),
+        request_span_guard: semconv::request_span_guard("attributes"),
     }
 }
 
 /// Query token usage statistics for GenAI/LLM spans
 ///
 /// Returns aggregated token usage grouped by model and system (provider).
-/// Only includes spans with `gen_ai.system` attribute.
 pub fn query_token_usage(
     conn: &Connection,
     start_time: Option<i64>,
@@ -1189,7 +1193,7 @@ pub fn query_latency_stats(
     model: Option<&str>,
 ) -> Result<Vec<otelite_core::api::LatencyStats>> {
     let exprs = token_exprs();
-    let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
+    let mut where_clause = format!("WHERE {}", exprs.request_span_guard);
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(start) = start_time {
@@ -1214,8 +1218,8 @@ pub fn query_latency_stats(
                 CAST(json_extract(attributes, '$.\"llm.time_to_first_token\"') AS INTEGER),
                 CAST(json_extract(attributes, '$.\"ttft_ms\"') AS INTEGER)
             ) AS ttft_ms,
-            COALESCE({output}, 0) AS output_tokens,
-            COALESCE({input}, 0) AS input_tokens
+            {output} AS output_tokens,
+            {input} AS input_tokens
         FROM spans
         {where_clause}",
         model = exprs.model,
@@ -1233,8 +1237,8 @@ pub fn query_latency_stats(
         model: Option<String>,
         duration_ms: i64,
         ttft_ms: Option<i64>,
-        output_tokens: i64,
-        input_tokens: i64,
+        output_tokens: Option<i64>,
+        input_tokens: Option<i64>,
     }
 
     let rows: Vec<Row> = stmt
@@ -1243,8 +1247,8 @@ pub fn query_latency_stats(
                 model: row.get::<_, Option<String>>(0)?,
                 duration_ms: row.get::<_, i64>(1)?,
                 ttft_ms: row.get::<_, Option<i64>>(2)?,
-                output_tokens: row.get::<_, i64>(3)?,
-                input_tokens: row.get::<_, i64>(4)?,
+                output_tokens: row.get::<_, Option<i64>>(3)?,
+                input_tokens: row.get::<_, Option<i64>>(4)?,
             })
         })
         .map_err(|e| {
@@ -1263,14 +1267,20 @@ pub fn query_latency_stats(
         if let Some(t) = r.ttft_ms {
             entry.1.push(t);
         }
-        if r.output_tokens > 0 && r.duration_ms > 0 {
-            entry
-                .2
-                .push(r.output_tokens as f64 / (r.duration_ms as f64 / 1000.0));
+        if r.duration_ms > 0 {
+            if let Some(output_tokens) = r.output_tokens.filter(|tokens| *tokens > 0) {
+                entry
+                    .2
+                    .push(output_tokens as f64 / (r.duration_ms as f64 / 1000.0));
+            }
         }
-        entry.3.push(r.input_tokens);
-        if r.input_tokens > 0 {
-            entry.4.push(r.output_tokens as f64 / r.input_tokens as f64);
+        if let Some(input_tokens) = r.input_tokens {
+            entry.3.push(input_tokens);
+            if input_tokens > 0 {
+                entry
+                    .4
+                    .push(r.output_tokens.unwrap_or_default() as f64 / input_tokens as f64);
+            }
         }
     }
 
@@ -2100,7 +2110,7 @@ pub fn query_latency_series(
     let mut where_clause = if all_spans {
         "WHERE 1=1".to_string()
     } else {
-        format!("WHERE {}", exprs.llm_span_guard)
+        format!("WHERE {}", exprs.request_span_guard)
     };
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -2248,7 +2258,7 @@ pub fn query_calls_series(
     let mut where_clause = if all_spans {
         "WHERE 1=1".to_string()
     } else {
-        format!("WHERE {}", exprs.llm_span_guard)
+        format!("WHERE {}", exprs.request_span_guard)
     };
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 

@@ -8,19 +8,25 @@ use grpc_test_utils::{
 use otelite_receiver::signals::{LogsHandler, MetricsHandler, TracesHandler};
 use otelite_storage::{sqlite::SqliteBackend, StorageBackend, StorageConfig};
 use std::sync::Arc;
+use tempfile::TempDir;
 
-async fn create_test_storage() -> Arc<dyn StorageBackend> {
-    let mut storage = SqliteBackend::new(StorageConfig::default());
+/// Returns both the storage backend and its directory. The directory must stay
+/// alive for the duration of a test because SQLite opens the database lazily
+/// when handlers process non-empty requests.
+async fn create_test_storage() -> (Arc<dyn StorageBackend>, TempDir) {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
+    let mut storage = SqliteBackend::new(config);
     storage
         .initialize()
         .await
         .expect("Failed to initialize storage");
-    Arc::new(storage)
+    (Arc::new(storage), temp_dir)
 }
 
 #[tokio::test]
 async fn test_metrics_handler_with_grpc_request() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(MetricsHandler::new(storage));
     let request = create_sample_metrics_request();
 
@@ -33,7 +39,7 @@ async fn test_metrics_handler_with_grpc_request() {
 
 #[tokio::test]
 async fn test_logs_handler_with_grpc_request() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(LogsHandler::new(storage));
     let request = create_sample_logs_request();
 
@@ -46,7 +52,7 @@ async fn test_logs_handler_with_grpc_request() {
 
 #[tokio::test]
 async fn test_traces_handler_with_grpc_request() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(TracesHandler::new(storage));
     let request = create_sample_traces_request();
 
@@ -59,7 +65,7 @@ async fn test_traces_handler_with_grpc_request() {
 
 #[tokio::test]
 async fn test_metrics_handler_with_empty_request() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(MetricsHandler::new(storage));
     let request = opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest {
         resource_metrics: vec![],
@@ -74,7 +80,7 @@ async fn test_metrics_handler_with_empty_request() {
 
 #[tokio::test]
 async fn test_logs_handler_with_empty_request() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(LogsHandler::new(storage));
     let request = opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest {
         resource_logs: vec![],
@@ -89,7 +95,7 @@ async fn test_logs_handler_with_empty_request() {
 
 #[tokio::test]
 async fn test_traces_handler_with_empty_request() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(TracesHandler::new(storage));
     let request = opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest {
         resource_spans: vec![],
@@ -104,7 +110,7 @@ async fn test_traces_handler_with_empty_request() {
 
 #[tokio::test]
 async fn test_multiple_metrics_requests() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(MetricsHandler::new(storage));
 
     for _ in 0..10 {
@@ -119,7 +125,7 @@ async fn test_multiple_metrics_requests() {
 
 #[tokio::test]
 async fn test_multiple_logs_requests() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(LogsHandler::new(storage));
 
     for _ in 0..10 {
@@ -134,7 +140,7 @@ async fn test_multiple_logs_requests() {
 
 #[tokio::test]
 async fn test_multiple_traces_requests() {
-    let storage = create_test_storage().await;
+    let (storage, _temp_dir) = create_test_storage().await;
     let handler = Arc::new(TracesHandler::new(storage));
 
     for _ in 0..10 {

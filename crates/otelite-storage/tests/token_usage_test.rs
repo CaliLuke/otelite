@@ -184,3 +184,104 @@ fn test_query_token_usage_handles_missing_token_fields() {
     assert_eq!(by_model[0].input_tokens, 0);
     assert_eq!(by_model[0].output_tokens, 0);
 }
+
+#[test]
+fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
+    let conn = setup_test_db();
+
+    // Codex tags many internal spans with `model`. Only run_sampling_request is
+    // one completed model call; the nested transport span must not be counted.
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('codex-trace', 'codex-request', 'run_sampling_request', 0, 0, 4000000000,
+                   '{"model":"codex-test-model","otel.scope.name":"codex_cli_rs"}', 1)"#,
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, parent_span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('codex-trace', 'codex-http', 'codex-request', 'model_client.stream_responses_api', 0, 0, 3000000000,
+                   '{"model":"codex-test-model","otel.scope.name":"codex_cli_rs"}', 1)"#,
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('other-trace', 'other-request', 'run_sampling_request', 0, 0, 5000000000,
+                   '{"model":"codex-test-model","otel.scope.name":"other_exporter"}', 1)"#,
+        [],
+    )
+    .unwrap();
+
+    // OpenCode already emits OpenInference LLM spans. Keep that existing
+    // adapter path covered alongside the Codex-specific one.
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('opencode-trace', 'opencode-request', 'opencode.llm', 0, 0, 2000000000,
+                   '{"openinference.span.kind":"LLM","llm.system":"opencode-go","llm.model_name":"opencode-test-model","llm.usage.prompt_tokens":"100","llm.usage.completion_tokens":"40"}', 1)"#,
+        [],
+    )
+    .unwrap();
+
+    let (summary, by_model, by_system) =
+        reader::query_token_usage(&conn, None, None, None).unwrap();
+    assert_eq!(summary.total_requests, 1);
+    assert_eq!(summary.total_input_tokens, 100);
+    assert_eq!(summary.total_output_tokens, 40);
+
+    assert!(
+        !by_model.iter().any(|row| row.model == "codex-test-model"),
+        "token analytics must not present unavailable Codex usage as zero"
+    );
+
+    let opencode = by_model
+        .iter()
+        .find(|row| row.model == "opencode-test-model")
+        .expect("OpenCode model should appear in analytics");
+    assert_eq!(opencode.requests, 1);
+    assert_eq!(opencode.input_tokens, 100);
+    assert_eq!(opencode.output_tokens, 40);
+    assert_eq!(by_system.len(), 1);
+    assert_eq!(by_system[0].system, "opencode-go");
+
+    let latency = reader::query_latency_stats(&conn, None, None, None).unwrap();
+    let codex_latency = latency
+        .iter()
+        .find(|row| row.model.as_deref() == Some("codex-test-model"))
+        .expect("Codex latency should use run_sampling_request");
+    assert_eq!(codex_latency.count, 1);
+    assert_eq!(codex_latency.avg_ms, 4000.0);
+    assert_eq!(codex_latency.input_tokens_p50, None);
+    assert_eq!(codex_latency.derived_tokens_per_sec_p50, None);
+    assert_eq!(codex_latency.output_input_ratio_p50, None);
+
+    let series = reader::query_latency_series(&conn, None, None, 3600, None, false).unwrap();
+    assert_eq!(series.len(), 2);
+    assert!(series.iter().any(|row| {
+        row.model.as_deref() == Some("codex-test-model") && row.count == 1 && row.avg_ms == 4000.0
+    }));
+
+    let calls = reader::query_calls_series(&conn, None, None, 3600, false).unwrap();
+    assert!(calls
+        .iter()
+        .any(|row| { row.model.as_deref() == Some("codex-test-model") && row.requests == 1 }));
+
+    // Codex does not emit usage attributes, so it must not appear in cost
+    // analytics as a fabricated zero-cost request.
+    let cost_series =
+        reader::query_cost_series(&conn, None, None, 3600 * 1_000_000_000, None).unwrap();
+    assert_eq!(cost_series.len(), 1);
+    assert_eq!(cost_series[0].model.as_deref(), Some("opencode-test-model"));
+
+    let top_spans = reader::query_top_spans(
+        &conn,
+        None,
+        None,
+        10,
+        otelite_core::api::TopSpanSort::TotalTokens,
+        false,
+    )
+    .unwrap();
+    assert_eq!(top_spans.len(), 1);
+    assert_eq!(top_spans[0].model.as_deref(), Some("opencode-test-model"));
+}

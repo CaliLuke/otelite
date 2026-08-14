@@ -11,10 +11,14 @@ use otelite_receiver::http::HttpServer;
 use otelite_storage::{sqlite::SqliteBackend, StorageBackend, StorageConfig};
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::time::sleep;
 
-/// Helper to start HTTP server on random port and return the address
-async fn start_test_server() -> (String, HttpServer) {
+/// Starts an HTTP server with isolated file-backed SQLite storage.
+///
+/// The returned directory must remain alive until the server has processed all
+/// requests because SQLite opens the database lazily.
+async fn start_test_server() -> (String, HttpServer, TempDir) {
     let mut config = ReceiverConfig::new();
     // Use port 0 to let OS assign a random available port
     config.http_addr = "127.0.0.1:0".parse().expect("Failed to parse address");
@@ -22,7 +26,9 @@ async fn start_test_server() -> (String, HttpServer) {
     let server = HttpServer::new(config);
 
     // Create storage backend
-    let mut storage = SqliteBackend::new(StorageConfig::default());
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let storage_config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
+    let mut storage = SqliteBackend::new(storage_config);
     storage
         .initialize()
         .await
@@ -38,12 +44,12 @@ async fn start_test_server() -> (String, HttpServer) {
         .await
         .expect("Failed to get local address");
 
-    (format!("http://{}", addr), server)
+    (format!("http://{}", addr), server, temp_dir)
 }
 
 #[tokio::test]
 async fn test_http_metrics_endpoint_success() {
-    let (base_url, server) = start_test_server().await;
+    let (base_url, server, _temp_dir) = start_test_server().await;
 
     // Create test request
     let protobuf_data = create_metrics_protobuf();
@@ -65,7 +71,7 @@ async fn test_http_metrics_endpoint_success() {
 
 #[tokio::test]
 async fn test_http_logs_endpoint_success() {
-    let (base_url, server) = start_test_server().await;
+    let (base_url, server, _temp_dir) = start_test_server().await;
 
     // Create test request
     let protobuf_data = create_logs_protobuf();
@@ -87,7 +93,7 @@ async fn test_http_logs_endpoint_success() {
 
 #[tokio::test]
 async fn test_http_traces_endpoint_success() {
-    let (base_url, server) = start_test_server().await;
+    let (base_url, server, _temp_dir) = start_test_server().await;
 
     // Create test request
     let protobuf_data = create_traces_protobuf();
@@ -109,7 +115,7 @@ async fn test_http_traces_endpoint_success() {
 
 #[tokio::test]
 async fn test_http_invalid_protobuf() {
-    let (base_url, server) = start_test_server().await;
+    let (base_url, server, _temp_dir) = start_test_server().await;
 
     // Create invalid protobuf data
     let body = create_invalid_protobuf();
@@ -132,7 +138,7 @@ async fn test_http_invalid_protobuf() {
 
 #[tokio::test]
 async fn test_http_empty_protobuf() {
-    let (base_url, server) = start_test_server().await;
+    let (base_url, server, _temp_dir) = start_test_server().await;
 
     // Create empty protobuf data
     let body = create_empty_protobuf();
@@ -155,7 +161,7 @@ async fn test_http_empty_protobuf() {
 
 #[tokio::test]
 async fn test_http_server_health_check() {
-    let (base_url, server) = start_test_server().await;
+    let (base_url, server, _temp_dir) = start_test_server().await;
 
     // Check health endpoint
     let client = reqwest::Client::new();
@@ -181,7 +187,7 @@ async fn test_http_server_health_check() {
 
 #[tokio::test]
 async fn test_http_concurrent_requests() {
-    let (base_url, server) = start_test_server().await;
+    let (base_url, server, _temp_dir) = start_test_server().await;
 
     // Send concurrent requests
     let client = reqwest::Client::new();

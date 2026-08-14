@@ -53,10 +53,13 @@ impl TracesHandler {
 mod tests {
     use super::*;
     use otelite_storage::{sqlite::SqliteBackend, StorageBackend, StorageConfig};
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_traces_handler_process() {
-        let mut storage = SqliteBackend::new(StorageConfig::default());
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
+        let mut storage = SqliteBackend::new(config);
         storage
             .initialize()
             .await

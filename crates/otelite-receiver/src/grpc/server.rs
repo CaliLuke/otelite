@@ -141,16 +141,19 @@ impl GrpcServer {
 mod tests {
     use super::*;
     use otelite_storage::{sqlite::SqliteBackend, StorageBackend, StorageConfig};
+    use tempfile::TempDir;
 
-    fn create_test_storage() -> Arc<dyn StorageBackend> {
-        let storage = SqliteBackend::new(StorageConfig::default());
-        Arc::new(storage)
+    fn create_test_storage() -> (Arc<dyn StorageBackend>, TempDir) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
+        let storage = SqliteBackend::new(config);
+        (Arc::new(storage), temp_dir)
     }
 
     #[test]
     fn test_grpc_server_creation() {
         let config = ReceiverConfig::new();
-        let storage = create_test_storage();
+        let (storage, _temp_dir) = create_test_storage();
         let server = GrpcServer::new(config, storage);
         assert!(server.health_checker().is_alive());
     }
@@ -158,7 +161,7 @@ mod tests {
     #[test]
     fn test_grpc_server_shutdown() {
         let config = ReceiverConfig::new();
-        let storage = create_test_storage();
+        let (storage, _temp_dir) = create_test_storage();
         let server = GrpcServer::new(config, storage);
         server.shutdown();
         // Shutdown notification sent successfully
@@ -167,7 +170,7 @@ mod tests {
     #[test]
     fn test_grpc_server_with_concurrency_limit() {
         let config = ReceiverConfig::new();
-        let storage = create_test_storage();
+        let (storage, _temp_dir) = create_test_storage();
         let server = GrpcServer::with_concurrency_limit(config, storage, 100);
         assert!(server.can_accept_request());
         assert_eq!(server.request_semaphore().available_permits(), 100);
@@ -176,7 +179,7 @@ mod tests {
     #[test]
     fn test_grpc_server_backpressure_check() {
         let config = ReceiverConfig::new();
-        let storage = create_test_storage();
+        let (storage, _temp_dir) = create_test_storage();
         let server = GrpcServer::new(config, storage);
         // Default limit is 1000
         assert!(server.can_accept_request());
