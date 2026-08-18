@@ -15,6 +15,9 @@ use otelite_core::telemetry::{
 };
 use std::collections::HashMap;
 
+const TRACE_ID_BYTES: usize = 16;
+const SPAN_ID_BYTES: usize = 8;
+
 /// Convert OTLP logs request to internal log records
 pub fn convert_logs(request: ExportLogsServiceRequest) -> Vec<LogRecord> {
     let mut logs = Vec::new();
@@ -51,17 +54,14 @@ pub fn convert_logs(request: ExportLogsServiceRequest) -> Vec<LogRecord> {
                     Some(log_record.severity_text)
                 };
 
-                let trace_id = if log_record.trace_id.is_empty() {
-                    None
-                } else {
-                    Some(bytes_to_hex(&log_record.trace_id))
-                };
-
-                let span_id = if log_record.span_id.is_empty() {
-                    None
-                } else {
-                    Some(bytes_to_hex(&log_record.span_id))
-                };
+                let trace_id = optional_otel_id(
+                    &log_record.trace_id,
+                    TRACE_ID_BYTES,
+                    "trace_id",
+                    "log record",
+                );
+                let span_id =
+                    optional_otel_id(&log_record.span_id, SPAN_ID_BYTES, "span_id", "log record");
 
                 logs.push(LogRecord {
                     timestamp: log_record.time_unix_nano as i64,
@@ -100,14 +100,22 @@ pub fn convert_traces(request: ExportTraceServiceRequest) -> Vec<Trace> {
             }
 
             for span in scope_spans.spans {
-                let trace_id = bytes_to_hex(&span.trace_id);
-                let span_id = bytes_to_hex(&span.span_id);
-
-                let parent_span_id = if span.parent_span_id.is_empty() {
-                    None
-                } else {
-                    Some(bytes_to_hex(&span.parent_span_id))
+                let Some(trace_id) =
+                    required_otel_id(&span.trace_id, TRACE_ID_BYTES, "trace_id", &span.name)
+                else {
+                    continue;
                 };
+                let Some(span_id) =
+                    required_otel_id(&span.span_id, SPAN_ID_BYTES, "span_id", &span.name)
+                else {
+                    continue;
+                };
+                let parent_span_id = optional_otel_id(
+                    &span.parent_span_id,
+                    SPAN_ID_BYTES,
+                    "parent_span_id",
+                    &span.name,
+                );
 
                 let kind = SpanKind::from_i32(span.kind).unwrap_or(SpanKind::Internal);
 
@@ -388,6 +396,44 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+fn required_otel_id(
+    bytes: &[u8],
+    expected_len: usize,
+    field: &'static str,
+    record: &str,
+) -> Option<String> {
+    if is_valid_otel_id(bytes, expected_len) {
+        return Some(bytes_to_hex(bytes));
+    }
+
+    tracing::warn!(
+        field,
+        expected_len,
+        actual_len = bytes.len(),
+        is_zero = !bytes.is_empty() && bytes.iter().all(|byte| *byte == 0),
+        record,
+        "Skipping telemetry record with invalid OTLP identifier"
+    );
+    None
+}
+
+fn optional_otel_id(
+    bytes: &[u8],
+    expected_len: usize,
+    field: &'static str,
+    record: &str,
+) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    required_otel_id(bytes, expected_len, field, record)
+}
+
+fn is_valid_otel_id(bytes: &[u8], expected_len: usize) -> bool {
+    bytes.len() == expected_len && bytes.iter().any(|byte| *byte != 0)
+}
+
 /// Convert OTLP severity number to internal SeverityLevel
 fn convert_severity(severity_number: i32) -> SeverityLevel {
     // OTLP severity numbers: 1-4=TRACE, 5-8=DEBUG, 9-12=INFO, 13-16=WARN, 17-20=ERROR, 21-24=FATAL
@@ -429,6 +475,59 @@ mod tests {
             "0102030405060708"
         );
         assert_eq!(bytes_to_hex(&[0xff, 0xaa, 0xbb]), "ffaabb");
+    }
+
+    #[test]
+    fn test_is_valid_otel_id_requires_exact_nonzero_length() {
+        assert!(is_valid_otel_id(&[1; TRACE_ID_BYTES], TRACE_ID_BYTES));
+        assert!(is_valid_otel_id(&[1; SPAN_ID_BYTES], SPAN_ID_BYTES));
+        assert!(!is_valid_otel_id(&[0; TRACE_ID_BYTES], TRACE_ID_BYTES));
+        assert!(!is_valid_otel_id(&[1; TRACE_ID_BYTES + 1], TRACE_ID_BYTES));
+        assert!(!is_valid_otel_id(&[1; SPAN_ID_BYTES - 1], SPAN_ID_BYTES));
+    }
+
+    #[test]
+    fn test_convert_traces_rejects_invalid_ids_and_omits_invalid_parent() {
+        let valid_trace_id = vec![1; TRACE_ID_BYTES];
+        let valid_span_id = vec![2; SPAN_ID_BYTES];
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: None,
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![
+                        OtlpSpan {
+                            trace_id: vec![1; TRACE_ID_BYTES + 1],
+                            span_id: valid_span_id.clone(),
+                            name: "oversized-trace-id".to_string(),
+                            ..Default::default()
+                        },
+                        OtlpSpan {
+                            trace_id: valid_trace_id.clone(),
+                            span_id: vec![2; SPAN_ID_BYTES + 1],
+                            name: "oversized-span-id".to_string(),
+                            ..Default::default()
+                        },
+                        OtlpSpan {
+                            trace_id: valid_trace_id,
+                            span_id: valid_span_id,
+                            parent_span_id: vec![3; SPAN_ID_BYTES + 1],
+                            name: "valid-child".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let traces = convert_traces(request);
+
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].spans.len(), 1);
+        assert_eq!(traces[0].spans[0].name, "valid-child");
+        assert_eq!(traces[0].spans[0].parent_span_id, None);
     }
 
     #[test]

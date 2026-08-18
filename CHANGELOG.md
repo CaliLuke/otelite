@@ -15,6 +15,9 @@ have to work around), not implementation detail.
 
 ### Fixed
 
+- **Invalid OTLP trace identifiers are rejected before storage.** Oversized,
+  undersized, and all-zero trace or span IDs can no longer create corrupt trace
+  records; malformed parent IDs are omitted from otherwise valid spans.
 - **Malformed stored telemetry JSON now raises diagnostics.** Read operations
   retain their existing fallback values while logging the affected field and
   record identity, making data corruption visible without exposing payloads.
