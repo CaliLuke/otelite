@@ -5,12 +5,27 @@ use otelite_core::telemetry::metric::MetricType;
 use otelite_core::telemetry::{LogRecord, Metric, Span};
 use rusqlite::Connection;
 use serde_json;
+use std::collections::HashMap;
+
+fn scope_json(attributes: &HashMap<String, String>) -> Result<String> {
+    let name = attributes.get("otel.scope.name");
+    let version = attributes.get("otel.scope.version");
+    match (name, version) {
+        (None, None) => Ok("{}".to_string()),
+        _ => serde_json::to_string(&serde_json::json!({
+            "name": name,
+            "version": version,
+        }))
+        .map_err(StorageError::from),
+    }
+}
 
 /// Write a log record to the database
 pub fn write_log(conn: &Connection, log: &LogRecord) -> Result<()> {
     // Serialize complex fields to JSON
     let attributes = serde_json::to_string(&log.attributes)?;
     let resource = serde_json::to_string(&log.resource)?;
+    let scope = scope_json(&log.attributes)?;
 
     conn.execute(
         "INSERT INTO logs (
@@ -28,7 +43,7 @@ pub fn write_log(conn: &Connection, log: &LogRecord) -> Result<()> {
             &log.body,
             attributes,
             resource,
-            "{}", // scope placeholder
+            scope,
         ],
     )
     .map_err(|e| StorageError::WriteError(format!("Failed to write log: {}", e)))?;
@@ -42,6 +57,7 @@ pub fn write_span(conn: &Connection, span: &Span) -> Result<()> {
     let attributes = serde_json::to_string(&span.attributes)?;
     let events = serde_json::to_string(&span.events)?;
     let resource = serde_json::to_string(&span.resource)?;
+    let scope = scope_json(&span.attributes)?;
 
     conn.execute(
         "INSERT INTO spans (
@@ -62,7 +78,7 @@ pub fn write_span(conn: &Connection, span: &Span) -> Result<()> {
             span.status.code as i32,
             span.status.message.as_deref(),
             resource,
-            "{}", // scope placeholder
+            scope,
         ],
     )
     .map_err(|e| StorageError::WriteError(format!("Failed to write span: {}", e)))?;
@@ -75,6 +91,7 @@ pub fn write_metric(conn: &Connection, metric: &Metric) -> Result<()> {
     // Serialize complex fields to JSON
     let attributes = serde_json::to_string(&metric.attributes)?;
     let resource = serde_json::to_string(&metric.resource)?;
+    let scope = scope_json(&metric.attributes)?;
 
     // Determine metric type and values based on MetricType
     let (metric_type, value_int, value_double, value_histogram, value_summary) =
@@ -117,7 +134,7 @@ pub fn write_metric(conn: &Connection, metric: &Metric) -> Result<()> {
             value_summary,
             attributes,
             resource,
-            "{}", // scope placeholder
+            scope,
         ],
     )
     .map_err(|e| StorageError::WriteError(format!("Failed to write metric: {}", e)))?;
@@ -170,6 +187,31 @@ mod tests {
     }
 
     #[test]
+    fn test_write_log_persists_scope() {
+        let conn = setup_test_db();
+        let log = LogRecord {
+            timestamp: 1234567890,
+            observed_timestamp: None,
+            severity: SeverityLevel::Info,
+            severity_text: None,
+            body: "scope".to_string(),
+            attributes: HashMap::from([
+                ("otel.scope.name".to_string(), "opencode".to_string()),
+                ("otel.scope.version".to_string(), "1.18.15".to_string()),
+            ]),
+            resource: None,
+            trace_id: None,
+            span_id: None,
+        };
+
+        write_log(&conn, &log).unwrap();
+        let scope: String = conn
+            .query_row("SELECT scope FROM logs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(scope, r#"{"name":"opencode","version":"1.18.15"}"#);
+    }
+
+    #[test]
     fn test_write_span() {
         let conn = setup_test_db();
 
@@ -201,6 +243,36 @@ mod tests {
     }
 
     #[test]
+    fn test_write_span_persists_scope() {
+        let conn = setup_test_db();
+        let span = Span {
+            trace_id: "trace123".to_string(),
+            span_id: "span456".to_string(),
+            parent_span_id: None,
+            name: "test-span".to_string(),
+            kind: SpanKind::Internal,
+            start_time: 1234567890,
+            end_time: 1234567900,
+            attributes: HashMap::from([(
+                "otel.scope.name".to_string(),
+                "codex_cli_rs".to_string(),
+            )]),
+            events: Vec::new(),
+            status: SpanStatus {
+                code: StatusCode::Ok,
+                message: None,
+            },
+            resource: None,
+        };
+
+        write_span(&conn, &span).unwrap();
+        let scope: String = conn
+            .query_row("SELECT scope FROM spans", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(scope, r#"{"name":"codex_cli_rs","version":null}"#);
+    }
+
+    #[test]
     fn test_write_metric() {
         let conn = setup_test_db();
 
@@ -222,5 +294,31 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_write_metric_persists_scope() {
+        let conn = setup_test_db();
+        let metric = Metric {
+            name: "test.metric".to_string(),
+            description: None,
+            unit: None,
+            metric_type: MetricType::Gauge(42.0),
+            timestamp: 1234567890,
+            attributes: HashMap::from([(
+                "otel.scope.name".to_string(),
+                "com.anthropic.claude_code.tracing".to_string(),
+            )]),
+            resource: None,
+        };
+
+        write_metric(&conn, &metric).unwrap();
+        let scope: String = conn
+            .query_row("SELECT scope FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            scope,
+            r#"{"name":"com.anthropic.claude_code.tracing","version":null}"#
+        );
     }
 }

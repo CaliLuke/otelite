@@ -11,6 +11,12 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **New telemetry preserves instrumentation scope.** Newly ingested logs,
+  spans, and metrics retain their scope name and version for reliable
+  attribution; existing stored data is unchanged.
+
 ## [0.1.61] - 2026-08-18
 
 ### Fixed
