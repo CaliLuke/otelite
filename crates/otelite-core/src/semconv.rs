@@ -56,6 +56,17 @@ pub const MODEL_KEYS: &[&str] = &[
     "model",
 ];
 
+/// Request model identifier.
+///
+/// Capability reports must not substitute a response model, because providers
+/// can route a request to a different serving model.
+pub const REQUEST_MODEL_KEYS: &[&str] = &[
+    "gen_ai.request.model",
+    "llm.request.model",
+    "llm.model_name",
+    "model",
+];
+
 /// Provider / system (openai, anthropic, bedrock, ...).
 pub const SYSTEM_KEYS: &[&str] = &[
     "gen_ai.provider.name",

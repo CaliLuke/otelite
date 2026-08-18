@@ -9,10 +9,10 @@ use thiserror::Error;
 
 use crate::api::{
     CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
-    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, LatencyByContextBin,
-    LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage, RequestParamProfile,
-    RetrievalStats, RetryStats, SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
-    TopSpanSort, TruncationRateByModel,
+    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount,
+    GenAiCapabilityResponse, LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair,
+    ModelUsage, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, SystemUsage,
+    TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -234,6 +234,20 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<LatencyStats>>;
+
+    /// Native GenAI telemetry capability coverage and quality.
+    ///
+    /// Backends without this optional analytic can retain source compatibility.
+    async fn query_genai_capabilities(
+        &self,
+        _start_time: Option<i64>,
+        _end_time: Option<i64>,
+        _model: Option<&str>,
+    ) -> Result<GenAiCapabilityResponse> {
+        Err(StorageError::QueryError(
+            "GenAI capability reporting is not supported by this backend".to_string(),
+        ))
+    }
 
     /// Error rate by model across LLM spans.
     async fn query_error_rate(

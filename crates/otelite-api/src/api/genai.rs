@@ -9,10 +9,10 @@ use axum::{
 use otelite_core::api::{
     CacheHitRateByModel, CallsSeriesPoint, ContextTypeSplit, ConversationCostRow,
     ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown,
-    FinishReasonCount, HourOfDayBucket, LatencyByContextBin, LatencySeriesPoint, LatencyStats,
-    ModelDriftPair, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
-    StopReasonCount, TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan,
-    TopSpanSort, TruncationRateByModel,
+    FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket, LatencyByContextBin,
+    LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile, RetrievalStats,
+    RetryStats, SessionCostRow, StopReasonCount, TokenUsageResponse, ToolApprovalStats,
+    ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -429,6 +429,36 @@ pub async fn get_latency_stats(
         })?;
 
     Ok(Json(rows))
+}
+
+/// Get native GenAI telemetry capability coverage and provenance.
+#[utoipa::path(
+    get,
+    path = "/api/genai/capabilities",
+    params(ModelAnalyticsQuery),
+    responses(
+        (status = 200, description = "GenAI telemetry capability report", body = GenAiCapabilityResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_genai_capabilities(
+    State(state): State<AppState>,
+    Query(query): Query<ModelAnalyticsQuery>,
+) -> Result<Json<GenAiCapabilityResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let report = state
+        .storage
+        .query_genai_capabilities(query.start_time, query.end_time, query.model.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query GenAI capabilities: {e}"
+                ))),
+            )
+        })?;
+    Ok(Json(report))
 }
 
 /// Query parameters for error-rate endpoint

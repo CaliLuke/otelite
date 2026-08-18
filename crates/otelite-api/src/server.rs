@@ -43,6 +43,7 @@ use utoipa::OpenApi;
         crate::api::genai::get_top_conversations,
         crate::api::genai::get_finish_reasons,
         crate::api::genai::get_latency_stats,
+        crate::api::genai::get_genai_capabilities,
         crate::api::genai::get_error_rate,
         crate::api::genai::get_tool_usage,
         crate::api::genai::get_retry_stats,
@@ -85,6 +86,10 @@ use utoipa::OpenApi;
             otelite_core::api::TopSpan,
             otelite_core::api::FinishReasonCount,
             otelite_core::api::LatencyStats,
+            otelite_core::api::GenAiMetricCapability,
+            otelite_core::api::GenAiCorrelationProvenance,
+            otelite_core::api::GenAiCapabilityReport,
+            otelite_core::api::GenAiCapabilityResponse,
             otelite_core::api::ErrorRateByModel,
             otelite_core::api::ToolUsage,
             otelite_core::api::RetryStats,
@@ -251,6 +256,7 @@ impl DashboardServer {
             .route("/api/genai/top_conversations", get(crate::api::genai::get_top_conversations))
             .route("/api/genai/finish_reasons", get(crate::api::genai::get_finish_reasons))
             .route("/api/genai/latency_stats", get(crate::api::genai::get_latency_stats))
+            .route("/api/genai/capabilities", get(crate::api::genai::get_genai_capabilities))
             .route("/api/genai/error_rate", get(crate::api::genai::get_error_rate))
             .route("/api/genai/tool_usage", get(crate::api::genai::get_tool_usage))
             .route("/api/genai/retry_stats", get(crate::api::genai::get_retry_stats))

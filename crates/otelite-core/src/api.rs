@@ -678,6 +678,73 @@ pub struct LatencyStats {
     pub output_input_ratio_p99: Option<f64>,
 }
 
+/// Native telemetry capability for one metric within an emitter/model group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GenAiMetricCapability {
+    /// Request spans eligible to provide this metric.
+    pub eligible_count: usize,
+    /// Spans carrying an attribute for this metric, whether valid or invalid.
+    pub observed_count: usize,
+    /// Parsed and usable observations.
+    pub valid_count: usize,
+    /// Present observations rejected as invalid.
+    pub invalid_count: usize,
+    /// `available`, `sparse`, or `absent`.
+    pub availability: String,
+    /// `reliable`, `invalid`, `degenerate`, or `not_assessed`.
+    pub quality: String,
+    /// `native`, `correlated`, or `unavailable`.
+    pub derivation: String,
+    /// Attribute keys that supplied observed values, with occurrence counts.
+    #[serde(default)]
+    pub source_attributes: HashMap<String, usize>,
+}
+
+/// Correlation outcome counts for one capability group.
+///
+/// The initial report only supports native observations, so every count is
+/// zero and `rule` is `none`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GenAiCorrelationProvenance {
+    pub rule: String,
+    pub matched_count: usize,
+    pub unmatched_count: usize,
+    pub rejected_count: usize,
+    pub ambiguous_count: usize,
+}
+
+/// GenAI telemetry capabilities grouped by provider, model and emitter fingerprint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GenAiCapabilityReport {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    /// Stable non-content fingerprint; it does not expose correlation identifiers.
+    pub emitter_fingerprint: String,
+    pub emitter: String,
+    pub adapter_rule: String,
+    /// Canonical request spans after duplicate OTLP deliveries are removed.
+    pub request_count: usize,
+    pub input_tokens: GenAiMetricCapability,
+    pub output_tokens: GenAiMetricCapability,
+    pub cache_creation_tokens: GenAiMetricCapability,
+    pub cache_read_tokens: GenAiMetricCapability,
+    pub ttft: GenAiMetricCapability,
+    pub correlation: GenAiCorrelationProvenance,
+}
+
+/// Result metadata for a bounded GenAI capability query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GenAiCapabilityResponse {
+    pub reports: Vec<GenAiCapabilityReport>,
+    pub canonical_span_count: usize,
+    pub duplicate_span_count: usize,
+    pub truncated: bool,
+}
+
 /// Error-rate summary for LLM spans grouped by model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

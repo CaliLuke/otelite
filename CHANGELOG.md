@@ -11,6 +11,13 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **GenAI telemetry capability API.** `GET /api/genai/capabilities` shows which
+  per-model metrics are native, unavailable, sparse, invalid, or degenerate,
+  including their source attributes and duplicate-delivery count. This makes
+  missing token or TTFT data explicit instead of silently estimating it.
+
 ## [0.1.59] - 2026-08-18
 
 ### Fixed

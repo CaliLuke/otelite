@@ -321,6 +321,21 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    pub async fn fetch_genai_capabilities(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::GenAiCapabilityResponse> {
+        let url = format!("{}/api/genai/capabilities", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch GenAI capabilities: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_truncation_rate(
         &self,
         params: Vec<(&str, String)>,
@@ -1119,6 +1134,39 @@ mod tests {
         assert_eq!(buckets[0].llm_calls, 0);
         assert_eq!(buckets[23].hour, 23);
         assert_eq!(buckets[23].llm_calls, 46);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_genai_capabilities_success() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/capabilities")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "model".to_string(),
+                "gpt-5".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "reports": [],
+                    "canonical_span_count": 0,
+                    "duplicate_span_count": 0,
+                    "truncated": false
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client
+            .fetch_genai_capabilities(vec![("model", "gpt-5".to_string())])
+            .await;
+
+        mock.assert_async().await;
+        let report = result.unwrap();
+        assert_eq!(report.canonical_span_count, 0);
+        assert!(!report.truncated);
     }
 
     #[tokio::test]

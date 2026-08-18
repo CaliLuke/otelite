@@ -4,9 +4,11 @@ use axum::Router;
 use http_body_util::BodyExt;
 use otelite_api::api::health::HealthResponse;
 use otelite_api::api::metrics::AggregateResponse;
-use otelite_api::server::{AppState, QueryCache};
+use otelite_api::config::DashboardConfig;
+use otelite_api::server::{AppState, DashboardServer, QueryCache};
 use otelite_core::api::{
-    ErrorResponse, LogEntry, LogsResponse, MetricResponse, TraceDetail, TracesResponse,
+    ErrorResponse, GenAiCapabilityResponse, LogEntry, LogsResponse, MetricResponse, TraceDetail,
+    TracesResponse,
 };
 use otelite_core::telemetry::log::{LogRecord, SeverityLevel};
 use otelite_core::telemetry::metric::{Metric, MetricType};
@@ -97,6 +99,10 @@ fn build_test_router(storage: Arc<dyn StorageBackend>) -> Router {
             axum::routing::get(otelite_api::api::metrics::get_metric_timeseries),
         )
         .route(
+            "/api/genai/capabilities",
+            axum::routing::get(otelite_api::api::genai::get_genai_capabilities),
+        )
+        .route(
             "/api/openapi.json",
             axum::routing::get(|| async {
                 use utoipa::OpenApi;
@@ -167,6 +173,88 @@ fn create_test_metric(name: &str, timestamp: i64, value: f64) -> Metric {
             },
         }),
     }
+}
+
+#[tokio::test]
+async fn test_genai_capabilities_reports_native_and_unavailable_metrics() {
+    let (storage, _tmp) = setup_test_storage().await;
+
+    let mut open_code = create_test_span(
+        "open-code-trace",
+        "open-code-span",
+        "opencode.llm",
+        1_000_000_000,
+        2_000_000_000,
+    );
+    open_code
+        .attributes
+        .insert("openinference.span.kind".to_string(), "LLM".to_string());
+    open_code
+        .attributes
+        .insert("llm.system".to_string(), "opencode-go".to_string());
+    open_code
+        .attributes
+        .insert("gen_ai.request.model".to_string(), "gpt-5".to_string());
+    open_code
+        .attributes
+        .insert("gen_ai.usage.input_tokens".to_string(), "0".to_string());
+    open_code
+        .attributes
+        .insert("gen_ai.usage.output_tokens".to_string(), "32".to_string());
+    storage.write_span(&open_code).await.unwrap();
+
+    let mut codex = create_test_span(
+        "codex-trace",
+        "codex-span",
+        "run_sampling_request",
+        3_000_000_000,
+        4_000_000_000,
+    );
+    codex
+        .attributes
+        .insert("otel.scope.name".to_string(), "codex_cli_rs".to_string());
+    codex
+        .attributes
+        .insert("model".to_string(), "gpt-5".to_string());
+    storage.write_span(&codex).await.unwrap();
+
+    let app = build_test_router(storage);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/genai/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let report: GenAiCapabilityResponse = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(report.canonical_span_count, 2);
+    assert_eq!(report.duplicate_span_count, 0);
+    let open_code = report
+        .reports
+        .iter()
+        .find(|entry| entry.emitter == "opencode")
+        .unwrap();
+    assert_eq!(open_code.input_tokens.valid_count, 1);
+    assert_eq!(
+        open_code
+            .input_tokens
+            .source_attributes
+            .get("gen_ai.usage.input_tokens"),
+        Some(&1)
+    );
+    let codex = report
+        .reports
+        .iter()
+        .find(|entry| entry.emitter == "codex")
+        .unwrap();
+    assert_eq!(codex.output_tokens.derivation, "unavailable");
+    assert_eq!(codex.correlation.rule, "none");
 }
 
 #[tokio::test]
@@ -1250,7 +1338,7 @@ async fn test_get_metric_timeseries_with_time_range() {
 #[tokio::test]
 async fn test_openapi_spec() {
     let (storage, _tmp) = setup_test_storage().await;
-    let app = build_test_router(storage);
+    let app = DashboardServer::new(DashboardConfig::default(), storage).build_router();
 
     let response = app
         .oneshot(
@@ -1274,6 +1362,10 @@ async fn test_openapi_spec() {
     // Verify it's valid OpenAPI JSON
     assert!(spec.is_object());
     assert!(spec.get("openapi").is_some());
+    assert!(spec["paths"].get("/api/genai/capabilities").is_some());
+    assert!(spec["components"]["schemas"]
+        .get("GenAiCapabilityResponse")
+        .is_some());
 }
 
 #[tokio::test]

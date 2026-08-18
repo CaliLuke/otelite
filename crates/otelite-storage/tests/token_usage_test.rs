@@ -287,6 +287,60 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
 }
 
 #[test]
+fn test_genai_capability_report_keeps_codex_usage_unavailable_and_deduplicates_spans() {
+    let conn = setup_test_db();
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('codex-trace', 'request', 'run_sampling_request', 0, 0, 4000000000,
+                   '{"model":"codex-test-model","otel.scope.name":"codex_cli_rs"}', 1)"#,
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('codex-trace', 'request', 'run_sampling_request', 0, 0, 4000000000,
+                   '{"model":"codex-test-model","otel.scope.name":"codex_cli_rs"}', 1)"#,
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('opencode-trace', 'request', 'opencode.llm', 0, 0, 2000000000,
+                   '{"openinference.span.kind":"LLM","llm.system":"opencode-go","llm.model_name":"opencode-test-model","llm.usage.prompt_tokens":"0","llm.usage.completion_tokens":"40"}', 1)"#,
+        [],
+    )
+    .unwrap();
+
+    let report = reader::query_genai_capabilities(&conn, None, None, None).unwrap();
+    assert_eq!(report.canonical_span_count, 2);
+    assert_eq!(report.duplicate_span_count, 1);
+    let codex = report
+        .reports
+        .iter()
+        .find(|row| row.emitter == "codex")
+        .unwrap();
+    assert_eq!(codex.output_tokens.availability, "absent");
+    assert_eq!(codex.output_tokens.derivation, "unavailable");
+    assert_eq!(codex.correlation.rule, "none");
+
+    let opencode = report
+        .reports
+        .iter()
+        .find(|row| row.emitter == "opencode")
+        .unwrap();
+    assert_eq!(opencode.input_tokens.availability, "available");
+    assert_eq!(opencode.input_tokens.valid_count, 1);
+    assert_eq!(opencode.input_tokens.derivation, "native");
+    assert_eq!(
+        opencode
+            .input_tokens
+            .source_attributes
+            .get("llm.usage.prompt_tokens"),
+        Some(&1)
+    );
+}
+
+#[test]
 fn test_latency_stats_normalizes_ttft_and_flags_degenerate_groups() {
     let conn = setup_test_db();
 

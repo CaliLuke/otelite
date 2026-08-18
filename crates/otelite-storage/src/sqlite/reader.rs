@@ -5,8 +5,12 @@ use crate::{QueryParams, StorageStats};
 use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::telemetry::log::SeverityLevel;
 use otelite_core::telemetry::trace::{SpanKind, SpanStatus, StatusCode};
-use otelite_core::telemetry::{LogRecord, Metric, Span};
+use otelite_core::telemetry::{
+    classify_span_capabilities, GenAiEmitter, GenAiSpanRole, LogRecord, Metric, MetricObservation,
+    Span,
+};
 use rusqlite::{Connection, Row};
+use std::collections::{BTreeMap, HashMap};
 
 /// Query logs from the database
 pub fn query_logs(conn: &Connection, params: &QueryParams) -> Result<Vec<LogRecord>> {
@@ -579,6 +583,298 @@ fn token_exprs() -> TokenExprs {
         llm_span_guard: semconv::llm_span_guard("attributes"),
         request_span_guard: semconv::request_span_guard("attributes"),
     }
+}
+
+const CAPABILITY_QUERY_LIMIT: usize = 10_000;
+
+#[derive(Default)]
+struct CapabilityMetricAccum {
+    eligible_count: usize,
+    observed_count: usize,
+    valid_count: usize,
+    invalid_count: usize,
+    degenerate_count: usize,
+    source_attributes: HashMap<String, usize>,
+}
+
+impl CapabilityMetricAccum {
+    fn record(
+        &mut self,
+        observation: MetricObservation,
+        source_attribute: Option<&str>,
+        degenerate: bool,
+    ) {
+        self.eligible_count += 1;
+        if let Some(attribute) = source_attribute {
+            *self
+                .source_attributes
+                .entry(attribute.to_string())
+                .or_default() += 1;
+            self.observed_count += 1;
+        }
+        match observation {
+            MetricObservation::Valid => {
+                self.valid_count += 1;
+                if degenerate {
+                    self.degenerate_count += 1;
+                }
+            },
+            MetricObservation::Invalid => self.invalid_count += 1,
+            MetricObservation::Absent => {},
+        }
+    }
+
+    fn report(&self, ttft: bool) -> otelite_core::api::GenAiMetricCapability {
+        let availability = if self.valid_count == 0 {
+            "absent"
+        } else if self.valid_count == self.eligible_count {
+            "available"
+        } else {
+            "sparse"
+        };
+        let quality = if ttft
+            && self.valid_count >= TTFT_DEGENERATE_MIN_SAMPLES
+            && self.degenerate_count * 100 >= self.valid_count * 90
+        {
+            "degenerate"
+        } else if self.invalid_count > 0 {
+            "invalid"
+        } else if self.valid_count > 0 {
+            "reliable"
+        } else {
+            "not_assessed"
+        };
+        otelite_core::api::GenAiMetricCapability {
+            eligible_count: self.eligible_count,
+            observed_count: self.observed_count,
+            valid_count: self.valid_count,
+            invalid_count: self.invalid_count,
+            availability: availability.to_string(),
+            quality: quality.to_string(),
+            derivation: if self.observed_count > 0 {
+                "native".to_string()
+            } else {
+                "unavailable".to_string()
+            },
+            source_attributes: self.source_attributes.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CapabilityAccum {
+    request_count: usize,
+    input_tokens: CapabilityMetricAccum,
+    output_tokens: CapabilityMetricAccum,
+    cache_creation_tokens: CapabilityMetricAccum,
+    cache_read_tokens: CapabilityMetricAccum,
+    ttft: CapabilityMetricAccum,
+}
+
+type CapabilityGroupKey = (Option<String>, Option<String>, String, String, String);
+
+fn first_semconv_attribute<'a>(
+    attrs: &'a HashMap<String, String>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| attrs.get(*key).map(String::as_str))
+}
+
+fn emitter_name(emitter: GenAiEmitter) -> &'static str {
+    match emitter {
+        GenAiEmitter::ClaudeCode => "claude_code",
+        GenAiEmitter::Codex => "codex",
+        GenAiEmitter::OpenCode => "opencode",
+        GenAiEmitter::StandardOtel => "standard_otel",
+        GenAiEmitter::Unknown => "unknown",
+        GenAiEmitter::Ambiguous => "ambiguous",
+    }
+}
+
+fn capability_fingerprint(
+    adapter_rule: &str,
+    service_name: Option<&str>,
+    scope_name: Option<&str>,
+    scope_version: Option<&str>,
+) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for part in [
+        adapter_rule,
+        service_name.unwrap_or(""),
+        scope_name.unwrap_or(""),
+        scope_version.unwrap_or(""),
+    ] {
+        for byte in part.bytes().chain([0_u8]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("genai-v1-{hash:016x}")
+}
+
+/// Query native GenAI telemetry capability coverage without cross-span correlation.
+pub fn query_genai_capabilities(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    model: Option<&str>,
+) -> Result<otelite_core::api::GenAiCapabilityResponse> {
+    let mut where_clause = String::from("WHERE 1=1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+    let sql = format!(
+        "WITH ranked_spans AS (
+            SELECT
+                trace_id, span_id, parent_span_id, name, kind, start_time, end_time,
+                COALESCE(attributes, '{{}}') AS attributes,
+                COALESCE(events, '[]') AS events,
+                COALESCE(status_code, 0) AS status_code,
+                status_message,
+                COALESCE(resource, 'null') AS resource,
+                created_at,
+                id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY trace_id, span_id
+                    ORDER BY created_at ASC, id ASC
+                ) AS delivery_rank,
+                COUNT(*) OVER (PARTITION BY trace_id, span_id) - 1 AS duplicate_deliveries
+            FROM spans {where_clause}
+         )
+         SELECT
+            trace_id, span_id, parent_span_id, name, kind, start_time, end_time,
+            attributes, events, status_code, status_message, resource,
+            duplicate_deliveries
+         FROM ranked_spans
+         WHERE delivery_rank = 1
+         ORDER BY created_at ASC, id ASC
+         LIMIT {}",
+        CAPABILITY_QUERY_LIMIT + 1
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|param| param.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|error| {
+        StorageError::QueryError(format!("Failed to prepare GenAI capability query: {error}"))
+    })?;
+    let mut rows: Vec<(Span, usize)> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((parse_span_row(row)?, row.get::<_, usize>(12)?))
+        })
+        .map_err(|error| {
+            StorageError::QueryError(format!("Failed to execute GenAI capability query: {error}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            StorageError::QueryError(format!("Failed to parse GenAI capability rows: {error}"))
+        })?;
+    let truncated = rows.len() > CAPABILITY_QUERY_LIMIT;
+    rows.truncate(CAPABILITY_QUERY_LIMIT);
+
+    let mut canonical_request_span_count = 0;
+    let mut duplicate_span_count = 0;
+    let mut groups: BTreeMap<CapabilityGroupKey, CapabilityAccum> = BTreeMap::new();
+    for (span, duplicate_deliveries) in rows {
+        let capabilities = classify_span_capabilities(&span);
+        if capabilities.role != GenAiSpanRole::RequestTiming {
+            continue;
+        }
+        let request_model =
+            first_semconv_attribute(&span.attributes, otelite_core::semconv::REQUEST_MODEL_KEYS);
+        if model.is_some_and(|model| request_model != Some(model)) {
+            continue;
+        }
+        canonical_request_span_count += 1;
+        duplicate_span_count += duplicate_deliveries;
+        let provider =
+            first_semconv_attribute(&span.attributes, otelite_core::semconv::SYSTEM_KEYS)
+                .map(str::to_string);
+        let model = request_model.map(str::to_string);
+        let fingerprint = capability_fingerprint(
+            capabilities.fingerprint.adapter_rule,
+            capabilities.fingerprint.service_name.as_deref(),
+            capabilities.fingerprint.scope_name.as_deref(),
+            capabilities.fingerprint.scope_version.as_deref(),
+        );
+        let key = (
+            provider,
+            model,
+            fingerprint,
+            emitter_name(capabilities.emitter).to_string(),
+            capabilities.fingerprint.adapter_rule.to_string(),
+        );
+        let entry = groups.entry(key).or_default();
+        entry.request_count += 1;
+        entry.input_tokens.record(
+            capabilities.input_tokens.observation,
+            capabilities.input_tokens.source_attribute,
+            false,
+        );
+        entry.output_tokens.record(
+            capabilities.output_tokens.observation,
+            capabilities.output_tokens.source_attribute,
+            false,
+        );
+        entry.cache_creation_tokens.record(
+            capabilities.cache_creation_tokens.observation,
+            capabilities.cache_creation_tokens.source_attribute,
+            false,
+        );
+        entry.cache_read_tokens.record(
+            capabilities.cache_read_tokens.observation,
+            capabilities.cache_read_tokens.source_attribute,
+            false,
+        );
+        let duration_secs =
+            (span.end_time.saturating_sub(span.start_time)) as f64 / 1_000_000_000.0;
+        let degenerate = capabilities.ttft.seconds.is_some_and(|seconds| {
+            duration_secs > 0.0 && seconds / duration_secs >= TTFT_DEGENERATE_RATIO
+        });
+        entry.ttft.record(
+            capabilities.ttft.observation,
+            capabilities.ttft.source_attribute,
+            degenerate,
+        );
+    }
+
+    let reports = groups
+        .into_iter()
+        .map(
+            |((provider, model, emitter_fingerprint, emitter, adapter_rule), accum)| {
+                otelite_core::api::GenAiCapabilityReport {
+                    provider,
+                    model,
+                    emitter_fingerprint,
+                    emitter,
+                    adapter_rule,
+                    request_count: accum.request_count,
+                    input_tokens: accum.input_tokens.report(false),
+                    output_tokens: accum.output_tokens.report(false),
+                    cache_creation_tokens: accum.cache_creation_tokens.report(false),
+                    cache_read_tokens: accum.cache_read_tokens.report(false),
+                    ttft: accum.ttft.report(true),
+                    correlation: otelite_core::api::GenAiCorrelationProvenance {
+                        rule: "none".to_string(),
+                        matched_count: 0,
+                        unmatched_count: 0,
+                        rejected_count: 0,
+                        ambiguous_count: 0,
+                    },
+                }
+            },
+        )
+        .collect();
+    Ok(otelite_core::api::GenAiCapabilityResponse {
+        reports,
+        canonical_span_count: canonical_request_span_count,
+        duplicate_span_count,
+        truncated,
+    })
 }
 
 /// Query token usage statistics for GenAI/LLM spans

@@ -362,6 +362,38 @@ impl StorageBackend for SqliteBackend {
         reader::query_latency_stats(conn, start_time, end_time, model).map_err(StorageError::from)
     }
 
+    async fn query_genai_capabilities(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        model: Option<&str>,
+    ) -> Result<otelite_core::api::GenAiCapabilityResponse> {
+        let db_path = self.db_path();
+        let model = model.map(str::to_string);
+        if db_path.to_string_lossy().starts_with(":memory:") {
+            let conn_guard = self.conn.lock();
+            let conn = conn_guard
+                .as_ref()
+                .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+            return reader::query_genai_capabilities(conn, start_time, end_time, model.as_deref())
+                .map_err(StorageError::from);
+        }
+
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path).map_err(|error| {
+                StorageError::QueryError(format!(
+                    "Failed to open read connection for GenAI capability query: {error}"
+                ))
+            })?;
+            reader::query_genai_capabilities(&conn, start_time, end_time, model.as_deref())
+                .map_err(StorageError::from)
+        })
+        .await
+        .map_err(|error| {
+            StorageError::QueryError(format!("GenAI capability query worker failed: {error}"))
+        })?
+    }
+
     async fn query_error_rate(
         &self,
         start_time: Option<i64>,
