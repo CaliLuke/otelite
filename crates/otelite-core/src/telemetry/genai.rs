@@ -5,6 +5,8 @@
 //!
 //! See: https://opentelemetry.io/docs/specs/semconv/gen-ai/
 
+use super::trace::Span;
+use crate::semconv;
 use std::collections::HashMap;
 
 /// Quality of a time-to-first-token observation after normalisation.
@@ -18,6 +20,215 @@ pub enum TtftValueQuality {
     Invalid,
 }
 
+/// Emitter family recognised from a verified span signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenAiEmitter {
+    ClaudeCode,
+    Codex,
+    OpenCode,
+    StandardOtel,
+    Unknown,
+    Ambiguous,
+}
+
+/// Role of a span recognised by a GenAI adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenAiSpanRole {
+    /// The span represents one completed request whose duration is meaningful.
+    RequestTiming,
+    /// The span holds request usage but does not have verified timing semantics.
+    RequestUsage,
+    /// The span is not a verified GenAI request shape.
+    Other,
+}
+
+/// Whether one metric attribute was absent, valid, or invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricObservation {
+    Absent,
+    Valid,
+    Invalid,
+}
+
+/// How a metric was associated with a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricDerivation {
+    /// The value was observed directly on the verified request span.
+    Native,
+    /// The value was associated by a separately verified correlation rule.
+    Correlated,
+    /// No value can be associated safely.
+    Unavailable,
+}
+
+/// Why a metric cannot be used for request-level analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricRejectionReason {
+    MissingNativeAttribute,
+    UnverifiedUsageSignature,
+    NotARequestSpan,
+    AmbiguousEmitter,
+    InvalidInteger,
+    InvalidSeconds,
+    InvalidDuration,
+}
+
+/// Unit used by the emitter for an observed TTFT attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtftSourceUnit {
+    Seconds,
+    Milliseconds,
+}
+
+/// Stable non-content fields that identify the emitter rule which matched a span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenAiEmitterFingerprint {
+    pub adapter_rule: &'static str,
+    pub service_name: Option<String>,
+    pub scope_name: Option<String>,
+    pub scope_version: Option<String>,
+}
+
+/// Evidence for one token counter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenMetricEvidence {
+    pub observation: MetricObservation,
+    pub derivation: MetricDerivation,
+    pub source_attribute: Option<&'static str>,
+    pub value: Option<u64>,
+    pub rejection_reason: Option<MetricRejectionReason>,
+}
+
+/// Evidence for one time-to-first-token observation, normalised to seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TtftMetricEvidence {
+    pub observation: MetricObservation,
+    pub derivation: MetricDerivation,
+    pub source_attribute: Option<&'static str>,
+    pub source_unit: Option<TtftSourceUnit>,
+    pub seconds: Option<f64>,
+    pub rejection_reason: Option<MetricRejectionReason>,
+}
+
+/// Capabilities and evidence observed on one span.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenAiSpanCapabilities {
+    pub emitter: GenAiEmitter,
+    pub role: GenAiSpanRole,
+    pub fingerprint: GenAiEmitterFingerprint,
+    pub input_tokens: TokenMetricEvidence,
+    pub output_tokens: TokenMetricEvidence,
+    pub cache_creation_tokens: TokenMetricEvidence,
+    pub cache_read_tokens: TokenMetricEvidence,
+    pub ttft: TtftMetricEvidence,
+}
+
+/// Classify one span using verified request signatures and per-metric evidence.
+///
+/// This deliberately does not correlate separate spans. In particular, Codex
+/// usage remains unavailable until a deterministic one-to-one join is verified.
+pub fn classify_span_capabilities(span: &Span) -> GenAiSpanCapabilities {
+    let attrs = &span.attributes;
+    let has_model = first_attribute(attrs, semconv::MODEL_KEYS).is_some();
+    let has_standard_metric = first_attribute(attrs, semconv::INPUT_TOKEN_KEYS).is_some()
+        || first_attribute(attrs, semconv::OUTPUT_TOKEN_KEYS).is_some()
+        || first_attribute(attrs, semconv::CACHE_CREATION_TOKEN_KEYS).is_some()
+        || first_attribute(attrs, semconv::CACHE_READ_TOKEN_KEYS).is_some()
+        || raw_ttft(attrs).is_some();
+    let mut candidates = Vec::new();
+
+    if span.name.starts_with("claude_code.llm_request") && has_model {
+        candidates.push((GenAiEmitter::ClaudeCode, "claude-code-request-v1"));
+    }
+    if span.name == semconv::CODEX_LLM_REQUEST_SPAN_NAME
+        && has_model
+        && attrs
+            .get("otel.scope.name")
+            .is_some_and(|scope| scope == semconv::CODEX_OTEL_SCOPE_NAME)
+    {
+        candidates.push((GenAiEmitter::Codex, "codex-request-v1"));
+    }
+    if attrs
+        .get("openinference.span.kind")
+        .is_some_and(|kind| kind == "LLM")
+        && attrs
+            .get("llm.system")
+            .is_some_and(|system| system == "opencode-go")
+        && has_model
+    {
+        candidates.push((GenAiEmitter::OpenCode, "opencode-request-v1"));
+    }
+    if candidates.is_empty()
+        && first_attribute(attrs, semconv::SYSTEM_KEYS).is_some()
+        && has_model
+        && has_standard_metric
+    {
+        candidates.push((GenAiEmitter::StandardOtel, "standard-otel-request-v1"));
+    }
+
+    let (emitter, role, adapter_rule) = match candidates.as_slice() {
+        [] => (
+            GenAiEmitter::Unknown,
+            GenAiSpanRole::Other,
+            "unidentified-v1",
+        ),
+        [(emitter, rule)] => (*emitter, GenAiSpanRole::RequestTiming, *rule),
+        _ => (
+            GenAiEmitter::Ambiguous,
+            GenAiSpanRole::Other,
+            "ambiguous-signature-v1",
+        ),
+    };
+    let fingerprint = GenAiEmitterFingerprint {
+        adapter_rule,
+        service_name: span
+            .resource
+            .as_ref()
+            .and_then(|resource| resource.service_name().cloned()),
+        scope_name: attrs.get("otel.scope.name").cloned(),
+        scope_version: attrs.get("otel.scope.version").cloned(),
+    };
+    let unavailable_reason = match emitter {
+        GenAiEmitter::Codex => MetricRejectionReason::UnverifiedUsageSignature,
+        GenAiEmitter::Ambiguous => MetricRejectionReason::AmbiguousEmitter,
+        GenAiEmitter::Unknown => MetricRejectionReason::NotARequestSpan,
+        _ => MetricRejectionReason::MissingNativeAttribute,
+    };
+    let duration_secs = (span.end_time.saturating_sub(span.start_time)) as f64 / 1_000_000_000.0;
+    let native_request = role == GenAiSpanRole::RequestTiming;
+
+    GenAiSpanCapabilities {
+        emitter,
+        role,
+        fingerprint,
+        input_tokens: token_evidence(
+            attrs,
+            semconv::INPUT_TOKEN_KEYS,
+            native_request,
+            unavailable_reason,
+        ),
+        output_tokens: token_evidence(
+            attrs,
+            semconv::OUTPUT_TOKEN_KEYS,
+            native_request,
+            unavailable_reason,
+        ),
+        cache_creation_tokens: token_evidence(
+            attrs,
+            semconv::CACHE_CREATION_TOKEN_KEYS,
+            native_request,
+            unavailable_reason,
+        ),
+        cache_read_tokens: token_evidence(
+            attrs,
+            semconv::CACHE_READ_TOKEN_KEYS,
+            native_request,
+            unavailable_reason,
+        ),
+        ttft: ttft_evidence(attrs, duration_secs, native_request, unavailable_reason),
+    }
+}
+
 /// Extract TTFT from span attributes, normalising to **seconds**.
 ///
 /// Attribute priority:
@@ -25,17 +236,140 @@ pub enum TtftValueQuality {
 /// - `llm.time_to_first_token` — non-standard, assumed seconds
 /// - `ttft_ms` — Claude Code custom attribute, in **milliseconds**; divided by 1000
 pub fn extract_ttft_secs(attrs: &HashMap<String, String>) -> Option<f64> {
-    if let Some(v) = attrs
-        .get("gen_ai.server.time_to_first_token")
-        .or_else(|| attrs.get("llm.time_to_first_token"))
-        .and_then(|s| s.parse::<f64>().ok())
-    {
-        return Some(v);
+    let (_, raw, unit) = raw_ttft(attrs)?;
+    normalise_ttft_secs(raw, unit).ok()
+}
+
+fn first_attribute<'a>(
+    attrs: &'a HashMap<String, String>,
+    keys: &[&'static str],
+) -> Option<(&'static str, &'a str)> {
+    keys.iter()
+        .find_map(|key| attrs.get(*key).map(|value| (*key, value.as_str())))
+}
+
+fn raw_ttft(attrs: &HashMap<String, String>) -> Option<(&'static str, &str, TtftSourceUnit)> {
+    if let Some(value) = attrs.get("gen_ai.server.time_to_first_token") {
+        return Some((
+            "gen_ai.server.time_to_first_token",
+            value,
+            TtftSourceUnit::Seconds,
+        ));
+    }
+    if let Some(value) = attrs.get("llm.time_to_first_token") {
+        return Some(("llm.time_to_first_token", value, TtftSourceUnit::Seconds));
     }
     attrs
         .get("ttft_ms")
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|ms| ms / 1000.0)
+        .map(|value| ("ttft_ms", value.as_str(), TtftSourceUnit::Milliseconds))
+}
+
+fn normalise_ttft_secs(raw: &str, unit: TtftSourceUnit) -> Result<f64, MetricRejectionReason> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| MetricRejectionReason::InvalidSeconds)?;
+    if !value.is_finite() {
+        return Err(MetricRejectionReason::InvalidSeconds);
+    }
+    Ok(match unit {
+        TtftSourceUnit::Seconds => value,
+        TtftSourceUnit::Milliseconds => value / 1000.0,
+    })
+}
+
+fn token_evidence(
+    attrs: &HashMap<String, String>,
+    keys: &[&'static str],
+    native_request: bool,
+    absent_reason: MetricRejectionReason,
+) -> TokenMetricEvidence {
+    let Some((source_attribute, raw)) = first_attribute(attrs, keys) else {
+        return TokenMetricEvidence {
+            observation: MetricObservation::Absent,
+            derivation: MetricDerivation::Unavailable,
+            source_attribute: None,
+            value: None,
+            rejection_reason: Some(absent_reason),
+        };
+    };
+    match raw.parse::<u64>() {
+        Ok(value) => TokenMetricEvidence {
+            observation: MetricObservation::Valid,
+            derivation: if native_request {
+                MetricDerivation::Native
+            } else {
+                MetricDerivation::Unavailable
+            },
+            source_attribute: Some(source_attribute),
+            value: Some(value),
+            rejection_reason: (!native_request).then_some(absent_reason),
+        },
+        Err(_) => TokenMetricEvidence {
+            observation: MetricObservation::Invalid,
+            derivation: if native_request {
+                MetricDerivation::Native
+            } else {
+                MetricDerivation::Unavailable
+            },
+            source_attribute: Some(source_attribute),
+            value: None,
+            rejection_reason: Some(MetricRejectionReason::InvalidInteger),
+        },
+    }
+}
+
+fn ttft_evidence(
+    attrs: &HashMap<String, String>,
+    duration_secs: f64,
+    native_request: bool,
+    absent_reason: MetricRejectionReason,
+) -> TtftMetricEvidence {
+    let Some((source_attribute, raw, source_unit)) = raw_ttft(attrs) else {
+        return TtftMetricEvidence {
+            observation: MetricObservation::Absent,
+            derivation: MetricDerivation::Unavailable,
+            source_attribute: None,
+            source_unit: None,
+            seconds: None,
+            rejection_reason: Some(absent_reason),
+        };
+    };
+    let seconds = match normalise_ttft_secs(raw, source_unit) {
+        Ok(seconds) => seconds,
+        Err(reason) => {
+            return TtftMetricEvidence {
+                observation: MetricObservation::Invalid,
+                derivation: if native_request {
+                    MetricDerivation::Native
+                } else {
+                    MetricDerivation::Unavailable
+                },
+                source_attribute: Some(source_attribute),
+                source_unit: Some(source_unit),
+                seconds: None,
+                rejection_reason: Some(reason),
+            };
+        },
+    };
+    let rejection_reason = (classify_ttft_value(Some(seconds), duration_secs)
+        != TtftValueQuality::Valid)
+        .then_some(MetricRejectionReason::InvalidDuration);
+    TtftMetricEvidence {
+        observation: if rejection_reason.is_some() {
+            MetricObservation::Invalid
+        } else {
+            MetricObservation::Valid
+        },
+        derivation: if native_request {
+            MetricDerivation::Native
+        } else {
+            MetricDerivation::Unavailable
+        },
+        source_attribute: Some(source_attribute),
+        source_unit: Some(source_unit),
+        seconds: rejection_reason.is_none().then_some(seconds),
+        rejection_reason: rejection_reason.or((!native_request).then_some(absent_reason)),
+    }
 }
 
 /// Classify a normalised TTFT value against its enclosing span duration.
@@ -301,6 +635,26 @@ fn format_number(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::trace::{SpanKind, SpanStatus, StatusCode};
+
+    fn test_span(name: &str, duration_secs: i64, attributes: HashMap<String, String>) -> Span {
+        Span {
+            trace_id: "trace".to_string(),
+            span_id: "span".to_string(),
+            parent_span_id: None,
+            name: name.to_string(),
+            kind: SpanKind::Client,
+            start_time: 0,
+            end_time: duration_secs * 1_000_000_000,
+            attributes,
+            events: Vec::new(),
+            status: SpanStatus {
+                code: StatusCode::Ok,
+                message: None,
+            },
+            resource: None,
+        }
+    }
 
     #[test]
     fn test_detect_openai_span() {
@@ -576,6 +930,17 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_ttft_secs_does_not_fall_back_from_invalid_preferred_value() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "gen_ai.server.time_to_first_token".to_string(),
+            "not-a-number".to_string(),
+        );
+        attrs.insert("ttft_ms".to_string(), "1200".to_string());
+        assert!(extract_ttft_secs(&attrs).is_none());
+    }
+
+    #[test]
     fn test_classify_ttft_value() {
         assert_eq!(classify_ttft_value(None, 1.0), TtftValueQuality::Absent);
         assert_eq!(
@@ -594,5 +959,103 @@ mod tests {
             classify_ttft_value(Some(f64::NAN), 1.0),
             TtftValueQuality::Invalid
         );
+    }
+
+    #[test]
+    fn test_classify_span_capabilities_keeps_codex_timing_only() {
+        let mut attrs = HashMap::new();
+        attrs.insert("model".to_string(), "codex-test".to_string());
+        attrs.insert("otel.scope.name".to_string(), "codex_cli_rs".to_string());
+        let capabilities = classify_span_capabilities(&test_span("run_sampling_request", 4, attrs));
+        assert_eq!(capabilities.emitter, GenAiEmitter::Codex);
+        assert_eq!(capabilities.role, GenAiSpanRole::RequestTiming);
+        assert_eq!(
+            capabilities.output_tokens.derivation,
+            MetricDerivation::Unavailable
+        );
+        assert_eq!(
+            capabilities.output_tokens.rejection_reason,
+            Some(MetricRejectionReason::UnverifiedUsageSignature)
+        );
+    }
+
+    #[test]
+    fn test_classify_span_capabilities_recognizes_opencode_flat_tokens() {
+        let mut attrs = HashMap::new();
+        attrs.insert("openinference.span.kind".to_string(), "LLM".to_string());
+        attrs.insert("llm.system".to_string(), "opencode-go".to_string());
+        attrs.insert(
+            "llm.model_name".to_string(),
+            "opencode-test-model".to_string(),
+        );
+        attrs.insert("llm.usage.prompt_tokens".to_string(), "10".to_string());
+        attrs.insert("llm.usage.completion_tokens".to_string(), "4".to_string());
+        let capabilities = classify_span_capabilities(&test_span("opencode.llm", 2, attrs));
+        assert_eq!(capabilities.emitter, GenAiEmitter::OpenCode);
+        assert_eq!(capabilities.input_tokens.value, Some(10));
+        assert_eq!(capabilities.output_tokens.value, Some(4));
+        assert_eq!(
+            capabilities.output_tokens.source_attribute,
+            Some("llm.usage.completion_tokens")
+        );
+    }
+
+    #[test]
+    fn test_classify_span_capabilities_accepts_every_token_alias_and_zero_tokens() {
+        for keys in [
+            semconv::INPUT_TOKEN_KEYS,
+            semconv::OUTPUT_TOKEN_KEYS,
+            semconv::CACHE_CREATION_TOKEN_KEYS,
+            semconv::CACHE_READ_TOKEN_KEYS,
+        ] {
+            for key in keys {
+                let mut attrs = HashMap::new();
+                attrs.insert("model".to_string(), "claude-test".to_string());
+                attrs.insert((*key).to_string(), "0".to_string());
+                let capabilities =
+                    classify_span_capabilities(&test_span("claude_code.llm_request", 2, attrs));
+                let evidence = if semconv::INPUT_TOKEN_KEYS.contains(key) {
+                    &capabilities.input_tokens
+                } else if semconv::OUTPUT_TOKEN_KEYS.contains(key) {
+                    &capabilities.output_tokens
+                } else if semconv::CACHE_CREATION_TOKEN_KEYS.contains(key) {
+                    &capabilities.cache_creation_tokens
+                } else {
+                    &capabilities.cache_read_tokens
+                };
+                assert_eq!(evidence.observation, MetricObservation::Valid);
+                assert_eq!(evidence.value, Some(0));
+                assert_eq!(evidence.source_attribute, Some(*key));
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_span_capabilities_marks_unverified_span_unavailable() {
+        let mut attrs = HashMap::new();
+        attrs.insert("llm.usage.prompt_tokens".to_string(), "10".to_string());
+        let capabilities = classify_span_capabilities(&test_span("transport", 2, attrs));
+        assert_eq!(capabilities.emitter, GenAiEmitter::Unknown);
+        assert_eq!(capabilities.role, GenAiSpanRole::Other);
+        assert_eq!(
+            capabilities.input_tokens.derivation,
+            MetricDerivation::Unavailable
+        );
+        assert_eq!(
+            capabilities.input_tokens.rejection_reason,
+            Some(MetricRejectionReason::NotARequestSpan)
+        );
+    }
+
+    #[test]
+    fn test_classify_span_capabilities_keeps_claude_adapter_with_standard_attributes() {
+        let mut attrs = HashMap::new();
+        attrs.insert("model".to_string(), "claude-test".to_string());
+        attrs.insert("gen_ai.provider.name".to_string(), "anthropic".to_string());
+        attrs.insert("output_tokens".to_string(), "4".to_string());
+        let capabilities =
+            classify_span_capabilities(&test_span("claude_code.llm_request", 2, attrs));
+        assert_eq!(capabilities.emitter, GenAiEmitter::ClaudeCode);
+        assert_eq!(capabilities.output_tokens.value, Some(4));
     }
 }
