@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.60] - 2026-08-18
+
 ### Added
 
 - **GenAI telemetry capability API.** `GET /api/genai/capabilities` shows which
