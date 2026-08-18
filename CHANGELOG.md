@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.62] - 2026-08-18
+
 ### Fixed
 
 - **Malformed stored telemetry JSON now raises diagnostics.** Read operations
