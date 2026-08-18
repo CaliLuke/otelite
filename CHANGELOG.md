@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.63] - 2026-08-18
+
 ### Fixed
 
 - **Trace exports now report rejected malformed spans.** OTLP clients, HTTP
