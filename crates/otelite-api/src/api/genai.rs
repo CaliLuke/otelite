@@ -183,7 +183,8 @@ pub struct TopSpansQuery {
     pub end_time: Option<i64>,
     /// Maximum number of spans to return (default 20, capped at 100)
     pub limit: Option<usize>,
-    /// Sort dimension: total_tokens (default), duration, output_input_ratio, cache_efficiency
+    /// Sort dimension: total_tokens (default), duration, output_input_ratio
+    /// (output divided by all input context), cache_efficiency
     #[serde(default)]
     pub sort_by: TopSpanSort,
     /// When true, return only spans with finish_reason max_tokens or length

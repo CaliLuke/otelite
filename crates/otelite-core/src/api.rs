@@ -552,7 +552,8 @@ pub enum TopSpanSort {
     TotalTokens,
     /// By span duration (slowest first).
     Duration,
-    /// By output/input token ratio (most verbose first).
+    /// By output/context token ratio (most verbose first). The context includes
+    /// uncached input plus cache reads and cache creation.
     OutputInputRatio,
     /// By cache efficiency: worst cache-read rate (ascending) first.
     CacheEfficiency,
@@ -672,7 +673,10 @@ pub struct LatencyStats {
     pub input_tokens_p50: Option<i64>,
     pub input_tokens_p95: Option<i64>,
     pub input_tokens_p99: Option<i64>,
-    /// Distribution of output/input token ratio (generation verbosity).
+    /// Distribution of output/context token ratio (generation verbosity).
+    ///
+    /// The legacy field name is retained for API compatibility. Context includes
+    /// uncached input plus cache reads and cache creation.
     pub output_input_ratio_p50: Option<f64>,
     pub output_input_ratio_p95: Option<f64>,
     pub output_input_ratio_p99: Option<f64>,

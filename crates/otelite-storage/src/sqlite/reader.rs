@@ -1156,7 +1156,7 @@ pub fn query_top_spans(
         TopSpanSort::TotalTokens => "total_tokens DESC".to_string(),
         TopSpanSort::Duration => "(end_time - start_time) DESC".to_string(),
         TopSpanSort::OutputInputRatio => {
-            "CAST(COALESCE(output_tokens_raw, 0) AS FLOAT) / NULLIF(COALESCE(input_tokens_raw, 0), 0) DESC".to_string()
+            "CAST(COALESCE(output_tokens_raw, 0) AS FLOAT) / NULLIF(COALESCE(input_tokens_raw, 0) + COALESCE(cache_creation_tokens_raw, 0) + COALESCE(cache_read_tokens_raw, 0), 0) DESC".to_string()
         }
         TopSpanSort::CacheEfficiency => {
             "CAST(COALESCE(cache_read_tokens_raw, 0) AS FLOAT) / NULLIF(COALESCE(input_tokens_raw, 0) + COALESCE(cache_read_tokens_raw, 0), 0) ASC".to_string()
@@ -1187,6 +1187,7 @@ pub fn query_top_spans(
             json_extract(attributes, '$.\"gen_ai.conversation.id\"') as conversation_id,
             {input} as input_tokens_raw,
             {output} as output_tokens_raw,
+            {cache_creation} as cache_creation_tokens_raw,
             {cache_read} as cache_read_tokens_raw
         FROM spans
         {where_clause}
@@ -1599,12 +1600,16 @@ pub fn query_latency_stats(
             json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
             json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms,
             {output} AS output_tokens,
-            {input} AS input_tokens
+            {input} AS input_tokens,
+            {cache_creation} AS cache_creation_tokens,
+            {cache_read} AS cache_read_tokens
         FROM spans
         {where_clause}",
         model = exprs.model,
         output = exprs.output,
         input = exprs.input,
+        cache_creation = exprs.cache_creation,
+        cache_read = exprs.cache_read,
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -1621,6 +1626,8 @@ pub fn query_latency_stats(
         custom_ttft_ms: Option<String>,
         output_tokens: Option<i64>,
         input_tokens: Option<i64>,
+        cache_creation_tokens: Option<i64>,
+        cache_read_tokens: Option<i64>,
     }
 
     let rows: Vec<Row> = stmt
@@ -1633,6 +1640,8 @@ pub fn query_latency_stats(
                 custom_ttft_ms: row.get::<_, Option<String>>(4)?,
                 output_tokens: row.get::<_, Option<i64>>(5)?,
                 input_tokens: row.get::<_, Option<i64>>(6)?,
+                cache_creation_tokens: row.get::<_, Option<i64>>(7)?,
+                cache_read_tokens: row.get::<_, Option<i64>>(8)?,
             })
         })
         .map_err(|e| {
@@ -1665,11 +1674,14 @@ pub fn query_latency_stats(
         }
         if let Some(input_tokens) = r.input_tokens {
             entry.input_tokens.push(input_tokens);
-            if input_tokens > 0 {
-                entry
-                    .output_input_ratios
-                    .push(r.output_tokens.unwrap_or_default() as f64 / input_tokens as f64);
-            }
+        }
+        let input_context_tokens = r.input_tokens.unwrap_or_default()
+            + r.cache_creation_tokens.unwrap_or_default()
+            + r.cache_read_tokens.unwrap_or_default();
+        if input_context_tokens > 0 {
+            entry
+                .output_input_ratios
+                .push(r.output_tokens.unwrap_or_default() as f64 / input_context_tokens as f64);
         }
     }
 

@@ -307,20 +307,10 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
             } else {
                 "—".to_string()
             };
-            // Flag rows where p95 output/input ratio is extreme — primary slowness signal.
-            let ratio_high = latency_ratio_is_high(s.output_input_ratio_p95);
             let ratio_str_p95 = s
                 .output_input_ratio_p95
                 .map_or("—".to_string(), |v| format!("{:.2}×", v));
-            let ratio_p95_cell = if ratio_high {
-                Cell::from(ratio_str_p95).style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Cell::from(ratio_str_p95)
-            };
+            let ratio_p95_cell = Cell::from(ratio_str_p95);
             let p95_dur_cell = if latency_p95_is_slow(s.p95_ms) {
                 Cell::from(s.p95_ms.to_string()).style(Style::default().fg(Color::Yellow))
             } else {
@@ -355,11 +345,7 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
                 Cell::from(ttft_p50),
                 Cell::from(ttft_p95),
             ]);
-            if ratio_high {
-                row.style(Style::default().fg(Color::Yellow))
-            } else {
-                row
-            }
+            row
         })
         .collect();
 
@@ -830,12 +816,6 @@ fn truncate(s: &str, max: usize) -> String {
 
 // ── Pure helpers — extracted so they can be unit-tested without a Frame ──────
 
-/// Returns true when the p95 output/input ratio is high enough to warrant a
-/// warning highlight in the latency table.  Mirrors the web UI amber threshold.
-pub(crate) fn latency_ratio_is_high(ratio_p95: Option<f64>) -> bool {
-    ratio_p95.map_or(false, |r| r > 200.0)
-}
-
 /// Returns true when the p95 duration warrants a warning highlight.
 pub(crate) fn latency_p95_is_slow(p95_ms: i64) -> bool {
     p95_ms > 30_000
@@ -1148,25 +1128,6 @@ mod tests {
             output_input_ratio_p95: ratio_p95,
             output_input_ratio_p99: None,
         }
-    }
-
-    #[test]
-    fn test_latency_ratio_high_above_threshold() {
-        let s = make_latency(5_000, Some(250.0));
-        assert!(latency_ratio_is_high(s.output_input_ratio_p95));
-    }
-
-    #[test]
-    fn test_latency_ratio_high_at_threshold_not_flagged() {
-        let s = make_latency(5_000, Some(200.0));
-        // threshold is >200, not >=200
-        assert!(!latency_ratio_is_high(s.output_input_ratio_p95));
-    }
-
-    #[test]
-    fn test_latency_ratio_none_not_flagged() {
-        let s = make_latency(5_000, None);
-        assert!(!latency_ratio_is_high(s.output_input_ratio_p95));
     }
 
     #[test]

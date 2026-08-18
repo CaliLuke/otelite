@@ -852,11 +852,8 @@ class AnalyticsView {
             const ratioP95 = s.output_input_ratio_p95 != null ? `${Number(s.output_input_ratio_p95).toFixed(2)}×` : null;
             const ratioCell = (ratioP50 != null && ratioP95 != null) ? `${ratioP50} / ${ratioP95}` : '—';
 
-            // Flag rows where output volume is extremely high — this is often
-            // the primary cause of slow sessions (generation takes minutes).
-            const ratioHigh = (s.output_input_ratio_p95 || 0) > 200;
             return `
-                <tr${ratioHigh ? ' class="latency-ratio-warn"' : ''}>
+                <tr>
                     <td>${this._esc(s.model || '—')}</td>
                     <td class="num">${fmt(s.count || 0)}</td>
                     <td class="num">${this._esc(this._formatDuration(s.avg_ms))}</td>
@@ -867,7 +864,7 @@ class AnalyticsView {
                     <td class="num">${this._esc(ttftP95)}</td>
                     <td class="num">${this._esc(tpsCell)}</td>
                     <td class="num">${this._esc(ctxCell)}</td>
-                    <td class="num${ratioHigh ? ' latency-ratio-high' : ''}">${this._esc(ratioCell)}</td>
+                    <td class="num">${this._esc(ratioCell)}</td>
                 </tr>`;
         }).join('');
         return `
@@ -878,7 +875,7 @@ class AnalyticsView {
                     <th>Model</th><th>Calls</th><th>Avg</th><th>P50</th><th>P95</th><th>P99</th><th>TTFT P50</th><th>TTFT P95</th>
                     <th title="Derived metric: span duration includes network and queue time, not pure generation throughput">Tok/s derived (p50/p95/p99)</th>
                     <th>Context (p50/p95/p99)</th>
-                    <th>Out/In ratio (p50/p95)</th>
+                    <th title="Output divided by uncached input, cache reads, and cache creation">Out/context ratio (p50/p95)</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
@@ -1228,7 +1225,7 @@ class AnalyticsView {
             { id: 'truncated', label: 'Truncated' },
             { id: 'sessions',  label: 'Sessions' },
             { id: 'convs',     label: 'Conversations' },
-            { id: 'verbose',   label: 'Most verbose' },
+            { id: 'verbose',   label: 'Highest output/context' },
             { id: 'cache',     label: 'Cache efficiency' },
             { id: 'errors',    label: 'Error runs' },
         ];
@@ -1354,7 +1351,7 @@ class AnalyticsView {
             cost:         '<th>Cost</th>',
             duration:     '<th>Duration</th>',
             finish_reason:'<th>Finish reason</th>',
-            ratio:        '<th>Out/In ratio</th>',
+            ratio:        '<th>Out/context ratio</th>',
             cache_rate:   '<th>Cache hit%</th>',
         }[extraCol] || '';
 
@@ -1401,7 +1398,7 @@ class AnalyticsView {
             } else if (extraCol === 'finish_reason') {
                 extraCell = `<td>${this._esc(row.finish_reason || '—')}</td>`;
             } else if (extraCol === 'ratio') {
-                const inp = row.input_tokens || 0;
+                const inp = (row.input_tokens || 0) + (row.cache_read_tokens || 0) + (row.cache_creation_tokens || 0);
                 const out = row.output_tokens || 0;
                 const ratio = inp > 0 ? (out / inp).toFixed(2) : '—';
                 extraCell = `<td>${ratio}</td>`;

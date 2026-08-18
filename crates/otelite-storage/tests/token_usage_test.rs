@@ -186,6 +186,42 @@ fn test_query_token_usage_handles_missing_token_fields() {
 }
 
 #[test]
+fn test_output_context_ratio_includes_cache_tokens() {
+    let conn = setup_test_db();
+
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('trace-no-cache', 'span-no-cache', 'llm.call', 0, 0, 1000000000,
+                   '{"gen_ai.system":"anthropic","gen_ai.request.model":"uncached-model","gen_ai.usage.input_tokens":"100","gen_ai.usage.output_tokens":"100"}', 1)"#,
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('trace-cache', 'span-cache', 'llm.call', 0, 0, 1000000000,
+                   '{"gen_ai.system":"anthropic","gen_ai.request.model":"cached-model","gen_ai.usage.input_tokens":"100","gen_ai.usage.output_tokens":"100","gen_ai.usage.cache_read.input_tokens":"900","gen_ai.usage.cache_creation.input_tokens":"1000"}', 1)"#,
+        [],
+    )
+    .unwrap();
+
+    let stats = reader::query_latency_stats(&conn, None, None, Some("cached-model")).unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].output_input_ratio_p50, Some(0.05));
+    assert_eq!(stats[0].output_input_ratio_p95, Some(0.05));
+
+    let top_spans = reader::query_top_spans(
+        &conn,
+        None,
+        None,
+        10,
+        otelite_core::api::TopSpanSort::OutputInputRatio,
+        false,
+    )
+    .unwrap();
+    assert_eq!(top_spans[0].span_id, "span-no-cache");
+}
+
+#[test]
 fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     let conn = setup_test_db();
 

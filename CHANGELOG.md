@@ -11,6 +11,12 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Output/context ratios now include prompt-cache tokens.** Latency and
+  analytics views count uncached input, cache reads, and cache creation in the
+  context denominator, so cached requests no longer appear falsely verbose.
+
 ## [0.1.60] - 2026-08-18
 
 ### Added

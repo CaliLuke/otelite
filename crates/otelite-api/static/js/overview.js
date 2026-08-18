@@ -311,21 +311,7 @@ class OverviewView {
                 });
             }
 
-            // 4. High output/input ratio — session is generating more than it reads.
-            for (const s of (latencyStats || [])) {
-                if ((s.output_input_ratio_p95 || 0) > 500) {
-                    alerts.push({
-                        level: 'info',
-                        icon: '📝',
-                        text: `${s.model}: p95 output/input ratio ${Math.round(s.output_input_ratio_p95)}× — responses are very long`,
-                        action: () => window.app.switchView('analytics'),
-                        actionLabel: 'Latency →',
-                    });
-                    break; // one message is enough
-                }
-            }
-
-            // 5. Truncated responses — any finish_reason=max_tokens is actionable.
+            // 4. Truncated responses — any finish_reason=max_tokens is actionable.
             const truncCount = (finishReasons || [])
                 .filter(r => r.reason === 'max_tokens' || r.reason === 'length')
                 .reduce((sum, r) => sum + (r.count || 0), 0);
