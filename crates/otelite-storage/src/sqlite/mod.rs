@@ -354,12 +354,30 @@ impl StorageBackend for SqliteBackend {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<otelite_core::api::LatencyStats>> {
-        let conn_guard = self.conn.lock();
-        let conn = conn_guard
-            .as_ref()
-            .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+        let db_path = self.db_path();
+        let model = model.map(str::to_string);
+        if db_path.to_string_lossy().starts_with(":memory:") {
+            let conn_guard = self.conn.lock();
+            let conn = conn_guard
+                .as_ref()
+                .ok_or_else(|| StorageError::QueryError("Database not initialized".to_string()))?;
+            return reader::query_latency_stats(conn, start_time, end_time, model.as_deref())
+                .map_err(StorageError::from);
+        }
 
-        reader::query_latency_stats(conn, start_time, end_time, model).map_err(StorageError::from)
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path).map_err(|error| {
+                StorageError::QueryError(format!(
+                    "Failed to open read connection for latency query: {error}"
+                ))
+            })?;
+            reader::query_latency_stats(&conn, start_time, end_time, model.as_deref())
+                .map_err(StorageError::from)
+        })
+        .await
+        .map_err(|error| {
+            StorageError::QueryError(format!("Latency query worker failed: {error}"))
+        })?
     }
 
     async fn query_genai_capabilities(

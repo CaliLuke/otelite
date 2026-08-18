@@ -742,6 +742,7 @@ pub struct GenAiCapabilityResponse {
     pub reports: Vec<GenAiCapabilityReport>,
     pub canonical_span_count: usize,
     pub duplicate_span_count: usize,
+    /// Older physical spans were excluded by the bounded most-recent sample.
     pub truncated: bool,
 }
 

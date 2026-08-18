@@ -714,6 +714,10 @@ fn capability_fingerprint(
 }
 
 /// Query native GenAI telemetry capability coverage without cross-span correlation.
+///
+/// The report is calculated from the most recent bounded physical-span sample.
+/// Duplicate delivery is canonicalised within that sample. `truncated` means
+/// older physical spans were not examined.
 pub fn query_genai_capabilities(
     conn: &Connection,
     start_time: Option<i64>,
@@ -731,7 +735,21 @@ pub fn query_genai_capabilities(
         params.push(Box::new(end));
     }
     let sql = format!(
-        "WITH ranked_spans AS (
+        "WITH recent_spans AS (
+            SELECT
+                trace_id, span_id, parent_span_id, name, kind, start_time, end_time,
+                COALESCE(attributes, '{{}}') AS attributes,
+                COALESCE(events, '[]') AS events,
+                COALESCE(status_code, 0) AS status_code,
+                status_message,
+                COALESCE(resource, 'null') AS resource,
+                created_at,
+                id
+            FROM spans {where_clause}
+            ORDER BY start_time DESC, id DESC
+            LIMIT {}
+         ),
+         ranked_spans AS (
             SELECT
                 trace_id, span_id, parent_span_id, name, kind, start_time, end_time,
                 COALESCE(attributes, '{{}}') AS attributes,
@@ -746,7 +764,7 @@ pub fn query_genai_capabilities(
                     ORDER BY created_at ASC, id ASC
                 ) AS delivery_rank,
                 COUNT(*) OVER (PARTITION BY trace_id, span_id) - 1 AS duplicate_deliveries
-            FROM spans {where_clause}
+            FROM recent_spans
          )
          SELECT
             trace_id, span_id, parent_span_id, name, kind, start_time, end_time,
@@ -754,8 +772,7 @@ pub fn query_genai_capabilities(
             duplicate_deliveries
          FROM ranked_spans
          WHERE delivery_rank = 1
-         ORDER BY created_at ASC, id ASC
-         LIMIT {}",
+         ORDER BY start_time DESC, id DESC",
         CAPABILITY_QUERY_LIMIT + 1
     );
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|param| param.as_ref()).collect();
@@ -773,8 +790,10 @@ pub fn query_genai_capabilities(
         .map_err(|error| {
             StorageError::QueryError(format!("Failed to parse GenAI capability rows: {error}"))
         })?;
-    let truncated = rows.len() > CAPABILITY_QUERY_LIMIT;
-    rows.truncate(CAPABILITY_QUERY_LIMIT);
+    let truncated = rows.len() == CAPABILITY_QUERY_LIMIT + 1;
+    if truncated {
+        rows.pop();
+    }
 
     let mut canonical_request_span_count = 0;
     let mut duplicate_span_count = 0;
