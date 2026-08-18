@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.59] - 2026-08-18
+
 ### Fixed
 
 - **Model cost estimates now recognise Claude Code's `[1m]` context-window
