@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.61] - 2026-08-18
+
 ### Fixed
 
 - **Output/context ratios now include prompt-cache tokens.** Latency and
