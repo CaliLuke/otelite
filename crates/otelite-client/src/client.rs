@@ -291,6 +291,21 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    pub async fn fetch_calls_series(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
+        let url = format!("{}/api/genai/calls_series", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch calls series: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_latency_by_context(
         &self,
         params: Vec<(&str, String)>,

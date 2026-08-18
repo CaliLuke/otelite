@@ -141,6 +141,7 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     let show_ctx = !state.context_split.is_empty();
     let show_tool_errs = !state.tool_errors.is_empty();
     let show_hour = state.hour_of_day.iter().any(|b| b.llm_calls > 0);
+    let show_calls = !state.calls_series.is_empty();
 
     let mut constraints = vec![Constraint::Min(5)]; // latency always shown
     if show_tools {
@@ -163,6 +164,9 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     }
     if show_hour {
         constraints.push(Constraint::Length(9));
+    }
+    if show_calls {
+        constraints.push(Constraint::Length(8));
     }
 
     let sections = Layout::default()
@@ -199,6 +203,10 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     }
     if show_hour {
         render_hour_of_day(frame, sections[idx], state);
+        idx += 1;
+    }
+    if show_calls {
+        render_calls_series(frame, sections[idx], state);
         // idx += 1; // last section
     }
     let _ = idx; // suppress unused warning if all sections are omitted
@@ -1091,6 +1099,77 @@ fn render_hour_of_day(frame: &mut Frame, area: Rect, state: &UsageState) {
             Constraint::Length(6),
             Constraint::Min(10),
             Constraint::Length(6),
+        ],
+    )
+    .header(header)
+    .block(block);
+    frame.render_widget(table, area);
+}
+
+fn render_calls_series(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Call Volume Trend ");
+    if state.calls_series.is_empty() {
+        frame.render_widget(Paragraph::new("No call trend data").block(block), area);
+        return;
+    }
+    let max_reqs = state
+        .calls_series
+        .iter()
+        .map(|p| p.requests)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let header = Row::new(vec![
+        Cell::from("Time").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Model").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Requests").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Bar").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    use chrono::{DateTime, Local, Utc};
+    let rows: Vec<Row> = state
+        .calls_series
+        .iter()
+        .map(|p| {
+            let dt = DateTime::<Utc>::from_timestamp_nanos(p.timestamp);
+            let time_str = dt.with_timezone(&Local).format("%m-%d %H:%M").to_string();
+            let model = p.model.as_deref().unwrap_or("(unknown)").to_string();
+            let bar_len = (p.requests * 15 / max_reqs).max(if p.requests > 0 { 1 } else { 0 });
+            Row::new(vec![
+                Cell::from(time_str),
+                Cell::from(model),
+                Cell::from(p.requests.to_string()),
+                Cell::from("█".repeat(bar_len)).style(Style::default().fg(Color::Green)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Min(15),
+            Constraint::Length(10),
+            Constraint::Min(10),
         ],
     )
     .header(header)

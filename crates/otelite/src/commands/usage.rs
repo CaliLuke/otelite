@@ -65,6 +65,10 @@ pub struct UsageCommand {
     #[arg(long, default_value = "3600")]
     pub bucket_secs: u64,
 
+    /// Show call volume trend over time (requests per time bucket, grouped by model)
+    #[arg(long)]
+    pub calls: bool,
+
     /// Show per-model truncation rate (finish_reason = max_tokens / length)
     #[arg(long)]
     pub truncation: bool,
@@ -189,6 +193,8 @@ struct UsageOutput {
     tool_errors: Option<Vec<otelite_core::api::ToolErrorEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hour_of_day: Option<Vec<otelite_core::api::HourOfDayBucket>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calls_series: Option<Vec<otelite_core::api::CallsSeriesPoint>>,
 }
 
 // ── pricing fetch ─────────────────────────────────────────────────────────────
@@ -550,6 +556,18 @@ impl UsageCommand {
             None
         };
 
+        // --calls
+        let calls_series: Option<Vec<otelite_core::api::CallsSeriesPoint>> = if self.calls {
+            Some(
+                storage
+                    .query_calls_series(Some(start_time), Some(end_time), self.bucket_secs, false)
+                    .await
+                    .map_err(|e| Error::ApiError(format!("Failed to query calls series: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
         // --by-session
         let by_session: Option<Vec<SessionRow>> = if self.by_session {
             let spans = storage
@@ -621,6 +639,7 @@ impl UsageCommand {
                     context_split,
                     tool_errors,
                     hour_of_day,
+                    calls_series,
                 };
                 let json = if matches!(format, OutputFormat::JsonCompact) {
                     serde_json::to_string(&output)
@@ -734,6 +753,11 @@ impl UsageCommand {
 
                 if let Some(ref buckets) = hour_of_day {
                     display_hour_of_day(buckets);
+                    println!();
+                }
+
+                if let Some(ref points) = calls_series {
+                    display_calls_series(points);
                     println!();
                 }
 
@@ -1630,6 +1654,37 @@ fn display_hour_of_day(buckets: &[otelite_core::api::HourOfDayBucket]) {
         ]);
     }
     println!("Activity by Hour of Day:");
+    println!("{}", table);
+}
+
+fn display_calls_series(points: &[otelite_core::api::CallsSeriesPoint]) {
+    use chrono::{DateTime, Local, Utc};
+
+    if points.is_empty() {
+        println!("Call Volume Trend: no data in range");
+        return;
+    }
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+
+    table.set_header(vec![
+        Cell::new("Bucket").fg(Color::Cyan),
+        Cell::new("Model").fg(Color::Cyan),
+        Cell::new("Calls / Requests").fg(Color::Cyan),
+    ]);
+
+    for p in points {
+        let dt = DateTime::<Utc>::from_timestamp_nanos(p.timestamp);
+        let bucket_str = dt.with_timezone(&Local).format("%m-%d %H:%M").to_string();
+        let model = p.model.as_deref().unwrap_or("(unknown)");
+
+        table.add_row(vec![&bucket_str, model, &p.requests.to_string()]);
+    }
+
+    println!("Call Volume Trend (per bucket × model):");
     println!("{}", table);
 }
 

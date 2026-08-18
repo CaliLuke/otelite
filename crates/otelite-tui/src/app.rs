@@ -589,6 +589,9 @@ impl App {
                 if let Ok(resp) = self.api_client.fetch_hour_of_day(vec![]).await {
                     self.usage_state.hour_of_day = resp;
                 }
+                if let Ok(resp) = self.api_client.fetch_calls_series(vec![]).await {
+                    self.usage_state.calls_series = resp;
+                }
 
                 if !had_error {
                     self.usage_state.clear_error();

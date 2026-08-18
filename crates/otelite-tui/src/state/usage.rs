@@ -1,7 +1,7 @@
 use otelite_core::api::{
-    CacheHitRateByModel, ContextTypeSplit, ConversationDepthStats, ErrorTypeBreakdown,
-    HourOfDayBucket, LatencyStats, ModelDriftPair, StopReasonCount, TokenUsageResponse,
-    ToolApprovalStats, ToolErrorEntry, ToolUsage, TruncationRateByModel,
+    CacheHitRateByModel, CallsSeriesPoint, ContextTypeSplit, ConversationDepthStats,
+    ErrorTypeBreakdown, HourOfDayBucket, LatencyStats, ModelDriftPair, StopReasonCount,
+    TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TruncationRateByModel,
 };
 
 /// State for the Usage analytics view.
@@ -20,6 +20,7 @@ pub struct UsageState {
     pub context_split: Vec<ContextTypeSplit>,
     pub tool_errors: Vec<ToolErrorEntry>,
     pub hour_of_day: Vec<HourOfDayBucket>,
+    pub calls_series: Vec<CallsSeriesPoint>,
     pub error: Option<String>,
     pub is_loading: bool,
 }

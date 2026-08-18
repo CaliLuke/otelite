@@ -11,6 +11,10 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **See call volume trend over time in CLI and TUI.** Added a new `--calls` flag to the `otelite usage` CLI subcommand and rendered a new "Call Volume Trend" panel in the TUI Usage tab, achieving full parity with the web UI's calls-over-time bar chart.
+
 ## [0.1.63] - 2026-08-18
 
 ### Fixed
