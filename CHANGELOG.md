@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.61] - 2026-08-18
+
 ### Fixed
 
 - **OpenCode prompt-cache token aliases are recognised.** Cache-read and
