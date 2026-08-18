@@ -10,6 +10,7 @@ use otelite_core::telemetry::{
     Span,
 };
 use rusqlite::{Connection, Row};
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 
 /// Query logs from the database
@@ -430,21 +431,60 @@ fn sql_operator(operator: &Operator) -> &'static str {
 
 // Helper functions to parse rows into telemetry types
 
+fn parse_json_or_default<T>(json: &str, field: &str, record: &str) -> T
+where
+    T: DeserializeOwned + Default,
+{
+    serde_json::from_str(json).unwrap_or_else(|error| {
+        tracing::warn!(
+            field,
+            record,
+            %error,
+            "Malformed JSON in stored telemetry field; using default value"
+        );
+        T::default()
+    })
+}
+
+fn parse_json_or_none<T>(json: &str, field: &str, record: &str) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_str(json)
+        .map_err(|error| {
+            tracing::warn!(
+                field,
+                record,
+                %error,
+                "Malformed JSON in stored telemetry field; omitting value"
+            );
+        })
+        .ok()
+}
+
 fn parse_log_row(row: &Row) -> rusqlite::Result<LogRecord> {
+    let timestamp: i64 = row.get("timestamp")?;
+    let trace_id: Option<String> = row.get("trace_id")?;
+    let span_id: Option<String> = row.get("span_id")?;
+    let record = format!(
+        "log timestamp={timestamp} trace_id={} span_id={}",
+        trace_id.as_deref().unwrap_or("-"),
+        span_id.as_deref().unwrap_or("-"),
+    );
     let attributes_json: String = row.get("attributes")?;
-    let attributes = serde_json::from_str(&attributes_json).unwrap_or_default();
+    let attributes = parse_json_or_default(&attributes_json, "attributes", &record);
 
     let resource_json: String = row.get("resource")?;
-    let resource = serde_json::from_str(&resource_json).ok();
+    let resource = parse_json_or_none(&resource_json, "resource", &record);
 
     let severity_num: i32 = row.get("severity_number")?;
     let severity = SeverityLevel::from_i32(severity_num).unwrap_or(SeverityLevel::Info);
 
     Ok(LogRecord {
-        timestamp: row.get("timestamp")?,
+        timestamp,
         observed_timestamp: row.get("observed_timestamp")?,
-        trace_id: row.get("trace_id")?,
-        span_id: row.get("span_id")?,
+        trace_id,
+        span_id,
         severity,
         severity_text: row.get("severity_text")?,
         body: row.get("body")?,
@@ -454,14 +494,18 @@ fn parse_log_row(row: &Row) -> rusqlite::Result<LogRecord> {
 }
 
 fn parse_span_row(row: &Row) -> rusqlite::Result<Span> {
+    let trace_id: String = row.get("trace_id")?;
+    let span_id: String = row.get("span_id")?;
+    let name: String = row.get("name")?;
+    let record = format!("span trace_id={trace_id} span_id={span_id} name={name}");
     let attributes_json: String = row.get("attributes")?;
-    let attributes = serde_json::from_str(&attributes_json).unwrap_or_default();
+    let attributes = parse_json_or_default(&attributes_json, "attributes", &record);
 
     let events_json: String = row.get("events")?;
-    let events = serde_json::from_str(&events_json).unwrap_or_default();
+    let events = parse_json_or_default(&events_json, "events", &record);
 
     let resource_json: String = row.get("resource")?;
-    let resource = serde_json::from_str(&resource_json).ok();
+    let resource = parse_json_or_none(&resource_json, "resource", &record);
 
     let kind_num: i32 = row.get("kind")?;
     let kind = SpanKind::from_i32(kind_num).unwrap_or(SpanKind::Internal);
@@ -475,10 +519,10 @@ fn parse_span_row(row: &Row) -> rusqlite::Result<Span> {
     };
 
     Ok(Span {
-        trace_id: row.get("trace_id")?,
-        span_id: row.get("span_id")?,
+        trace_id,
+        span_id,
         parent_span_id: row.get("parent_span_id")?,
-        name: row.get("name")?,
+        name,
         kind,
         start_time: row.get("start_time")?,
         end_time: row.get("end_time")?,
@@ -492,11 +536,14 @@ fn parse_span_row(row: &Row) -> rusqlite::Result<Span> {
 fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
     use otelite_core::telemetry::metric::MetricType;
 
+    let name: String = row.get("name")?;
+    let timestamp: i64 = row.get("timestamp")?;
+    let record = format!("metric name={name} timestamp={timestamp}");
     let attributes_json: String = row.get("attributes")?;
-    let attributes = serde_json::from_str(&attributes_json).unwrap_or_default();
+    let attributes = parse_json_or_default(&attributes_json, "attributes", &record);
 
     let resource_json: String = row.get("resource")?;
-    let resource = serde_json::from_str(&resource_json).ok();
+    let resource = parse_json_or_none(&resource_json, "resource", &record);
 
     let metric_type_int: i32 = row.get("metric_type")?;
     let metric_type = match metric_type_int {
@@ -511,7 +558,7 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
         2 => {
             let histogram_json: String = row.get("value_histogram")?;
             let (count, sum, buckets) =
-                serde_json::from_str(&histogram_json).unwrap_or((0, 0.0, Vec::new()));
+                parse_json_or_default(&histogram_json, "value_histogram", &record);
             MetricType::Histogram {
                 count,
                 sum,
@@ -521,7 +568,7 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
         3 => {
             let summary_json: String = row.get("value_summary")?;
             let (count, sum, quantiles) =
-                serde_json::from_str(&summary_json).unwrap_or((0, 0.0, Vec::new()));
+                parse_json_or_default(&summary_json, "value_summary", &record);
             MetricType::Summary {
                 count,
                 sum,
@@ -532,11 +579,11 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
     };
 
     Ok(Metric {
-        name: row.get("name")?,
+        name,
         description: row.get("description")?,
         unit: row.get("unit")?,
         metric_type,
-        timestamp: row.get("timestamp")?,
+        timestamp,
         attributes,
         resource,
     })
@@ -3427,6 +3474,93 @@ mod tests {
         let params = QueryParams::default();
         let logs = query_logs(&conn, &params).unwrap();
         assert_eq!(logs.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_log_row_tolerates_malformed_json() {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO logs (
+                timestamp, severity_number, body, attributes, resource
+            ) VALUES (100, 9, 'corrupt log', '{', '[')",
+            [],
+        )
+        .unwrap();
+
+        let log = conn
+            .query_row("SELECT * FROM logs", [], parse_log_row)
+            .unwrap();
+
+        assert!(log.attributes.is_empty());
+        assert_eq!(log.resource, None);
+    }
+
+    #[test]
+    fn test_parse_span_row_tolerates_malformed_json() {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO spans (
+                trace_id, span_id, name, kind, start_time, end_time,
+                attributes, events, resource, status_code
+            ) VALUES ('trace', 'span', 'corrupt span', 0, 100, 200, '{', '[', '{', 1)",
+            [],
+        )
+        .unwrap();
+
+        let span = conn
+            .query_row("SELECT * FROM spans", [], parse_span_row)
+            .unwrap();
+
+        assert!(span.attributes.is_empty());
+        assert!(span.events.is_empty());
+        assert_eq!(span.resource, None);
+    }
+
+    #[test]
+    fn test_parse_metric_row_tolerates_malformed_json() {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO metrics (
+                name, metric_type, timestamp, value_histogram, attributes, resource
+            ) VALUES ('corrupt.histogram', 2, 100, '{', '{', '[')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metrics (
+                name, metric_type, timestamp, value_summary, attributes, resource
+            ) VALUES ('corrupt.summary', 3, 200, '[', '{', '[')",
+            [],
+        )
+        .unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT * FROM metrics ORDER BY timestamp")
+            .unwrap();
+        let metrics = stmt
+            .query_map([], parse_metric_row)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(metrics.iter().all(|metric| metric.attributes.is_empty()));
+        assert!(metrics.iter().all(|metric| metric.resource.is_none()));
+        assert!(matches!(
+            metrics[0].metric_type,
+            otelite_core::telemetry::metric::MetricType::Histogram {
+                count: 0,
+                sum: 0.0,
+                ref buckets
+            } if buckets.is_empty()
+        ));
+        assert!(matches!(
+            metrics[1].metric_type,
+            otelite_core::telemetry::metric::MetricType::Summary {
+                count: 0,
+                sum: 0.0,
+                ref quantiles
+            } if quantiles.is_empty()
+        ));
     }
 
     #[test]

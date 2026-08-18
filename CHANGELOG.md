@@ -13,6 +13,9 @@ have to work around), not implementation detail.
 
 ### Fixed
 
+- **Malformed stored telemetry JSON now raises diagnostics.** Read operations
+  retain their existing fallback values while logging the affected field and
+  record identity, making data corruption visible without exposing payloads.
 - **New telemetry preserves instrumentation scope.** Newly ingested logs,
   spans, and metrics retain their scope name and version for reliable
   attribution; existing stored data is unchanged.
