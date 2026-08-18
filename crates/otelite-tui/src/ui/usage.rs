@@ -287,12 +287,22 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
         .iter()
         .map(|s| {
             let model = s.model.as_deref().unwrap_or("(unknown)");
-            let ttft_p50 = if s.ttft_count > 0 {
+            let ttft_p50 = if s.ttft_degenerate {
+                format!(
+                    "buffered ({}%)",
+                    s.ttft_degenerate_count * 100 / s.ttft_count
+                )
+            } else if s.ttft_count > 0 {
                 s.ttft_p50_ms.map_or("—".to_string(), |v| v.to_string())
             } else {
                 "—".to_string()
             };
-            let ttft_p95 = if s.ttft_count > 0 {
+            let ttft_p95 = if s.ttft_degenerate {
+                format!(
+                    "buffered ({}%)",
+                    s.ttft_degenerate_count * 100 / s.ttft_count
+                )
+            } else if s.ttft_count > 0 {
                 s.ttft_p95_ms.map_or("—".to_string(), |v| v.to_string())
             } else {
                 "—".to_string()
@@ -1125,6 +1135,9 @@ mod tests {
             ttft_p95_ms: None,
             ttft_p99_ms: None,
             ttft_count: 0,
+            ttft_invalid_count: 0,
+            ttft_degenerate_count: 0,
+            ttft_degenerate: false,
             derived_tokens_per_sec_p50: None,
             derived_tokens_per_sec_p95: None,
             derived_tokens_per_sec_p99: None,

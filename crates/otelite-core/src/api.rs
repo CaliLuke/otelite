@@ -648,8 +648,17 @@ pub struct LatencyStats {
     pub p50_ms: i64,
     pub p95_ms: i64,
     pub p99_ms: i64,
-    /// TTFT is reported only when any span in the group carried a ttft attribute.
+    /// Number of valid TTFT values used for percentile calculations.
     pub ttft_count: usize,
+    /// Number of emitted TTFT values that could not represent first-token latency.
+    #[serde(default)]
+    pub ttft_invalid_count: usize,
+    /// Number of valid values that were at least 90% of complete request duration.
+    #[serde(default)]
+    pub ttft_degenerate_count: usize,
+    /// True when at least 10 valid values exist and 90% are near complete duration.
+    #[serde(default)]
+    pub ttft_degenerate: bool,
     pub ttft_p50_ms: Option<i64>,
     pub ttft_p95_ms: Option<i64>,
     pub ttft_p99_ms: Option<i64>,
@@ -818,6 +827,18 @@ pub struct LatencySeriesPoint {
     /// 95th-percentile time-to-first-token in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p95_ttft_ms: Option<i64>,
+    /// Number of valid TTFT values used for this bucket.
+    #[serde(default)]
+    pub ttft_count: usize,
+    /// Number of emitted TTFT values that could not represent first-token latency.
+    #[serde(default)]
+    pub ttft_invalid_count: usize,
+    /// Number of valid TTFT values at least 90% of complete request duration.
+    #[serde(default)]
+    pub ttft_degenerate_count: usize,
+    /// True when at least 10 valid values exist and 90% are near complete duration.
+    #[serde(default)]
+    pub ttft_degenerate: bool,
 }
 
 /// LLM latency broken down by input-token context size bin.
@@ -840,6 +861,18 @@ pub struct LatencyByContextBin {
     pub max_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_ttft_ms: Option<f64>,
+    /// Number of valid TTFT values used for this bin.
+    #[serde(default)]
+    pub ttft_count: usize,
+    /// Number of emitted TTFT values that could not represent first-token latency.
+    #[serde(default)]
+    pub ttft_invalid_count: usize,
+    /// Number of valid TTFT values at least 90% of complete request duration.
+    #[serde(default)]
+    pub ttft_degenerate_count: usize,
+    /// True when at least 10 valid values exist and 90% are near complete duration.
+    #[serde(default)]
+    pub ttft_degenerate: bool,
 }
 
 /// Single time-bucket point for calls-over-time series.

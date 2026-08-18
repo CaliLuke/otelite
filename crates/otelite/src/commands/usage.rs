@@ -1026,13 +1026,21 @@ fn display_latency_stats(stats: &[otelite_core::api::LatencyStats]) {
 
     for s in stats {
         let model = s.model.as_deref().unwrap_or("(unknown)");
-        let ttft_p50 = if s.ttft_count > 0 {
+        let ttft_p50 = if let Some(status) =
+            ttft_stream_status(s.ttft_count, s.ttft_degenerate_count, s.ttft_degenerate)
+        {
+            status
+        } else if s.ttft_count > 0 {
             s.ttft_p50_ms
                 .map_or("—".to_string(), |v| format!("{}ms", v))
         } else {
             "—".to_string()
         };
-        let ttft_p95 = if s.ttft_count > 0 {
+        let ttft_p95 = if let Some(status) =
+            ttft_stream_status(s.ttft_count, s.ttft_degenerate_count, s.ttft_degenerate)
+        {
+            status
+        } else if s.ttft_count > 0 {
             s.ttft_p95_ms
                 .map_or("—".to_string(), |v| format!("{}ms", v))
         } else {
@@ -1061,6 +1069,22 @@ fn display_latency_stats(stats: &[otelite_core::api::LatencyStats]) {
 
     println!("Latency Stats by Model (* = derived, span duration includes network+queue time):");
     println!("{}", table);
+    if stats.iter().any(|stats| stats.ttft_degenerate) {
+        println!(
+            "TTFT is emitter-supplied. “buffered” means most first-token values were near full request duration, so no stream was observed."
+        );
+    }
+}
+
+fn ttft_stream_status(
+    ttft_count: usize,
+    ttft_degenerate_count: usize,
+    ttft_degenerate: bool,
+) -> Option<String> {
+    ttft_degenerate.then(|| {
+        let percentage = ttft_degenerate_count * 100 / ttft_count;
+        format!("buffered ({percentage}%)")
+    })
 }
 
 fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
@@ -1098,12 +1122,16 @@ fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
         } else {
             "—".to_string()
         };
-        let ttft_avg = p
-            .avg_ttft_ms
-            .map_or("—".to_string(), |v| format!("{:.0}ms", v));
-        let ttft_p95 = p
-            .p95_ttft_ms
-            .map_or("—".to_string(), |v| format!("{}ms", v));
+        let ttft_avg = ttft_stream_status(p.ttft_count, p.ttft_degenerate_count, p.ttft_degenerate)
+            .unwrap_or_else(|| {
+                p.avg_ttft_ms
+                    .map_or("—".to_string(), |v| format!("{:.0}ms", v))
+            });
+        let ttft_p95 = ttft_stream_status(p.ttft_count, p.ttft_degenerate_count, p.ttft_degenerate)
+            .unwrap_or_else(|| {
+                p.p95_ttft_ms
+                    .map_or("—".to_string(), |v| format!("{:.0}ms", v))
+            });
 
         table.add_row(vec![
             &bucket_str,
@@ -1146,9 +1174,11 @@ fn display_latency_context(bins: &[otelite_core::api::LatencyByContextBin]) {
 
     for b in bins {
         let model = b.model.as_deref().unwrap_or("(unknown)");
-        let ttft = b
-            .avg_ttft_ms
-            .map_or("—".to_string(), |v| format!("{:.0}ms", v));
+        let ttft = ttft_stream_status(b.ttft_count, b.ttft_degenerate_count, b.ttft_degenerate)
+            .unwrap_or_else(|| {
+                b.avg_ttft_ms
+                    .map_or("—".to_string(), |v| format!("{:.0}ms", v))
+            });
         table.add_row(vec![
             Cell::new(&b.bin),
             Cell::new(model),

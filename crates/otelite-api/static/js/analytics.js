@@ -592,15 +592,29 @@ class AnalyticsView {
      * @returns {string} HTML for one or more diagnosis cards, or '' if not enough data
      */
     _buildLatencyInsightCards(latencyStats) {
+        const buffered = latencyStats.filter(s => s.ttft_degenerate);
+        const bufferedCard = buffered.length === 0 ? '' : `
+            <div class="usage-gauge-card latency-insight-card">
+                <div class="usage-card-label">⚠️ Streaming diagnosis</div>
+                <div class="usage-card-value">Buffered responses</div>
+                <div class="gauge-hint">
+                    ${buffered.map(s => {
+                        const pct = Math.round((s.ttft_degenerate_count || 0) * 100 / s.ttft_count);
+                        return `${this._esc(s.model || '—')}: ${pct}% of TTFT values were near full response duration`;
+                    }).join('<br>')}
+                </div>
+            </div>`;
+
         // Only consider models with TTFT data and at least 5 calls
         const withTtft = latencyStats.filter(s =>
+            !s.ttft_degenerate &&
             s.ttft_count > 0 &&
             s.ttft_p50_ms != null &&
             s.p50_ms != null &&
             s.p50_ms > 0 &&
             (s.count || 0) >= 5
         );
-        if (withTtft.length === 0) return '';
+        if (withTtft.length === 0) return bufferedCard;
 
         // Compute TTFT/duration ratio at p50 per model
         const ratios = withTtft.map(s => ({
@@ -614,7 +628,7 @@ class AnalyticsView {
 
         const medianRatio = ratios.slice().sort((a, b) => a.ratio - b.ratio)[Math.floor(ratios.length / 2)].ratio;
 
-        if (medianRatio < 0.85) return '';
+        if (medianRatio < 0.85) return bufferedCard;
 
         // Build per-model lines for the detail
         const modelLines = ratios.map(r => {
@@ -626,7 +640,7 @@ class AnalyticsView {
 
         const overallPct = (medianRatio * 100).toFixed(0);
 
-        return `
+        return bufferedCard + `
             <div class="usage-gauge-card latency-insight-card">
                 <div class="usage-card-label">
                     🔍 Latency diagnosis
@@ -812,8 +826,15 @@ class AnalyticsView {
         }
         const fmt = n => Number(n).toLocaleString();
         const rows = latencyStats.map(s => {
-            const ttftP50 = s.ttft_count > 0 ? this._formatDuration(s.ttft_p50_ms) : '—';
-            const ttftP95 = s.ttft_count > 0 ? this._formatDuration(s.ttft_p95_ms) : '—';
+            const buffered = s.ttft_degenerate
+                ? `buffered (${Math.round((s.ttft_degenerate_count || 0) * 100 / s.ttft_count)}%)`
+                : null;
+            const ttftP50 = buffered
+                ? buffered
+                : (s.ttft_count > 0 ? this._formatDuration(s.ttft_p50_ms) : '—');
+            const ttftP95 = buffered
+                ? buffered
+                : (s.ttft_count > 0 ? this._formatDuration(s.ttft_p95_ms) : '—');
 
             const tpsP50 = s.derived_tokens_per_sec_p50 != null ? Math.round(s.derived_tokens_per_sec_p50) : null;
             const tpsP95 = s.derived_tokens_per_sec_p95 != null ? Math.round(s.derived_tokens_per_sec_p95) : null;
@@ -851,6 +872,7 @@ class AnalyticsView {
         }).join('');
         return `
             <h3>Latency by model</h3>
+            <p class="table-hint">TTFT is emitter-supplied. “Buffered” means most values were near complete request duration, so no stream was observed.</p>
             <table class="data-table latency-table">
                 <thead><tr>
                     <th>Model</th><th>Calls</th><th>Avg</th><th>P50</th><th>P95</th><th>P99</th><th>TTFT P50</th><th>TTFT P95</th>
@@ -878,7 +900,7 @@ class AnalyticsView {
             existing.count += n;
             existing.sum_avg += (p.avg_ms || 0) * n;
             existing.max_p95 = Math.max(existing.max_p95, p.p95_ms || 0);
-            if (p.avg_ttft_ms != null) {
+            if (p.avg_ttft_ms != null && !p.ttft_degenerate) {
                 existing.sum_ttft += p.avg_ttft_ms * n;
                 existing.ttft_n   += n;
             }
@@ -907,7 +929,9 @@ class AnalyticsView {
             const avgH = Math.min((b.avg_ms / maxVal) * chartHeight, p95H);
             const tsDate = new Date(b.timestamp / 1_000_000);
             const modelLines = b.details.map(d => {
-                const ttftStr = d.avg_ttft_ms != null ? ` · ttft ${Math.round(d.avg_ttft_ms)}ms` : '';
+                const ttftStr = d.ttft_degenerate
+                    ? ` · buffered (${Math.round((d.ttft_degenerate_count || 0) * 100 / d.ttft_count)}%)`
+                    : (d.avg_ttft_ms != null ? ` · ttft ${Math.round(d.avg_ttft_ms)}ms` : '');
                 return `  ${d.model || d.name || '(all)'}: avg ${Math.round(d.avg_ms)}ms · p95 ${d.p95_ms}ms · ${d.count} calls${ttftStr}`;
             }).join('\n');
             const ttftStr = b.avg_ttft != null ? `\nttft avg ${Math.round(b.avg_ttft)}ms` : '';
@@ -977,7 +1001,9 @@ class AnalyticsView {
         if (!bins || !bins.length) return '';
         const fmt = n => Number(n).toLocaleString();
         const rows = bins.map(b => {
-            const ttft = b.avg_ttft_ms != null ? this._formatDuration(b.avg_ttft_ms) : '—';
+            const ttft = b.ttft_degenerate
+                ? `buffered (${Math.round((b.ttft_degenerate_count || 0) * 100 / b.ttft_count)}%)`
+                : (b.avg_ttft_ms != null ? this._formatDuration(b.avg_ttft_ms) : '—');
             return `
                 <tr>
                     <td>${this._esc(b.bin)}</td>
@@ -991,7 +1017,7 @@ class AnalyticsView {
         }).join('');
         return `
             <h3>Latency by context size</h3>
-            <p class="table-hint">Response time broken down by prompt token count × model. Helps identify whether larger contexts cause slowdowns.</p>
+            <p class="table-hint">Response time broken down by prompt token count × model. Buffered TTFT means no stream was observed.</p>
             <table class="data-table">
                 <thead><tr>
                     <th>Context bin (input tokens)</th><th>Model</th><th>Calls</th>

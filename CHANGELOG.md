@@ -11,6 +11,13 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Buffered LLM responses no longer report completion time as first-token
+  latency.** Latency tables, trends, and context-size views now label affected
+  groups with the observed buffered share instead of presenting misleading
+  TTFT percentiles.
+
 ## [0.1.58] - 2026-08-14
 
 ### Added

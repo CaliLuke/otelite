@@ -8,7 +8,7 @@ pub mod resource;
 pub mod trace;
 
 pub use formatting::{format_attribute_preview, format_attribute_value};
-pub use genai::{extract_ttft_secs, GenAiSpanInfo};
+pub use genai::{classify_ttft_value, extract_ttft_secs, GenAiSpanInfo, TtftValueQuality};
 pub use log::LogRecord;
 pub use metric::Metric;
 pub use resource::Resource;

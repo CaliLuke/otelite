@@ -7,6 +7,17 @@
 
 use std::collections::HashMap;
 
+/// Quality of a time-to-first-token observation after normalisation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtftValueQuality {
+    /// The span did not carry a supported TTFT attribute.
+    Absent,
+    /// The value is finite, non-negative and no greater than span duration.
+    Valid,
+    /// The emitter supplied a value that cannot represent first-token latency.
+    Invalid,
+}
+
 /// Extract TTFT from span attributes, normalising to **seconds**.
 ///
 /// Attribute priority:
@@ -25,6 +36,27 @@ pub fn extract_ttft_secs(attrs: &HashMap<String, String>) -> Option<f64> {
         .get("ttft_ms")
         .and_then(|s| s.parse::<f64>().ok())
         .map(|ms| ms / 1000.0)
+}
+
+/// Classify a normalised TTFT value against its enclosing span duration.
+///
+/// Group-level degeneracy is deliberately not decided here: it requires a
+/// population of valid observations and is handled by analytics consumers.
+pub fn classify_ttft_value(ttft_secs: Option<f64>, duration_secs: f64) -> TtftValueQuality {
+    let Some(ttft_secs) = ttft_secs else {
+        return TtftValueQuality::Absent;
+    };
+
+    if !ttft_secs.is_finite()
+        || !duration_secs.is_finite()
+        || ttft_secs.is_sign_negative()
+        || duration_secs.is_sign_negative()
+        || ttft_secs > duration_secs
+    {
+        return TtftValueQuality::Invalid;
+    }
+
+    TtftValueQuality::Valid
 }
 
 /// Information extracted from a GenAI/LLM span.
@@ -541,5 +573,26 @@ mod tests {
     fn test_extract_ttft_secs_missing() {
         let attrs = HashMap::new();
         assert!(extract_ttft_secs(&attrs).is_none());
+    }
+
+    #[test]
+    fn test_classify_ttft_value() {
+        assert_eq!(classify_ttft_value(None, 1.0), TtftValueQuality::Absent);
+        assert_eq!(
+            classify_ttft_value(Some(0.25), 1.0),
+            TtftValueQuality::Valid
+        );
+        assert_eq!(
+            classify_ttft_value(Some(-0.1), 1.0),
+            TtftValueQuality::Invalid
+        );
+        assert_eq!(
+            classify_ttft_value(Some(1.1), 1.0),
+            TtftValueQuality::Invalid
+        );
+        assert_eq!(
+            classify_ttft_value(Some(f64::NAN), 1.0),
+            TtftValueQuality::Invalid
+        );
     }
 }

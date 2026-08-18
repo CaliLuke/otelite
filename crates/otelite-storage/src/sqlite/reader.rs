@@ -1179,9 +1179,76 @@ pub fn query_finish_reasons(
     Ok(rows)
 }
 
+const TTFT_DEGENERATE_RATIO: f64 = 0.9;
+const TTFT_DEGENERATE_MIN_SAMPLES: usize = 10;
+
+#[derive(Default)]
+struct TtftAccum {
+    values_ms: Vec<i64>,
+    invalid_count: usize,
+    degenerate_count: usize,
+}
+
+impl TtftAccum {
+    fn record(&mut self, duration_ms: i64, ttft_ms: Option<std::result::Result<i64, ()>>) {
+        let Some(ttft_ms) = ttft_ms else {
+            return;
+        };
+        let Ok(ttft_ms) = ttft_ms else {
+            self.invalid_count += 1;
+            return;
+        };
+        let quality = otelite_core::telemetry::classify_ttft_value(
+            Some(ttft_ms as f64 / 1000.0),
+            duration_ms as f64 / 1000.0,
+        );
+        if quality != otelite_core::telemetry::TtftValueQuality::Valid {
+            self.invalid_count += 1;
+            return;
+        }
+        if duration_ms > 0 && ttft_ms as f64 / duration_ms as f64 >= TTFT_DEGENERATE_RATIO {
+            self.degenerate_count += 1;
+        }
+        self.values_ms.push(ttft_ms);
+    }
+
+    fn is_degenerate(&self) -> bool {
+        self.values_ms.len() >= TTFT_DEGENERATE_MIN_SAMPLES
+            && self.degenerate_count * 100 >= self.values_ms.len() * 90
+    }
+}
+
 /// Latency / TTFT percentile statistics per model for LLM spans.
-// (durations_ms, ttfts_ms, token_rates, input_tokens, output_input_ratios)
-type LatencyAccum = (Vec<i64>, Vec<i64>, Vec<f64>, Vec<i64>, Vec<f64>);
+#[derive(Default)]
+struct LatencyAccum {
+    durations_ms: Vec<i64>,
+    ttft: TtftAccum,
+    token_rates: Vec<f64>,
+    input_tokens: Vec<i64>,
+    output_input_ratios: Vec<f64>,
+}
+
+fn normalized_ttft_ms(
+    otel_ttft_secs: Option<&str>,
+    llm_ttft_secs: Option<&str>,
+    custom_ttft_ms: Option<&str>,
+) -> Option<std::result::Result<i64, ()>> {
+    let (raw, multiplier) = if let Some(raw) = otel_ttft_secs {
+        (raw, 1000.0)
+    } else if let Some(raw) = llm_ttft_secs {
+        (raw, 1000.0)
+    } else {
+        let raw = custom_ttft_ms?;
+        (raw, 1.0)
+    };
+    Some(
+        raw.parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .and_then(|value| (value * multiplier).round().to_string().parse::<i64>().ok())
+            .ok_or(()),
+    )
+}
 
 ///
 /// SQLite has no native percentile, so we fetch raw durations per model into memory
@@ -1213,11 +1280,9 @@ pub fn query_latency_stats(
         "SELECT
             {model} AS model,
             (end_time - start_time) / 1000000 AS duration_ms,
-            COALESCE(
-                CAST(json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS INTEGER),
-                CAST(json_extract(attributes, '$.\"llm.time_to_first_token\"') AS INTEGER),
-                CAST(json_extract(attributes, '$.\"ttft_ms\"') AS INTEGER)
-            ) AS ttft_ms,
+            json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
+            json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
+            json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms,
             {output} AS output_tokens,
             {input} AS input_tokens
         FROM spans
@@ -1236,7 +1301,9 @@ pub fn query_latency_stats(
     struct Row {
         model: Option<String>,
         duration_ms: i64,
-        ttft_ms: Option<i64>,
+        otel_ttft_secs: Option<String>,
+        llm_ttft_secs: Option<String>,
+        custom_ttft_ms: Option<String>,
         output_tokens: Option<i64>,
         input_tokens: Option<i64>,
     }
@@ -1246,9 +1313,11 @@ pub fn query_latency_stats(
             Ok(Row {
                 model: row.get::<_, Option<String>>(0)?,
                 duration_ms: row.get::<_, i64>(1)?,
-                ttft_ms: row.get::<_, Option<i64>>(2)?,
-                output_tokens: row.get::<_, Option<i64>>(3)?,
-                input_tokens: row.get::<_, Option<i64>>(4)?,
+                otel_ttft_secs: row.get::<_, Option<String>>(2)?,
+                llm_ttft_secs: row.get::<_, Option<String>>(3)?,
+                custom_ttft_ms: row.get::<_, Option<String>>(4)?,
+                output_tokens: row.get::<_, Option<i64>>(5)?,
+                input_tokens: row.get::<_, Option<i64>>(6)?,
             })
         })
         .map_err(|e| {
@@ -1263,29 +1332,44 @@ pub fn query_latency_stats(
         std::collections::BTreeMap::new();
     for r in rows {
         let entry = groups.entry(r.model).or_default();
-        entry.0.push(r.duration_ms);
-        if let Some(t) = r.ttft_ms {
-            entry.1.push(t);
-        }
+        entry.durations_ms.push(r.duration_ms);
+        entry.ttft.record(
+            r.duration_ms,
+            normalized_ttft_ms(
+                r.otel_ttft_secs.as_deref(),
+                r.llm_ttft_secs.as_deref(),
+                r.custom_ttft_ms.as_deref(),
+            ),
+        );
         if r.duration_ms > 0 {
             if let Some(output_tokens) = r.output_tokens.filter(|tokens| *tokens > 0) {
                 entry
-                    .2
+                    .token_rates
                     .push(output_tokens as f64 / (r.duration_ms as f64 / 1000.0));
             }
         }
         if let Some(input_tokens) = r.input_tokens {
-            entry.3.push(input_tokens);
+            entry.input_tokens.push(input_tokens);
             if input_tokens > 0 {
                 entry
-                    .4
+                    .output_input_ratios
                     .push(r.output_tokens.unwrap_or_default() as f64 / input_tokens as f64);
             }
         }
     }
 
     let mut out = Vec::with_capacity(groups.len());
-    for (model, (mut durations, mut ttfts, mut token_rates, mut input_tkns, mut ratios)) in groups {
+    for (model, accum) in groups {
+        let mut durations = accum.durations_ms;
+        let ttft_degenerate = accum.ttft.is_degenerate();
+        let TtftAccum {
+            values_ms: mut ttfts,
+            invalid_count: invalid_ttfts,
+            degenerate_count: degenerate_ttfts,
+        } = accum.ttft;
+        let mut token_rates = accum.token_rates;
+        let mut input_tkns = accum.input_tokens;
+        let mut ratios = accum.output_input_ratios;
         durations.sort_unstable();
         ttfts.sort_unstable();
         token_rates.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1348,6 +1432,9 @@ pub fn query_latency_stats(
             p95_ms: percentile(&durations, 0.95),
             p99_ms: percentile(&durations, 0.99),
             ttft_count,
+            ttft_invalid_count: invalid_ttfts,
+            ttft_degenerate_count: degenerate_ttfts,
+            ttft_degenerate,
             ttft_p50_ms: ttft_p50,
             ttft_p95_ms: ttft_p95,
             ttft_p99_ms: ttft_p99,
@@ -2134,11 +2221,9 @@ pub fn query_latency_series(
             (start_time / {bucket_ns}) * {bucket_ns} AS bucket,
             {group_col} AS group_label,
             (end_time - start_time) / 1000000 AS duration_ms,
-            COALESCE(
-                CAST(json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS INTEGER),
-                CAST(json_extract(attributes, '$.\"llm.time_to_first_token\"') AS INTEGER),
-                CAST(json_extract(attributes, '$.\"ttft_ms\"') AS INTEGER)
-            ) AS ttft_ms,
+            json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
+            json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
+            json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms,
             CASE WHEN status_code = 2 THEN 1 ELSE 0 END AS is_error
         FROM spans
         {where_clause}
@@ -2156,7 +2241,9 @@ pub fn query_latency_series(
         bucket: i64,
         label: Option<String>,
         duration_ms: i64,
-        ttft_ms: Option<i64>,
+        otel_ttft_secs: Option<String>,
+        llm_ttft_secs: Option<String>,
+        custom_ttft_ms: Option<String>,
         is_error: bool,
     }
 
@@ -2166,8 +2253,10 @@ pub fn query_latency_series(
                 bucket: row.get::<_, i64>(0)?,
                 label: row.get::<_, Option<String>>(1)?,
                 duration_ms: row.get::<_, i64>(2)?,
-                ttft_ms: row.get::<_, Option<i64>>(3)?,
-                is_error: row.get::<_, i64>(4)? != 0,
+                otel_ttft_secs: row.get::<_, Option<String>>(3)?,
+                llm_ttft_secs: row.get::<_, Option<String>>(4)?,
+                custom_ttft_ms: row.get::<_, Option<String>>(5)?,
+                is_error: row.get::<_, i64>(6)? != 0,
             })
         })
         .map_err(|e| {
@@ -2179,26 +2268,37 @@ pub fn query_latency_series(
         })?;
 
     type BucketKey = (i64, Option<String>);
-    type BucketAccum = (Vec<i64>, Vec<i64>, usize);
+    type BucketAccum = (Vec<i64>, TtftAccum, usize);
 
     let mut groups: std::collections::BTreeMap<BucketKey, BucketAccum> =
         std::collections::BTreeMap::new();
     for r in raw {
         let entry = groups.entry((r.bucket, r.label)).or_default();
         entry.0.push(r.duration_ms);
-        if let Some(t) = r.ttft_ms {
-            entry.1.push(t);
-        }
+        entry.1.record(
+            r.duration_ms,
+            normalized_ttft_ms(
+                r.otel_ttft_secs.as_deref(),
+                r.llm_ttft_secs.as_deref(),
+                r.custom_ttft_ms.as_deref(),
+            ),
+        );
         if r.is_error {
             entry.2 += 1;
         }
     }
 
     let mut out = Vec::with_capacity(groups.len());
-    for ((bucket, label), (mut durations, mut ttfts, error_count)) in groups {
+    for ((bucket, label), (mut durations, ttft, error_count)) in groups {
         if durations.is_empty() {
             continue;
         }
+        let ttft_degenerate = ttft.is_degenerate();
+        let TtftAccum {
+            values_ms: mut ttfts,
+            invalid_count: ttft_invalid_count,
+            degenerate_count: ttft_degenerate_count,
+        } = ttft;
         durations.sort_unstable();
         ttfts.sort_unstable();
 
@@ -2234,6 +2334,10 @@ pub fn query_latency_series(
             max_ms,
             avg_ttft_ms,
             p95_ttft_ms,
+            ttft_count: ttfts.len(),
+            ttft_invalid_count,
+            ttft_degenerate_count,
+            ttft_degenerate,
         });
     }
 
@@ -2351,11 +2455,9 @@ pub fn query_latency_by_context(
             {model} AS model,
             COALESCE({input}, 0) AS input_tokens,
             (end_time - start_time) / 1000000 AS duration_ms,
-            COALESCE(
-                CAST(json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS INTEGER),
-                CAST(json_extract(attributes, '$.\"llm.time_to_first_token\"') AS INTEGER),
-                CAST(json_extract(attributes, '$.\"ttft_ms\"') AS INTEGER)
-            ) AS ttft_ms
+            json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
+            json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
+            json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms
         FROM spans
         {where_clause}",
         model = exprs.model,
@@ -2371,7 +2473,9 @@ pub fn query_latency_by_context(
         model: Option<String>,
         input_tokens: i64,
         duration_ms: i64,
-        ttft_ms: Option<i64>,
+        otel_ttft_secs: Option<String>,
+        llm_ttft_secs: Option<String>,
+        custom_ttft_ms: Option<String>,
     }
 
     let raw: Vec<RawRow> = stmt
@@ -2380,7 +2484,9 @@ pub fn query_latency_by_context(
                 model: row.get(0)?,
                 input_tokens: row.get::<_, i64>(1)?,
                 duration_ms: row.get::<_, i64>(2)?,
-                ttft_ms: row.get(3)?,
+                otel_ttft_secs: row.get::<_, Option<String>>(3)?,
+                llm_ttft_secs: row.get::<_, Option<String>>(4)?,
+                custom_ttft_ms: row.get::<_, Option<String>>(5)?,
             })
         })
         .map_err(|e| {
@@ -2400,7 +2506,7 @@ pub fn query_latency_by_context(
     ];
 
     type BinKey = (usize, Option<String>); // (bin_index, model)
-    type BinAccum = (Vec<i64>, Vec<i64>); // (durations, ttfts)
+    type BinAccum = (Vec<i64>, TtftAccum); // (durations, ttfts)
 
     let mut groups: std::collections::BTreeMap<BinKey, BinAccum> =
         std::collections::BTreeMap::new();
@@ -2415,16 +2521,27 @@ pub fn query_latency_by_context(
             .unwrap_or(BINS.len() - 1);
         let entry = groups.entry((bin_idx, r.model)).or_default();
         entry.0.push(r.duration_ms);
-        if let Some(t) = r.ttft_ms {
-            entry.1.push(t);
-        }
+        entry.1.record(
+            r.duration_ms,
+            normalized_ttft_ms(
+                r.otel_ttft_secs.as_deref(),
+                r.llm_ttft_secs.as_deref(),
+                r.custom_ttft_ms.as_deref(),
+            ),
+        );
     }
 
     let mut out = Vec::with_capacity(groups.len());
-    for ((bin_idx, model), (mut durations, mut ttfts)) in groups {
+    for ((bin_idx, model), (mut durations, ttft)) in groups {
         if durations.is_empty() {
             continue;
         }
+        let ttft_degenerate = ttft.is_degenerate();
+        let TtftAccum {
+            values_ms: mut ttfts,
+            invalid_count: ttft_invalid_count,
+            degenerate_count: ttft_degenerate_count,
+        } = ttft;
         durations.sort_unstable();
         ttfts.sort_unstable();
 
@@ -2449,6 +2566,10 @@ pub fn query_latency_by_context(
             p95_ms,
             max_ms,
             avg_ttft_ms,
+            ttft_count: ttfts.len(),
+            ttft_invalid_count,
+            ttft_degenerate_count,
+            ttft_degenerate,
         });
     }
 

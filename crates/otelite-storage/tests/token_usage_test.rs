@@ -285,3 +285,75 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     assert_eq!(top_spans.len(), 1);
     assert_eq!(top_spans[0].model.as_deref(), Some("opencode-test-model"));
 }
+
+#[test]
+fn test_latency_stats_normalizes_ttft_and_flags_degenerate_groups() {
+    let conn = setup_test_db();
+
+    for index in 0..10 {
+        conn.execute(
+            r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+               VALUES (?1, ?2, 'claude_code.llm_request', 0, 0, 1000000000,
+                       '{"model":"buffered-model","input_tokens":"100","ttft_ms":"950"}', 1)"#,
+            rusqlite::params![format!("buffered-trace-{index}"), format!("buffered-span-{index}")],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('otel-trace', 'otel-span', 'chat', 0, 0, 1000000000,
+                   '{"gen_ai.system":"openai","gen_ai.request.model":"otel-model",
+                     "gen_ai.server.time_to_first_token":"0.5"}', 1)"#,
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        r#"INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+           VALUES ('invalid-trace', 'invalid-span', 'claude_code.llm_request', 0, 0, 1000000000,
+                   '{"model":"invalid-model","input_tokens":"100","ttft_ms":"1500"}', 1)"#,
+        [],
+    )
+    .unwrap();
+
+    let stats = reader::query_latency_stats(&conn, None, None, None).unwrap();
+    let buffered = stats
+        .iter()
+        .find(|row| row.model.as_deref() == Some("buffered-model"))
+        .unwrap();
+    assert_eq!(buffered.ttft_count, 10);
+    assert_eq!(buffered.ttft_p50_ms, Some(950));
+    assert_eq!(buffered.ttft_degenerate_count, 10);
+    assert!(buffered.ttft_degenerate);
+
+    let otel = stats
+        .iter()
+        .find(|row| row.model.as_deref() == Some("otel-model"))
+        .unwrap();
+    assert_eq!(otel.ttft_p50_ms, Some(500));
+    assert!(!otel.ttft_degenerate);
+
+    let invalid = stats
+        .iter()
+        .find(|row| row.model.as_deref() == Some("invalid-model"))
+        .unwrap();
+    assert_eq!(invalid.ttft_count, 0);
+    assert_eq!(invalid.ttft_invalid_count, 1);
+
+    let series = reader::query_latency_series(&conn, None, None, 3600, None, false).unwrap();
+    let buffered_series = series
+        .iter()
+        .find(|row| row.model.as_deref() == Some("buffered-model"))
+        .unwrap();
+    assert_eq!(buffered_series.ttft_count, 10);
+    assert_eq!(buffered_series.ttft_degenerate_count, 10);
+    assert!(buffered_series.ttft_degenerate);
+
+    let context = reader::query_latency_by_context(&conn, None, None, None).unwrap();
+    let buffered_context = context
+        .iter()
+        .find(|row| row.model.as_deref() == Some("buffered-model"))
+        .unwrap();
+    assert_eq!(buffered_context.ttft_count, 10);
+    assert_eq!(buffered_context.ttft_degenerate_count, 10);
+    assert!(buffered_context.ttft_degenerate);
+}
