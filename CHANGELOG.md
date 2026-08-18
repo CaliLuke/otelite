@@ -13,6 +13,9 @@ have to work around), not implementation detail.
 
 ### Fixed
 
+- **OpenCode prompt-cache token aliases are recognised.** Cache-read and
+  cache-creation usage now appears consistently in usage, analytics, and
+  capability reports.
 - **Output/context ratios now include prompt-cache tokens.** Latency and
   analytics views count uncached input, cache reads, and cache creation in the
   context denominator, so cached requests no longer appear falsely verbose.

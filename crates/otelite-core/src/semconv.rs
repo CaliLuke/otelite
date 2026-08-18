@@ -35,6 +35,7 @@ pub const OUTPUT_TOKEN_KEYS: &[&str] = &[
 pub const CACHE_CREATION_TOKEN_KEYS: &[&str] = &[
     "gen_ai.usage.cache_creation.input_tokens",
     "gen_ai.usage.cache_creation_input_tokens",
+    "gen_ai.usage.cache_creation_tokens",
     "cache_creation_input_tokens",
     "cache_creation_tokens",
 ];
@@ -43,6 +44,7 @@ pub const CACHE_CREATION_TOKEN_KEYS: &[&str] = &[
 pub const CACHE_READ_TOKEN_KEYS: &[&str] = &[
     "gen_ai.usage.cache_read.input_tokens",
     "gen_ai.usage.cache_read_input_tokens",
+    "gen_ai.usage.cache_read_tokens",
     "cache_read_input_tokens",
     "cache_read_tokens",
 ];

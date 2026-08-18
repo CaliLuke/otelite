@@ -503,17 +503,10 @@ impl GenAiSpanInfo {
             info.finish_reasons = parse_finish_reasons(reasons_str);
         }
 
-        // Extract cache token counts — OTel semconv names then Claude Code bare names.
-        info.cache_creation_tokens = attrs
-            .get("gen_ai.usage.cache_creation.input_tokens")
-            .or_else(|| attrs.get("gen_ai.usage.cache_creation_input_tokens"))
-            .or_else(|| attrs.get("cache_creation_tokens"))
-            .and_then(|v| v.parse().ok());
-        info.cache_read_tokens = attrs
-            .get("gen_ai.usage.cache_read.input_tokens")
-            .or_else(|| attrs.get("gen_ai.usage.cache_read_input_tokens"))
-            .or_else(|| attrs.get("cache_read_tokens"))
-            .and_then(|v| v.parse().ok());
+        info.cache_creation_tokens = first_attribute(attrs, semconv::CACHE_CREATION_TOKEN_KEYS)
+            .and_then(|(_, value)| value.parse().ok());
+        info.cache_read_tokens = first_attribute(attrs, semconv::CACHE_READ_TOKEN_KEYS)
+            .and_then(|(_, value)| value.parse().ok());
 
         // Extract response ID
         info.response_id = attrs.get("gen_ai.response.id").cloned();
@@ -832,6 +825,25 @@ mod tests {
 
         let info = GenAiSpanInfo::from_attributes(&attrs);
         assert_eq!(info.response_id, Some("chatcmpl-abc123".to_string()));
+    }
+
+    #[test]
+    fn test_extract_cache_token_aliases() {
+        let mut attrs = HashMap::new();
+        attrs.insert("gen_ai.system".to_string(), "opencode".to_string());
+        attrs.insert(
+            "gen_ai.usage.cache_creation_tokens".to_string(),
+            "120".to_string(),
+        );
+        attrs.insert(
+            "gen_ai.usage.cache_read_tokens".to_string(),
+            "340".to_string(),
+        );
+
+        let info = GenAiSpanInfo::from_attributes(&attrs);
+
+        assert_eq!(info.cache_creation_tokens, Some(120));
+        assert_eq!(info.cache_read_tokens, Some(340));
     }
 
     #[test]
