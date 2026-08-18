@@ -18,6 +18,11 @@ use std::collections::HashMap;
 const TRACE_ID_BYTES: usize = 16;
 const SPAN_ID_BYTES: usize = 8;
 
+pub struct TraceConversion {
+    pub traces: Vec<Trace>,
+    pub rejected_spans: usize,
+}
+
 /// Convert OTLP logs request to internal log records
 pub fn convert_logs(request: ExportLogsServiceRequest) -> Vec<LogRecord> {
     let mut logs = Vec::new();
@@ -83,7 +88,12 @@ pub fn convert_logs(request: ExportLogsServiceRequest) -> Vec<LogRecord> {
 
 /// Convert OTLP traces request to internal traces
 pub fn convert_traces(request: ExportTraceServiceRequest) -> Vec<Trace> {
+    convert_traces_with_rejections(request).traces
+}
+
+pub fn convert_traces_with_rejections(request: ExportTraceServiceRequest) -> TraceConversion {
     let mut traces: HashMap<String, Trace> = HashMap::new();
+    let mut rejected_spans = 0;
 
     for resource_spans in request.resource_spans {
         let resource = convert_resource(resource_spans.resource);
@@ -101,20 +111,22 @@ pub fn convert_traces(request: ExportTraceServiceRequest) -> Vec<Trace> {
 
             for span in scope_spans.spans {
                 let Some(trace_id) =
-                    required_otel_id(&span.trace_id, TRACE_ID_BYTES, "trace_id", &span.name)
+                    required_otel_id(&span.trace_id, TRACE_ID_BYTES, "trace_id", "span")
                 else {
+                    rejected_spans += 1;
                     continue;
                 };
                 let Some(span_id) =
-                    required_otel_id(&span.span_id, SPAN_ID_BYTES, "span_id", &span.name)
+                    required_otel_id(&span.span_id, SPAN_ID_BYTES, "span_id", "span")
                 else {
+                    rejected_spans += 1;
                     continue;
                 };
                 let parent_span_id = optional_otel_id(
                     &span.parent_span_id,
                     SPAN_ID_BYTES,
                     "parent_span_id",
-                    &span.name,
+                    "span",
                 );
 
                 let kind = SpanKind::from_i32(span.kind).unwrap_or(SpanKind::Internal);
@@ -174,7 +186,10 @@ pub fn convert_traces(request: ExportTraceServiceRequest) -> Vec<Trace> {
         }
     }
 
-    traces.into_values().collect()
+    TraceConversion {
+        traces: traces.into_values().collect(),
+        rejected_spans,
+    }
 }
 
 /// Convert OTLP metrics request to internal metrics
@@ -400,7 +415,7 @@ fn required_otel_id(
     bytes: &[u8],
     expected_len: usize,
     field: &'static str,
-    record: &str,
+    record_type: &'static str,
 ) -> Option<String> {
     if is_valid_otel_id(bytes, expected_len) {
         return Some(bytes_to_hex(bytes));
@@ -411,8 +426,8 @@ fn required_otel_id(
         expected_len,
         actual_len = bytes.len(),
         is_zero = !bytes.is_empty() && bytes.iter().all(|byte| *byte == 0),
-        record,
-        "Skipping telemetry record with invalid OTLP identifier"
+        record_type,
+        "Rejecting telemetry record with invalid OTLP identifier"
     );
     None
 }
@@ -421,13 +436,25 @@ fn optional_otel_id(
     bytes: &[u8],
     expected_len: usize,
     field: &'static str,
-    record: &str,
+    record_type: &'static str,
 ) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
 
-    required_otel_id(bytes, expected_len, field, record)
+    if is_valid_otel_id(bytes, expected_len) {
+        return Some(bytes_to_hex(bytes));
+    }
+
+    tracing::warn!(
+        field,
+        expected_len,
+        actual_len = bytes.len(),
+        is_zero = bytes.iter().all(|byte| *byte == 0),
+        record_type,
+        "Omitting invalid optional OTLP identifier"
+    );
+    None
 }
 
 fn is_valid_otel_id(bytes: &[u8], expected_len: usize) -> bool {
@@ -522,12 +549,13 @@ mod tests {
             }],
         };
 
-        let traces = convert_traces(request);
+        let conversion = convert_traces_with_rejections(request);
 
-        assert_eq!(traces.len(), 1);
-        assert_eq!(traces[0].spans.len(), 1);
-        assert_eq!(traces[0].spans[0].name, "valid-child");
-        assert_eq!(traces[0].spans[0].parent_span_id, None);
+        assert_eq!(conversion.rejected_spans, 2);
+        assert_eq!(conversion.traces.len(), 1);
+        assert_eq!(conversion.traces[0].spans.len(), 1);
+        assert_eq!(conversion.traces[0].spans[0].name, "valid-child");
+        assert_eq!(conversion.traces[0].spans[0].parent_span_id, None);
     }
 
     #[test]

@@ -160,7 +160,15 @@ pub async fn handle_import(
                     errors += 1;
                 },
                 Ok(req) => {
-                    for trace in &conversion::convert_traces(req) {
+                    let conversion = conversion::convert_traces_with_rejections(req);
+                    if conversion.rejected_spans > 0 {
+                        eprintln!(
+                            "Warning: line {}: {} spans rejected due to invalid trace or span identifiers",
+                            line_number, conversion.rejected_spans
+                        );
+                        errors += conversion.rejected_spans;
+                    }
+                    for trace in &conversion.traces {
                         for span in &trace.spans {
                             if let Err(e) = storage.write_span(span).await {
                                 eprintln!("Warning: line {}: write failed: {}", line_number, e);

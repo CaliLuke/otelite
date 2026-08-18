@@ -254,10 +254,9 @@ class OverviewView {
         if (!strip) return;
         try {
             const params = this._windowParams();
-            const [topSpans, toolUsage, latencyStats, finishReasons, modelDrift] = await Promise.all([
+            const [topSpans, toolUsage, finishReasons, modelDrift] = await Promise.all([
                 this.api.getTopSpans({ ...params, limit: 5, sort_by: 'duration' }).catch(() => []),
                 this.api.getToolUsage({ ...params, limit: 30 }).catch(() => []),
-                this.api.getLatencyStats(params).catch(() => []),
                 this.api.getFinishReasons(params).catch(() => []),
                 this.api.getModelDrift(params).catch(() => []),
             ]);

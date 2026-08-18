@@ -6,6 +6,11 @@ use otelite_core::storage::StorageBackend;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+pub struct TraceProcessResult {
+    pub accepted_spans: usize,
+    pub rejected_spans: usize,
+}
+
 /// Handler for traces signals
 #[derive(Clone)]
 pub struct TracesHandler {
@@ -19,7 +24,7 @@ impl TracesHandler {
     }
 
     /// Process traces data from OTLP request
-    pub async fn process(&self, request: ExportTraceServiceRequest) -> Result<()> {
+    pub async fn process(&self, request: ExportTraceServiceRequest) -> Result<TraceProcessResult> {
         let span_count: usize = request
             .resource_spans
             .iter()
@@ -37,15 +42,25 @@ impl TracesHandler {
             request.resource_spans.len()
         );
 
-        let traces = conversion::convert_traces(request);
-        for trace in traces {
+        let conversion = conversion::convert_traces_with_rejections(request);
+        let mut accepted_spans = 0;
+        for trace in conversion.traces {
             for span in trace.spans {
                 self.storage.write_span(&span).await?;
+                accepted_spans += 1;
             }
         }
 
-        info!("Stored {} spans", span_count);
-        Ok(())
+        info!(
+            accepted_spans,
+            rejected_spans = conversion.rejected_spans,
+            received_spans = span_count,
+            "Processed spans"
+        );
+        Ok(TraceProcessResult {
+            accepted_spans,
+            rejected_spans: conversion.rejected_spans,
+        })
     }
 }
 
@@ -68,6 +83,11 @@ mod tests {
         let request = ExportTraceServiceRequest {
             resource_spans: vec![],
         };
-        assert!(handler.process(request).await.is_ok());
+        let result = handler
+            .process(request)
+            .await
+            .expect("empty request succeeds");
+        assert_eq!(result.accepted_spans, 0);
+        assert_eq!(result.rejected_spans, 0);
     }
 }

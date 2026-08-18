@@ -1019,7 +1019,7 @@ fn display_latency_stats(stats: &[otelite_core::api::LatencyStats]) {
         Cell::new("Tok/s* p95").fg(Color::Yellow),
         Cell::new("Context p50").fg(Color::Cyan),
         Cell::new("Context p95").fg(Color::Cyan),
-        Cell::new("Out/In p50").fg(Color::Cyan),
+        Cell::new("Out/Context p50").fg(Color::Cyan),
         Cell::new("TTFT p50").fg(Color::Yellow),
         Cell::new("TTFT p95").fg(Color::Yellow),
     ]);

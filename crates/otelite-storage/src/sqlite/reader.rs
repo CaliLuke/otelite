@@ -431,14 +431,14 @@ fn sql_operator(operator: &Operator) -> &'static str {
 
 // Helper functions to parse rows into telemetry types
 
-fn parse_json_or_default<T>(json: &str, field: &str, record: &str) -> T
+fn parse_json_or_default<T>(json: &str, field: &str, record_type: &'static str) -> T
 where
     T: DeserializeOwned + Default,
 {
     serde_json::from_str(json).unwrap_or_else(|error| {
         tracing::warn!(
             field,
-            record,
+            record_type,
             %error,
             "Malformed JSON in stored telemetry field; using default value"
         );
@@ -446,36 +446,32 @@ where
     })
 }
 
-fn parse_json_or_none<T>(json: &str, field: &str, record: &str) -> Option<T>
+fn parse_json_or_none<T>(json: &str, field: &str, record_type: &'static str) -> Option<T>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_str(json)
+    serde_json::from_str::<Option<T>>(json)
         .map_err(|error| {
             tracing::warn!(
                 field,
-                record,
+                record_type,
                 %error,
                 "Malformed JSON in stored telemetry field; omitting value"
             );
         })
         .ok()
+        .flatten()
 }
 
 fn parse_log_row(row: &Row) -> rusqlite::Result<LogRecord> {
     let timestamp: i64 = row.get("timestamp")?;
     let trace_id: Option<String> = row.get("trace_id")?;
     let span_id: Option<String> = row.get("span_id")?;
-    let record = format!(
-        "log timestamp={timestamp} trace_id={} span_id={}",
-        trace_id.as_deref().unwrap_or("-"),
-        span_id.as_deref().unwrap_or("-"),
-    );
     let attributes_json: String = row.get("attributes")?;
-    let attributes = parse_json_or_default(&attributes_json, "attributes", &record);
+    let attributes = parse_json_or_default(&attributes_json, "attributes", "log record");
 
     let resource_json: String = row.get("resource")?;
-    let resource = parse_json_or_none(&resource_json, "resource", &record);
+    let resource = parse_json_or_none(&resource_json, "resource", "log record");
 
     let severity_num: i32 = row.get("severity_number")?;
     let severity = SeverityLevel::from_i32(severity_num).unwrap_or(SeverityLevel::Info);
@@ -497,15 +493,14 @@ fn parse_span_row(row: &Row) -> rusqlite::Result<Span> {
     let trace_id: String = row.get("trace_id")?;
     let span_id: String = row.get("span_id")?;
     let name: String = row.get("name")?;
-    let record = format!("span trace_id={trace_id} span_id={span_id} name={name}");
     let attributes_json: String = row.get("attributes")?;
-    let attributes = parse_json_or_default(&attributes_json, "attributes", &record);
+    let attributes = parse_json_or_default(&attributes_json, "attributes", "span record");
 
     let events_json: String = row.get("events")?;
-    let events = parse_json_or_default(&events_json, "events", &record);
+    let events = parse_json_or_default(&events_json, "events", "span record");
 
     let resource_json: String = row.get("resource")?;
-    let resource = parse_json_or_none(&resource_json, "resource", &record);
+    let resource = parse_json_or_none(&resource_json, "resource", "span record");
 
     let kind_num: i32 = row.get("kind")?;
     let kind = SpanKind::from_i32(kind_num).unwrap_or(SpanKind::Internal);
@@ -538,12 +533,11 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
 
     let name: String = row.get("name")?;
     let timestamp: i64 = row.get("timestamp")?;
-    let record = format!("metric name={name} timestamp={timestamp}");
     let attributes_json: String = row.get("attributes")?;
-    let attributes = parse_json_or_default(&attributes_json, "attributes", &record);
+    let attributes = parse_json_or_default(&attributes_json, "attributes", "metric record");
 
     let resource_json: String = row.get("resource")?;
-    let resource = parse_json_or_none(&resource_json, "resource", &record);
+    let resource = parse_json_or_none(&resource_json, "resource", "metric record");
 
     let metric_type_int: i32 = row.get("metric_type")?;
     let metric_type = match metric_type_int {
@@ -558,7 +552,7 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
         2 => {
             let histogram_json: String = row.get("value_histogram")?;
             let (count, sum, buckets) =
-                parse_json_or_default(&histogram_json, "value_histogram", &record);
+                parse_json_or_default(&histogram_json, "value_histogram", "metric record");
             MetricType::Histogram {
                 count,
                 sum,
@@ -568,7 +562,7 @@ fn parse_metric_row(row: &Row) -> rusqlite::Result<Metric> {
         3 => {
             let summary_json: String = row.get("value_summary")?;
             let (count, sum, quantiles) =
-                parse_json_or_default(&summary_json, "value_summary", &record);
+                parse_json_or_default(&summary_json, "value_summary", "metric record");
             MetricType::Summary {
                 count,
                 sum,
@@ -3493,6 +3487,14 @@ mod tests {
 
         assert!(log.attributes.is_empty());
         assert_eq!(log.resource, None);
+    }
+
+    #[test]
+    fn test_parse_json_or_none_accepts_null() {
+        let resource: Option<otelite_core::telemetry::Resource> =
+            parse_json_or_none("null", "resource", "log record");
+
+        assert_eq!(resource, None);
     }
 
     #[test]

@@ -11,6 +11,17 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Trace exports now report rejected malformed spans.** OTLP clients, HTTP
+  ingestion and file imports distinguish accepted spans from records rejected
+  for invalid trace or span identifiers.
+- **Corruption diagnostics no longer warn for absent resources or expose
+  telemetry identifiers.** Valid empty resource values remain quiet, while
+  malformed stored JSON reports only its structural field and record type.
+- **Usage ratio labels now describe output versus full context.** Terminal and
+  TUI latency views no longer imply cache tokens are excluded.
+
 ## [0.1.62] - 2026-08-18
 
 ### Fixed

@@ -260,12 +260,12 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("o/i p50").style(
+        Cell::from("o/ctx p50").style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("o/i p95 ⚠").style(
+        Cell::from("o/ctx p95").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -360,8 +360,8 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
             Constraint::Length(9), // tok/s p95
             Constraint::Length(7), // ctx p50
             Constraint::Length(7), // ctx p95
-            Constraint::Length(8), // o/i p50
-            Constraint::Length(8), // o/i p95 (highlighted if >200×)
+            Constraint::Length(9), // o/ctx p50
+            Constraint::Length(9), // o/ctx p95
             Constraint::Length(8), // TTFT p50
             Constraint::Length(8), // TTFT p95
         ],

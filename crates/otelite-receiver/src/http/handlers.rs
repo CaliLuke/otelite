@@ -165,7 +165,15 @@ pub async fn handle_traces(
 
     // Process traces
     match state.traces_handler.process(request).await {
-        Ok(_) => (StatusCode::OK, Json(json!({"status": "success"}))).into_response(),
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "accepted_spans": result.accepted_spans,
+                "rejected_spans": result.rejected_spans,
+            })),
+        )
+            .into_response(),
         Err(e) => {
             error!("Failed to process traces: {}", e);
             e.into_response()
