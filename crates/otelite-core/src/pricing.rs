@@ -132,15 +132,42 @@ pub const LITELLM_LICENSE: &str = "MIT — © 2023 Berri AI";
 
 fn claude_fallback(model: &str) -> Option<&'static FallbackEntry> {
     let m = model.to_ascii_lowercase();
-    if m.contains("opus") {
+    if has_claude_family_token(&m, "opus") {
         Some(&CLAUDE_OPUS_FALLBACK)
-    } else if m.contains("sonnet") {
+    } else if has_claude_family_token(&m, "sonnet") {
         Some(&CLAUDE_SONNET_FALLBACK)
-    } else if m.contains("haiku") {
+    } else if has_claude_family_token(&m, "haiku") {
         Some(&CLAUDE_HAIKU_FALLBACK)
     } else {
         None
     }
+}
+
+/// Return whether a Claude family name occurs as a complete model-name token.
+///
+/// The fallback rates are deliberately coarse, so partial matches such as
+/// `not-an-opus-model` must not produce an authoritative estimate.
+fn has_claude_family_token(model: &str, family: &str) -> bool {
+    model.match_indices(family).any(|(start, _)| {
+        let before = model[..start].chars().next_back();
+        let suffix = &model[start + family.len()..];
+        let versioned = suffix
+            .strip_prefix('-')
+            .or_else(|| suffix.strip_prefix('.'))
+            .is_some_and(|version| {
+                version.starts_with(|character: char| character.is_ascii_digit())
+            });
+        !before.is_some_and(|character| character.is_ascii_alphanumeric())
+            && (suffix.is_empty()
+                || suffix.starts_with(|character: char| character.is_ascii_digit())
+                || versioned)
+    })
+}
+
+/// Remove a client-side context-window label that is not part of the model ID
+/// sent to the provider.
+fn pricing_model_name(model: &str) -> &str {
+    model.strip_suffix("[1m]").unwrap_or(model)
 }
 
 /// Parsed pricing database. Lookups walk a small list of candidate keys that
@@ -247,7 +274,8 @@ impl PricingDatabase {
             return CostResult::none(None, system);
         };
 
-        if let Some(entry) = self.lookup(model, system) {
+        let pricing_model = pricing_model_name(model);
+        if let Some(entry) = self.lookup(pricing_model, system) {
             if entry.input_cost_per_token > 0.0 || entry.output_cost_per_token > 0.0 {
                 let cct = entry
                     .cache_creation_input_token_cost
@@ -265,7 +293,7 @@ impl PricingDatabase {
             }
         }
 
-        if let Some(fb) = claude_fallback(model) {
+        if let Some(fb) = claude_fallback(pricing_model) {
             // Fallback has no way to split 5m vs 1h cache tiers — use 5m rate
             // for the full cache_creation bucket (conservative: under-reports
             // 1h cache which is 2x more expensive).
@@ -318,6 +346,14 @@ mod tests {
     }
 
     #[test]
+    fn claude_fallback_rejects_partial_family_names() {
+        let db = PricingDatabase::empty();
+        let result = db.compute_cost(Some("not-an-opus-model"), u(1_000_000, 0), None);
+        assert_eq!(result.source, CostSource::None);
+        assert!(result.cost.is_none());
+    }
+
+    #[test]
     fn fallback_applies_cache_creation_and_read_rates() {
         let db = PricingDatabase::empty();
         let usage = TokenUsage {
@@ -364,6 +400,20 @@ mod tests {
         assert_eq!(result.source, CostSource::Litellm);
         // 1M × 2.5e-6 + 1M × 1e-5 = 2.5 + 10 = 12.5
         assert!((result.cost.unwrap() - 12.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn litellm_lookup_strips_one_megabyte_window_label() {
+        let json = r#"{
+            "claude-opus-5": {
+                "input_cost_per_token": 5e-6,
+                "output_cost_per_token": 2.5e-5
+            }
+        }"#;
+        let db = PricingDatabase::from_litellm_json(json).unwrap();
+        let result = db.compute_cost(Some("claude-opus-5[1m]"), u(1_000_000, 1_000_000), None);
+        assert_eq!(result.source, CostSource::Litellm);
+        assert!((result.cost.unwrap() - 30.0).abs() < 1e-6);
     }
 
     #[test]

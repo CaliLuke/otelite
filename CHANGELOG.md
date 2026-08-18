@@ -13,6 +13,10 @@ have to work around), not implementation detail.
 
 ### Fixed
 
+- **Model cost estimates now recognise Claude Code's `[1m]` context-window
+  label.** Those requests use the underlying model's LiteLLM rate instead of a
+  stale fallback rate, so usage reports no longer imply a false 1M-token price
+  premium.
 - **Buffered LLM responses no longer report completion time as first-token
   latency.** Latency tables, trends, and context-size views now label affected
   groups with the observed buffered share instead of presenting misleading
