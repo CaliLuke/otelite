@@ -11,6 +11,13 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`otelite cache` and the cache-economics API flag.** The
+  `by_model=1` form documented for `GET /api/genai/cache_hit_rate`
+  (and sent by the web UI) was rejected in 0.1.70, which only accepted
+  `by_model=true`. Both forms now work.
+
 ## [0.1.70] - 2026-08-27
 
 ### Added

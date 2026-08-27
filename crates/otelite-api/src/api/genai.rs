@@ -730,11 +730,11 @@ pub struct CacheQuery {
     /// Model filter (only used without `by_model`; the economics payload is
     /// always per-model).
     pub model: Option<String>,
-    /// Pass `1` to return the cache-economics payload (per-model read/write
-    /// split, hit rate, read:write ratio, estimated savings, plus a
-    /// time-bucketed series). Without it, the original per-model hit-rate
-    /// list is returned unchanged.
-    pub by_model: Option<bool>,
+    /// Pass `1` (or `true`) to return the cache-economics payload
+    /// (per-model read/write split, hit rate, read:write ratio, estimated
+    /// savings, plus a time-bucketed series). Without it, the original
+    /// per-model hit-rate list is returned unchanged.
+    pub by_model: Option<String>,
     /// Bucket size in seconds for the economics series (default 3600).
     /// Only used with `by_model=1`.
     pub bucket_secs: Option<u64>,
@@ -802,6 +802,11 @@ pub async fn get_truncation_rate(
     Ok(Json(rows))
 }
 
+/// `by_model=1` (or `true`) enables the cache-economics payload.
+fn by_model_enabled(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("true"))
+}
+
 /// Cache token hit rate per model; with `by_model=1` returns the full cache
 /// economics payload instead (`CacheEconomicsResponse`).
 #[utoipa::path(
@@ -819,7 +824,7 @@ pub async fn get_cache_hit_rate(
     State(state): State<AppState>,
     Query(query): Query<CacheQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    if query.by_model == Some(true) {
+    if by_model_enabled(query.by_model.as_deref()) {
         let bucket_secs = query.bucket_secs.unwrap_or(3600);
         if bucket_secs == 0 {
             return Err((
@@ -1394,4 +1399,19 @@ pub async fn get_hour_of_day(
             )
         })?;
     Ok(Json(rows))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn by_model_flag_accepts_one_and_true_only() {
+        assert!(by_model_enabled(Some("1")));
+        assert!(by_model_enabled(Some("true")));
+        assert!(!by_model_enabled(Some("0")));
+        assert!(!by_model_enabled(Some("yes")));
+        assert!(!by_model_enabled(Some("2")));
+        assert!(!by_model_enabled(None));
+    }
 }
