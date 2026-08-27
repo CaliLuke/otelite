@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.81] - 2026-08-27
+
 ### Added
 
 - **Exact time ranges, repeatable model filters and throughput toggles for
