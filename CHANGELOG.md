@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.69] - 2026-08-27
+
 ### Added
 
 - **See your provider × model mix at a glance.** The new *Provider Mix*
