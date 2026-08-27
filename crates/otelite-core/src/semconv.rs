@@ -379,6 +379,10 @@ pub mod metric_labels {
     /// "true"/"false" on `opencode.session.count`; top-level sessions are
     /// everything that is not "true".
     pub const IS_SUBAGENT: &str = "$.is_subagent";
+    /// Flat key (quoted JSON path): opencode's per-project identifier on
+    /// `token.usage`, `session.cost.total`, `session.count`, `model.usage`
+    /// and `retry.count`. Absent on codex/claude metrics.
+    pub const PROJECT_ID: &str = "$.\"project.id\"";
     /// "cli" for user-initiated codex runs, "subagent_*" otherwise.
     pub const SESSION_SOURCE: &str = "$.session_source";
     /// "true"/"false" on `codex.api_request`.

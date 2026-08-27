@@ -6,6 +6,7 @@ pub mod diagnose;
 pub mod import;
 pub mod logs;
 pub mod metrics;
+pub mod projects;
 pub mod providers;
 pub mod reasoning;
 pub mod service;

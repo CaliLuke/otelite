@@ -500,17 +500,19 @@ class AnalyticsView {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
             const [costSeries, topSpans, cacheHitRate, cacheEconomics, reasoningShare,
-                   retryStats, errorRate, contextTypeSplit, agentsRollup] = await Promise.all([
-                this.api.getCostSeries({ ...params, bucket }),
-                this.api.getTopSpans({ ...params, limit: 20 }),
-                this.api.getCacheHitRate(params).catch(() => null),
-                this.api.getCacheEconomics({ ...params, bucket_secs: bucket }).catch(() => null),
-                this.api.getReasoningShare(params).catch(() => null),
-                this.api.getRetryStats(params).catch(() => null),
-                this.api.getErrorRate(params).catch(() => []),
-                this.api.getContextTypeSplit(params).catch(() => null),
-                this.api.getAgents({ ...params, bucket_secs: bucket }).catch(() => null),
-            ]);
+                   retryStats, errorRate, contextTypeSplit, agentsRollup, projectsRollup] =
+                await Promise.all([
+                    this.api.getCostSeries({ ...params, bucket }),
+                    this.api.getTopSpans({ ...params, limit: 20 }),
+                    this.api.getCacheHitRate(params).catch(() => null),
+                    this.api.getCacheEconomics({ ...params, bucket_secs: bucket }).catch(() => null),
+                    this.api.getReasoningShare(params).catch(() => null),
+                    this.api.getRetryStats(params).catch(() => null),
+                    this.api.getErrorRate(params).catch(() => []),
+                    this.api.getContextTypeSplit(params).catch(() => null),
+                    this.api.getAgents({ ...params, bucket_secs: bucket }).catch(() => null),
+                    this.api.getProjects(params).catch(() => null),
+                ]);
 
             const summary = this.lastSummary || { summary: {} };
             const cacheRead = summary.summary?.total_cache_read_tokens ?? 0;
@@ -538,6 +540,7 @@ class AnalyticsView {
                 this._buildCacheEconomics(cacheEconomics, cacheHitRate || [], bucket),
                 this._buildReasoningShare(reasoningShare),
                 this._buildAgents(agentsRollup, bucket),
+                this._buildProjects(projectsRollup),
                 this._buildByModelByProvider(summary),
                 this._buildContextTypeSplit(contextTypeSplit || []),
             ].filter(Boolean).join('');
@@ -1877,6 +1880,50 @@ class AnalyticsView {
                 <tbody>${rows}</tbody>
             </table>
             ${chartHtml}`;
+    }
+
+    _buildProjects(data) {
+        if (!data) return '';
+        const projects = Array.isArray(data.projects) ? data.projects : [];
+        if (!projects.length) return '';
+        const fmt = n => Number(n || 0).toLocaleString();
+        const fmtUsd = v => v == null ? '—' : `$${Number(v).toFixed(2)}`;
+        const sourceNote = s =>
+            s === 'actual' ? 'harness cost counter'
+            : s === 'mixed' ? 'counter + tokens × pricing (disjoint harnesses)'
+            : 'tokens × pricing table';
+        const rows = projects.map(p => {
+            const t = p.tokens || {};
+            const total = (t.input || 0) + (t.output || 0) + (t.cache_read || 0)
+                + (t.cache_write || 0) + (t.reasoning || 0);
+            const top = (p.top_models || []);
+            const topCell = top.length
+                ? top.map(m => {
+                    const mt = m.tokens || {};
+                    const mtot = (mt.input || 0) + (mt.output || 0) + (mt.cache_read || 0)
+                        + (mt.cache_write || 0) + (mt.reasoning || 0);
+                    return `<span title="${top.length > 1 ? 'top 5 models' : 'only model'}">${this._esc(m.model)} (${fmt(mtot)})${m.cost_usd != null ? `, ${fmtUsd(m.cost_usd)}` : ''}</span>`;
+                }).join('<br>')
+                : '—';
+            return `
+                <tr>
+                    <td title="${p.project_id === 'unattributed' ? 'codex/claude emit no project label today' : ''}">${this._esc(p.project_id)}</td>
+                    <td class="num">${fmt(p.sessions)}</td>
+                    <td class="num" title="${sourceNote(p.cost_source)}">${fmtUsd(p.cost_usd)}${p.cost_source && p.cost_source !== 'actual' ? ` <span class="section-hint">(${p.cost_source})</span>` : ''}</td>
+                    <td class="num" title="in ${fmt(t.input || 0)} · out ${fmt(t.output || 0)} · cache-r ${fmt(t.cache_read || 0)} · cache-w ${fmt(t.cache_write || 0)} · reasoning ${fmt(t.reasoning || 0)}">${fmt(total)}</td>
+                    <td>${topCell}</td>
+                </tr>`;
+        }).join('');
+
+        return `
+            <h3>Projects</h3>
+            <p class="section-hint">Which project drove the bill. opencode attributes by its project.id label; codex/claude emit no project label today and are grouped under "unattributed" (the limitation, not a gap in the query).</p>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Project</th><th>Sessions</th><th>Cost</th><th>Tokens</th><th>Top models</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
     }
 
     _buildRequestParamProfile(profile) {

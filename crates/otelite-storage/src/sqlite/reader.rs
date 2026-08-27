@@ -3719,6 +3719,226 @@ pub fn query_agent_rollup(
     Ok(out)
 }
 
+/// Per-project rollup: opencode sessions attributed by their `project.id`
+/// label, plus one `"unattributed"` row for codex/claude (no project label
+/// today) and any label-less opencode activity.
+///
+/// Reuses the #125 machinery verbatim where the series keys already
+/// include the full counter key: `opencode_usage_rows`/`baselines`/
+/// `counter_deltas` for token deltas (series key = agent/model/type/
+/// session.id), and `counter_window_deltas_value` over `[session.id]` for
+/// the per-session cost counter (one series per session). No new index:
+/// both ride `idx_metrics_name_ts` and the existing covering indexes.
+pub fn query_project_rollup(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::ProjectRollupStorage>> {
+    use otelite_core::api::{AgentTokenUsage, ProjectRollupStorage};
+    use otelite_core::semconv::agent_names as anames;
+    use otelite_core::semconv::metric_labels as lbl;
+    use otelite_core::semconv::metric_names as mnames;
+    use otelite_core::semconv::opencode_token_types as otypes;
+
+    const UNATTRIBUTED: &str = "unattributed";
+    const UNKNOWN_MODEL: &str = "(unknown)";
+
+    struct ProjectAcc {
+        sessions: u64,
+        counter_cost: f64,
+        has_counter: bool,
+        counter_disjoint: bool,
+        models: HashMap<String, AgentTokenUsage>,
+    }
+
+    fn acc<'a>(m: &'a mut HashMap<String, ProjectAcc>, p: &str) -> &'a mut ProjectAcc {
+        m.entry(p.to_string()).or_insert_with(|| ProjectAcc {
+            sessions: 0,
+            counter_cost: 0.0,
+            has_counter: false,
+            counter_disjoint: false,
+            models: HashMap::new(),
+        })
+    }
+
+    let mut projects: HashMap<String, ProjectAcc> = HashMap::new();
+
+    // ── opencode: token deltas attributed via session → project ─────────
+    // Session → project map: one windowed pass over `session.count` (the
+    // marker every opencode session emits, with the project label).
+    let mut where_clause = String::from(
+        "WHERE name = ?1 AND json_valid(attributes) \
+         AND json_extract(attributes, '$.\"session.id\"') IS NOT NULL",
+    );
+    let n_time_bounds = start_time.is_some() as usize + end_time.is_some() as usize;
+    if start_time.is_some() {
+        where_clause.push_str(" AND timestamp >= ?2");
+    }
+    if end_time.is_some() {
+        where_clause.push_str(&format!(
+            " AND timestamp <= ?{}",
+            2 + start_time.is_some() as usize
+        ));
+    }
+    // Sentinel placeholder sits after name + any time bounds.
+    let sentinel_idx = 2 + n_time_bounds;
+    // NULL project labels fold into the sentinel in SQL so a session's
+    // attribution is deterministic.
+    let make_params = || {
+        let mut p: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(mnames::OPENCODE_SESSION_COUNT.to_string())];
+        if let Some(start) = start_time {
+            p.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            p.push(Box::new(end));
+        }
+        p.push(Box::new(UNATTRIBUTED.to_string()));
+        p
+    };
+    let map_sql = format!(
+        "SELECT DISTINCT \
+            json_extract(attributes, '$.\"session.id\"'), \
+            COALESCE(json_extract(attributes, '{lbl_project}'), ?{sentinel_idx}) \
+         FROM metrics {where_clause}",
+        lbl_project = lbl::PROJECT_ID,
+    );
+    let map_params = make_params();
+    let param_refs: Vec<&dyn rusqlite::ToSql> = map_params.iter().map(|p| p.as_ref()).collect();
+    let mut map_stmt = conn
+        .prepare(&map_sql)
+        .map_err(|e| StorageError::QueryError(format!("Failed to prepare project map: {e}")))?;
+    let mut session_project: HashMap<String, String> = HashMap::new();
+    let map_rows = map_stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to query project map: {e}")))?;
+    for row in map_rows {
+        let (sid, project) =
+            row.map_err(|e| StorageError::QueryError(format!("Failed to parse project map: {e}")))?;
+        session_project.insert(sid, project);
+    }
+
+    // Session counts per project (top-level sessions only), same marker.
+    let mut sess_where = where_clause.clone();
+    sess_where.push_str(&format!(
+        " AND (COALESCE(json_extract(attributes, '{lbl_subagent}'), 'false') != 'true')",
+        lbl_subagent = lbl::IS_SUBAGENT
+    ));
+    let sess_sql = format!(
+        "SELECT COALESCE(json_extract(attributes, '{lbl_project}'), ?{sentinel_idx}), \
+                COUNT(DISTINCT json_extract(attributes, '$.\"session.id\"')) \
+         FROM metrics {sess_where} \
+         GROUP BY 1",
+        lbl_project = lbl::PROJECT_ID,
+    );
+    let sess_params = make_params();
+    let sess_refs: Vec<&dyn rusqlite::ToSql> = sess_params.iter().map(|p| p.as_ref()).collect();
+    let mut sess_stmt = conn.prepare(&sess_sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare project sessions: {e}"))
+    })?;
+    let sess_rows = sess_stmt
+        .query_map(sess_refs.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to query project sessions: {e}")))?;
+    for row in sess_rows {
+        let (project, n) = row.map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse project sessions: {e}"))
+        })?;
+        acc(&mut projects, &project).sessions += n.max(0) as u64;
+    }
+
+    // Token deltas: the #125 per-row clamped pass (series key includes
+    // session.id, so per-project attribution cannot cross sessions).
+    let rows = opencode_usage_rows(conn, start_time, end_time)?;
+    let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
+    for (labels, _ts, delta) in opencode_counter_deltas(rows, &baselines) {
+        let session = labels.get(3).and_then(|s| s.as_deref());
+        let project = session
+            .and_then(|s| session_project.get(s))
+            .map(|p| p.as_str())
+            .unwrap_or(UNATTRIBUTED);
+        let model = labels
+            .get(1)
+            .and_then(|m| m.as_deref())
+            .unwrap_or(UNKNOWN_MODEL);
+        let kind = labels.get(2).and_then(|k| k.as_deref());
+        let tokens = delta as u64;
+        let p = acc(&mut projects, project);
+        let apply = |t: &mut AgentTokenUsage| match kind {
+            Some(k) if k == otypes::INPUT => t.input += tokens,
+            Some(k) if k == otypes::OUTPUT => t.output += tokens,
+            Some(k) if k == otypes::REASONING => t.reasoning += tokens,
+            Some(k) if k == otypes::CACHE_READ => t.cache_read += tokens,
+            Some(k) if k == otypes::CACHE_WRITE => t.cache_write += tokens,
+            _ => {},
+        };
+        apply(p.models.entry(model.to_string()).or_default());
+    }
+
+    // Cost: per-session cumulative counter, attributed via the same map.
+    // The unattributed bucket's counter covers only label-less opencode
+    // sessions — disjoint from the codex/claude tokens it will also hold.
+    let cost_deltas = counter_window_deltas_value(
+        conn,
+        mnames::OPENCODE_SESSION_COST_TOTAL,
+        &[lbl::SESSION_ID],
+        HISTOGRAM_SUM_VALUE_SQL,
+        start_time,
+        end_time,
+    )?;
+    for d in &cost_deltas {
+        let sid = d.labels.first().and_then(|s| s.as_deref());
+        let project = sid
+            .and_then(|s| session_project.get(s))
+            .map(|p| p.as_str())
+            .unwrap_or(UNATTRIBUTED);
+        let delta = d.delta.max(0.0);
+        let p = acc(&mut projects, project);
+        p.has_counter = true;
+        p.counter_cost += delta;
+    }
+
+    // ── unattributed: fold in codex + claude (no project label) ─────────
+    // Reuse the agent rollup's verified codex/claude passes; discard the
+    // per-bucket series (this endpoint has none).
+    let unattr_agent_rollups = query_agent_rollup(conn, start_time, end_time, 1)?;
+    let mut unattr_models: HashMap<String, AgentTokenUsage> = HashMap::new();
+    let mut unattr_sessions: u64 = 0;
+    for a in unattr_agent_rollups {
+        if a.agent != anames::CODEX && a.agent != anames::CLAUDE {
+            continue;
+        }
+        unattr_sessions += a.sessions;
+        for (model, tokens) in a.models {
+            unattr_models.entry(model).or_default().fold_tokens(tokens);
+        }
+    }
+    if !unattr_models.is_empty() || unattr_sessions > 0 {
+        let p = acc(&mut projects, UNATTRIBUTED);
+        p.sessions += unattr_sessions;
+        p.counter_disjoint = true;
+        for (model, tokens) in unattr_models {
+            let m = p.models.entry(model).or_default();
+            m.fold_tokens(tokens);
+        }
+    }
+
+    let out: Vec<ProjectRollupStorage> = projects
+        .into_iter()
+        .map(|(project_id, p)| ProjectRollupStorage {
+            counter_cost_usd: p.has_counter.then_some(p.counter_cost),
+            counter_disjoint_from_tokens: p.counter_disjoint,
+            project_id,
+            sessions: p.sessions,
+            models: p.models.into_iter().collect(),
+        })
+        .collect();
+    Ok(out)
+}
+
 /// Fold one bucketed (model, token_type) total into per-model and
 /// per-bucket-per-model token accumulators.
 #[allow(clippy::too_many_arguments)]
@@ -7627,5 +7847,186 @@ mod tests {
         );
 
         assert_eq!(rows.len(), 2, "sessionless span skipped: {rows:?}");
+    }
+
+    use otelite_core::semconv::agent_names as anames;
+    use otelite_core::semconv::codex_token_types as ctt;
+    use otelite_core::semconv::metric_names as mnames;
+    use otelite_core::semconv::opencode_token_types as otypes;
+
+    const W0: i64 = 1_700_000_000_000_000_000;
+    const W1: i64 = W0 + 5;
+
+    fn seed(conn: &Connection) {
+        // Session→project map + session counts (opencode.session.count).
+        let sess = |sid: &str, project: Option<&str>, subagent: bool| {
+            let mut attrs = format!("{{\"session.id\":\"{sid}\"");
+            if let Some(p) = project {
+                attrs.push_str(&format!(",\"project.id\":\"{p}\""));
+            }
+            if subagent {
+                attrs.push_str(",\"is_subagent\":\"true\"");
+            }
+            attrs.push('}');
+            insert_counter_row(conn, mnames::OPENCODE_SESSION_COUNT, W0, 1, &attrs);
+        };
+        sess("s1", Some("projA"), false);
+        sess("s2", Some("projB"), false);
+        sess("s3", None, false);
+        sess("s4", Some("projA"), true);
+
+        // Token counters (cumulative per series).
+        let tok = |sid: &str, model: &str, kind: &str, ts: i64, v: i64| {
+            let attrs = format!(
+                "{{\"agent\":\"opencode\",\"model\":\"{model}\",\"type\":\"{kind}\",\"session.id\":\"{sid}\"}}"
+            );
+            insert_counter_row(conn, mnames::OPENCODE_TOKEN_USAGE, ts, v, &attrs);
+        };
+        tok("s1", "modelA", otypes::INPUT, W0, 100);
+        tok("s1", "modelA", otypes::INPUT, W0 + 1, 150);
+        tok("s2", "modelA", otypes::OUTPUT, W0 + 1, 50);
+        tok("s3", "modelB", otypes::INPUT, W0 + 2, 30);
+        tok("s4", "modelA", otypes::INPUT, W0 + 3, 70);
+
+        // Per-session cost counters.
+        insert_histogram_row(
+            conn,
+            mnames::OPENCODE_SESSION_COST_TOTAL,
+            W0,
+            1,
+            0.5,
+            r#"{"session.id":"s1"}"#,
+        );
+        insert_histogram_row(
+            conn,
+            mnames::OPENCODE_SESSION_COST_TOTAL,
+            W0 + 1,
+            2,
+            0.75,
+            r#"{"session.id":"s1"}"#,
+        );
+        insert_histogram_row(
+            conn,
+            mnames::OPENCODE_SESSION_COST_TOTAL,
+            W0,
+            1,
+            0.1,
+            r#"{"session.id":"s3"}"#,
+        );
+
+        // Codex: turn tokens (histogram sum field) + cli thread starts.
+        insert_histogram_row(
+            conn,
+            mnames::CODEX_TURN_TOKEN_USAGE,
+            W0 + 1,
+            1,
+            400.0,
+            &format!("{{\"model\":\"gpt-x\",\"token_type\":\"{}\"}}", ctt::INPUT),
+        );
+        insert_counter_row(
+            conn,
+            mnames::CODEX_THREAD_STARTED,
+            W0,
+            2,
+            r#"{"session_source":"cli"}"#,
+        );
+    }
+
+    fn model_map(
+        r: &otelite_core::api::ProjectRollupStorage,
+    ) -> std::collections::HashMap<&str, &otelite_core::api::AgentTokenUsage> {
+        r.models.iter().map(|(m, t)| (m.as_str(), t)).collect()
+    }
+
+    fn by_project(
+        rows: Vec<otelite_core::api::ProjectRollupStorage>,
+    ) -> std::collections::HashMap<String, otelite_core::api::ProjectRollupStorage> {
+        rows.into_iter()
+            .map(|r| (r.project_id.clone(), r))
+            .collect()
+    }
+
+    #[test]
+    fn project_rollup_empty_db_returns_nothing() {
+        let conn = setup_test_db();
+        let rows = query_project_rollup(&conn, Some(W0), Some(W1)).unwrap();
+        assert!(rows.is_empty(), "no metrics → no projects: {rows:?}");
+    }
+
+    #[test]
+    fn project_rollup_attributes_tokens_cost_and_sessions() {
+        let conn = setup_test_db();
+        seed(&conn);
+        let rows = by_project(query_project_rollup(&conn, Some(W0), Some(W1)).unwrap());
+
+        let a = rows.get("projA").expect("projA missing: {rows:?}");
+        assert_eq!(a.sessions, 1, "subagent session s4 must not count");
+        assert_eq!(a.counter_cost_usd, Some(0.75), "s1's counter delta");
+        assert!(
+            !a.counter_disjoint_from_tokens,
+            "opencode counter + tokens are one population"
+        );
+        let mm = model_map(a);
+        assert_eq!(
+            mm.get("modelA").expect("modelA tokens").input,
+            220,
+            "s1 delta 150 + s4 delta 70"
+        );
+        assert_eq!(a.models.len(), 1);
+
+        let b = rows.get("projB").expect("projB missing");
+        assert_eq!(b.sessions, 1);
+        assert_eq!(b.counter_cost_usd, None, "s2 emitted no cost counter");
+        assert_eq!(model_map(b).get("modelA").unwrap().output, 50);
+    }
+
+    #[test]
+    fn project_rollup_unattributed_merges_labelless_opencode_with_codex() {
+        let conn = setup_test_db();
+        seed(&conn);
+        let rows = by_project(query_project_rollup(&conn, Some(W0), Some(W1)).unwrap());
+
+        let u = rows.get("unattributed").expect("unattributed missing");
+        assert_eq!(
+            u.sessions, 3,
+            "1 label-less opencode + 2 codex cli sessions: {u:?}"
+        );
+        assert_eq!(u.counter_cost_usd, Some(0.1), "s3's cost counter");
+        assert!(
+            u.counter_disjoint_from_tokens,
+            "counter (opencode) + tokens (opencode+codex) are disjoint"
+        );
+        assert_eq!(model_map(u).get("modelB").unwrap().input, 30);
+        assert_eq!(
+            model_map(u).get("gpt-x").unwrap().input,
+            400,
+            "codex histogram $[1] sum"
+        );
+        assert!(
+            !rows.contains_key(anames::CODEX) && !rows.contains_key(anames::CLAUDE),
+            "codex/claude are folded into unattributed, not their own rows"
+        );
+    }
+
+    #[test]
+    fn project_rollup_respects_window() {
+        let conn = setup_test_db();
+        seed(&conn);
+        // Narrow window that excludes every s1/s2 token step except s1@W0.
+        let rows = by_project(query_project_rollup(&conn, Some(W0), Some(W0)).unwrap());
+        let a = rows.get("projA").expect("projA missing");
+        assert_eq!(
+            model_map(a).get("modelA").unwrap().input,
+            100,
+            "only the W0 step"
+        );
+        assert_eq!(
+            a.counter_cost_usd,
+            Some(0.5),
+            "baseline-free last value in window"
+        );
+        // No session.count rows outside the narrow window… they are all at W0,
+        // so sessions are still counted.
+        assert_eq!(a.sessions, 1);
     }
 }

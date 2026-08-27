@@ -459,6 +459,21 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    pub async fn fetch_projects(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::ProjectRollupResponse> {
+        let url = format!("{}/api/genai/projects", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch project rollup: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_session_costs(
         &self,
         params: Vec<(&str, String)>,

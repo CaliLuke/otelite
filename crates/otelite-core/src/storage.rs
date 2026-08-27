@@ -12,9 +12,9 @@ use crate::api::{
     CallsSeriesPoint, ConversationCostRow, ConversationDepthStats, CostSeriesPoint,
     ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse,
     LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage,
-    ProviderMixResponse, ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats,
-    SessionCostRow, SessionCostStorage, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
-    TopSpanSort, TruncationRateByModel,
+    ProjectRollupStorage, ProviderMixResponse, ReasoningShareResponse, RequestParamProfile,
+    RetrievalStats, RetryStats, SessionCostRow, SessionCostStorage, SystemUsage, TokenUsageSummary,
+    ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -334,6 +334,17 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         bucket_secs: u64,
     ) -> Result<Vec<AgentRollupStorage>>;
+
+    /// Per-project rollup over the window: opencode sessions attributed
+    /// by their `project.id` label (token deltas, session counts, cost
+    /// counter deltas), plus one `"unattributed"` row for codex/claude
+    /// (no project label today) and label-less opencode sessions. Cost is
+    /// unenriched — see [`ProjectRollupStorage`].
+    async fn query_project_rollup(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<ProjectRollupStorage>>;
 
     /// Per-session costs (opencode + claude) over the window: last
     /// per-session value of opencode's cumulative `session.cost.total` /

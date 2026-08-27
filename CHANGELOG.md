@@ -11,6 +11,16 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-project usage: see which project drove the bill.** The GenAI tab
+  gains a Projects section and the CLI gains `otelite projects` — per-project
+  sessions, cost, token totals and the top models. opencode attributes
+  activity by its `project.id` label; codex and claude emit no project label
+  today, so their activity is grouped under a clearly-labelled
+  `unattributed` row (opencode's own cost counter is `actual`; the rest is
+  priced from tokens and marked `estimated`/`mixed`).
+
 ## [0.1.75] - 2026-08-27
 
 ### Added

@@ -171,6 +171,11 @@ enum Commands {
         after_help = "Examples:\n  otelite agents --since 24h\n  otelite agents --since 7d --format json"
     )]
     Agents(commands::agents::AgentsCommand),
+    /// Show per-project usage: sessions, cost, tokens, top model
+    #[command(
+        after_help = "Examples:\n  otelite projects --since 24h\n  otelite projects --since 7d --format json"
+    )]
+    Projects(commands::projects::ProjectsCommand),
     /// Session cost analysis: top-cost sessions and the cost distribution
     #[command(
         subcommand,
@@ -569,6 +574,11 @@ async fn run_cli() -> Result<()> {
             Ok(())
         },
         Some(Commands::Agents(cmd)) => {
+            let storage = create_storage(&config).await?;
+            cmd.execute(storage, config.format).await?;
+            Ok(())
+        },
+        Some(Commands::Projects(cmd)) => {
             let storage = create_storage(&config).await?;
             cmd.execute(storage, config.format).await?;
             Ok(())

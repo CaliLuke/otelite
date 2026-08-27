@@ -56,6 +56,7 @@ use utoipa::OpenApi;
         crate::api::genai::get_agent_roles,
         crate::api::genai::get_reasoning_share,
         crate::api::genai::get_agents,
+        crate::api::genai::get_projects,
         crate::api::genai::get_provider_mix,
         crate::api::genai::get_request_param_profile,
         crate::api::genai::get_conversation_depth,
@@ -133,6 +134,9 @@ use utoipa::OpenApi;
             otelite_core::api::SessionCostResponse,
             otelite_core::api::CostBucket,
             otelite_core::api::CostDistributionResponse,
+            otelite_core::api::ProjectRollup,
+            otelite_core::api::ProjectTopModel,
+            otelite_core::api::ProjectRollupResponse,
         )
     ),
     tags(
@@ -296,6 +300,7 @@ impl DashboardServer {
                 get(crate::api::genai::get_reasoning_share),
             )
             .route("/api/genai/agents", get(crate::api::genai::get_agents))
+            .route("/api/genai/projects", get(crate::api::genai::get_projects))
             .route("/api/genai/provider_mix", get(crate::api::genai::get_provider_mix))
             .route("/api/genai/request_param_profile", get(crate::api::genai::get_request_param_profile))
             .route("/api/genai/conversation_depth", get(crate::api::genai::get_conversation_depth))

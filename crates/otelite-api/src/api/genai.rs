@@ -10,10 +10,10 @@ use otelite_core::api::{
     AgentRolesResponse, AgentRollup, AgentRollupResponse, CallsSeriesPoint, ContextTypeSplit,
     ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse,
     ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket,
-    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse,
-    ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
-    StopReasonCount, TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan,
-    TopSpanSort, TruncationRateByModel,
+    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ProjectRollupResponse,
+    ProviderMixResponse, ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats,
+    SessionCostRow, StopReasonCount, TokenUsageResponse, ToolApprovalStats, ToolErrorEntry,
+    ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -996,6 +996,50 @@ pub async fn get_agents(
     });
 
     Ok(Json(AgentRollupResponse { agents }))
+}
+
+/// Per-project usage: which project/repo drove the bill. opencode
+/// attributes by `project.id`; codex/claude emit no project label today, so
+/// their activity lands in the `"unattributed"` row (stated as
+/// `cost_source`/`project_id`, not a mapping invented in the query).
+#[utoipa::path(
+    get,
+    path = "/api/genai/projects",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Cost, sessions and tokens per project", body = ProjectRollupResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_projects(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<ProjectRollupResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let rollups = state
+        .storage
+        .query_project_rollup(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query project rollup: {e}"
+                ))),
+            )
+        })?;
+
+    let pricing = state.pricing.snapshot().await;
+    let mut projects: Vec<_> = rollups.into_iter().map(|r| r.enrich(&pricing.db)).collect();
+    projects.sort_by(|a, b| {
+        b.cost_usd
+            .unwrap_or(0.0)
+            .partial_cmp(&a.cost_usd.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.project_id.cmp(&b.project_id))
+    });
+
+    Ok(Json(ProjectRollupResponse { projects }))
 }
 
 /// Sub-agent role attribution: cost and tokens per opencode `agent` label.

@@ -815,3 +815,180 @@ async fn test_get_session_cost_distribution() {
         assert!((w[0].max_usd - w[1].min_usd).abs() < 1e-9);
     }
 }
+
+// ── per-project rollup (issue #127) ───────────────────────────────────────
+
+#[tokio::test]
+async fn test_get_projects_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/genai/projects?start_time={R0}&end_time={R1}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rollup: otelite_core::api::ProjectRollupResponse = serde_json::from_slice(&body).unwrap();
+    assert!(rollup.projects.is_empty(), "empty DB -> no project rows");
+}
+
+#[tokio::test]
+async fn test_get_projects_with_data() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    // opencode: two top-level sessions in distinct projects, one
+    // label-less; cumulative token + cost counters per session.
+    for (sid, project) in [("s1", Some("projA")), ("s2", Some("projB")), ("s3", None)] {
+        let mut attrs: Vec<(&str, &str)> = vec![("session.id", sid), ("is_subagent", "false")];
+        if let Some(p) = project {
+            attrs.push(("project.id", p));
+        }
+        storage
+            .write_metric(&agent_metric(
+                "opencode.session.count",
+                R1,
+                Some(1),
+                None,
+                &attrs,
+            ))
+            .await
+            .unwrap();
+    }
+    // s1: input 100 -> 250 across the window, cost 0.5 -> 1.25.
+    for (ts, input) in [(R0 - 1_000_000_000, 100u64), (R1, 250)] {
+        storage
+            .write_metric(&agent_metric(
+                "opencode.token.usage",
+                ts,
+                Some(input),
+                None,
+                &[
+                    ("agent", "a"),
+                    ("model", "m1"),
+                    ("type", "input"),
+                    ("session.id", "s1"),
+                ],
+            ))
+            .await
+            .unwrap();
+    }
+    for (ts, sum) in [(R0 - 1_000_000_000, 0.5f64), (R1, 1.25)] {
+        storage
+            .write_metric(&agent_metric(
+                "opencode.session.cost.total",
+                ts,
+                None,
+                Some((2, sum)),
+                &[("session.id", "s1")],
+            ))
+            .await
+            .unwrap();
+    }
+    // s3 (no project label): 50 output tokens, no cost counter rows.
+    storage
+        .write_metric(&agent_metric(
+            "opencode.token.usage",
+            R1,
+            Some(50),
+            None,
+            &[
+                ("agent", "a"),
+                ("model", "m2"),
+                ("type", "output"),
+                ("session.id", "s3"),
+            ],
+        ))
+        .await
+        .unwrap();
+
+    // codex: 2 cli sessions, 400 input tokens — no project label exists.
+    storage
+        .write_metric(&agent_metric(
+            "codex.thread.started",
+            R1,
+            Some(2),
+            None,
+            &[("session_source", "cli")],
+        ))
+        .await
+        .unwrap();
+    storage
+        .write_metric(&agent_metric(
+            "codex.turn.token_usage",
+            R1,
+            None,
+            Some((1, 400.0)),
+            &[("model", "c1"), ("token_type", "input")],
+        ))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/genai/projects?start_time={R0}&end_time={R1}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rollup: otelite_core::api::ProjectRollupResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        rollup.projects.len(),
+        3,
+        "projA + projB + unattributed: {rollup:?}"
+    );
+
+    let find = |pid: &str| {
+        rollup
+            .projects
+            .iter()
+            .find(|p| p.project_id == pid)
+            .unwrap_or_else(|| panic!("{pid} missing"))
+    };
+
+    let a = find("projA");
+    assert_eq!(a.sessions, 1);
+    assert_eq!(
+        a.cost_usd,
+        Some(0.75),
+        "s1 counter delta, no pricing needed"
+    );
+    assert_eq!(a.cost_source.as_deref(), Some("actual"));
+    assert_eq!(a.tokens.input, 150, "250 - 100 baseline");
+
+    let b = find("projB");
+    assert_eq!(b.sessions, 1);
+    assert_eq!(b.cost_usd, None, "no counter rows, no priced tokens");
+
+    let u = find("unattributed");
+    assert_eq!(u.sessions, 3, "1 label-less opencode + 2 codex");
+    assert!(
+        u.cost_usd.is_none() || u.cost_usd == Some(0.0),
+        "no priced models in test pricing DB: {u:?}"
+    );
+    assert_eq!(u.tokens.input, 400, "codex histogram sum");
+    assert_eq!(u.tokens.output, 50, "s3 output");
+    assert!(
+        u.top_models.iter().all(|m| m.cost_usd.is_none()),
+        "no pricing in test DB: {u:?}"
+    );
+
+    // Sorted by cost desc: projA ($0.75) first, the rest alphabetical.
+    assert_eq!(rollup.projects[0].project_id, "projA");
+}

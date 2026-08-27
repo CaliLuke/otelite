@@ -549,6 +549,17 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_project_rollup(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::ProjectRollupStorage>> {
+        self.read_query(move |conn| {
+            reader::query_project_rollup(conn, start_time, end_time).map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_session_costs(
         &self,
         start_time: Option<i64>,

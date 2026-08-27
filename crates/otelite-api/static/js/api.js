@@ -201,6 +201,7 @@ class ApiClient {
     }
     async getReasoningShare(params = {}) { return this.get('/genai/reasoning_share', params); }
     async getAgents(params = {}) { return this.get('/genai/agents', params); }
+    async getProjects(params = {}) { return this.get('/genai/projects', params); }
     async getSessionCosts(params = {}) { return this.get('/sessions/costs', params); }
     async getSessionCostDistribution(params = {}) { return this.get('/sessions/cost-distribution', params); }
     async getRequestParamProfile(params = {}) { return this.get('/genai/request_param_profile', params); }

@@ -945,6 +945,15 @@ impl AgentTokenUsage {
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_write + self.reasoning
     }
+
+    /// Add another usage into this one (same categories, all five).
+    pub fn fold_tokens(&mut self, other: AgentTokenUsage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.reasoning += other.reasoning;
+    }
 }
 
 /// One time bucket of an agent's `series` array.
@@ -1085,6 +1094,145 @@ impl AgentRollupStorage {
             tool_calls: self.tool_calls,
             retries: self.retries,
             series,
+        }
+    }
+}
+
+/// One entry of a project's `top_models`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProjectTopModel {
+    pub model: String,
+    /// Tokens × pricing; `None` when the model has no known pricing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    pub tokens: AgentTokenUsage,
+}
+
+/// Per-project rollup: which project, how many sessions, what it spent.
+/// `project_id` is the opencode `project.id` label; codex and claude emit
+/// no project label today, so their activity is grouped under the
+/// sentinel `"unattributed"` (the limitation, not a gap in the query).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProjectRollup {
+    pub project_id: String,
+    pub sessions: u64,
+    /// Spend in USD; `None` when no cost can be established — never a
+    /// fabricated zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// "actual" (the opencode cost counter covers the project),
+    /// "estimated" (tokens × pricing), or "mixed" (the unattributed row:
+    /// a counter for label-less opencode sessions plus priced codex/claude
+    /// tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+    pub tokens: AgentTokenUsage,
+    /// Up to 5 models, cost desc (unpriced models last, tokens desc).
+    pub top_models: Vec<ProjectTopModel>,
+}
+
+/// Per-project rollup response, sorted by cost desc (unpriced last),
+/// ties by `project_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProjectRollupResponse {
+    pub projects: Vec<ProjectRollup>,
+}
+
+/// Storage-layer per-project rollup. Not a wire type — see
+/// [`ProjectRollupResponse`].
+#[derive(Debug, Clone)]
+pub struct ProjectRollupStorage {
+    pub project_id: String,
+    pub sessions: u64,
+    /// The opencode cost-counter delta for this project's sessions
+    /// (`None` when the project has no counter cost).
+    pub counter_cost_usd: Option<f64>,
+    /// Per-model token totals, for API-layer pricing.
+    pub models: Vec<(String, AgentTokenUsage)>,
+    /// False (the common case): `counter_cost_usd` prices the same tokens
+    /// as `models` — it is the authoritative cost. True (only the
+    /// unattributed row): the counter covers label-less opencode sessions
+    /// while `models` holds codex/claude tokens, so the two costs are
+    /// disjoint and add up.
+    pub counter_disjoint_from_tokens: bool,
+}
+
+impl ProjectRollupStorage {
+    /// Price this rollup into a wire [`ProjectRollup`]. Same convention as
+    /// [`AgentRollupStorage::enrich`]: reasoning is billed at the output
+    /// rate.
+    pub fn enrich(self, pricing_db: &crate::pricing::PricingDatabase) -> ProjectRollup {
+        use crate::pricing::TokenUsage;
+
+        let pricing_usage = |tokens: &AgentTokenUsage| TokenUsage {
+            input: tokens.input,
+            output: tokens.output + tokens.reasoning,
+            cache_creation: tokens.cache_write,
+            cache_read: tokens.cache_read,
+        };
+
+        let mut tokens = AgentTokenUsage::default();
+        let mut priced: Vec<(String, Option<f64>, AgentTokenUsage)> = Vec::new();
+        for (model, model_tokens) in &self.models {
+            tokens.input += model_tokens.input;
+            tokens.output += model_tokens.output;
+            tokens.cache_read += model_tokens.cache_read;
+            tokens.cache_write += model_tokens.cache_write;
+            tokens.reasoning += model_tokens.reasoning;
+            let cost = pricing_db
+                .compute_cost(Some(model.as_str()), pricing_usage(model_tokens), None)
+                .cost;
+            priced.push((model.clone(), cost, *model_tokens));
+        }
+        // Cost desc, unpriced last, then tokens desc.
+        priced.sort_by(|a, b| {
+            b.1.unwrap_or(0.0)
+                .partial_cmp(&a.1.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.2.total().cmp(&a.2.total()))
+        });
+        let estimated: Option<f64> = priced
+            .iter()
+            .filter_map(|(_, c, _)| *c)
+            .reduce(|s, c| s + c);
+        let top_models = priced
+            .into_iter()
+            .take(5)
+            .map(|(model, cost_usd, tokens)| ProjectTopModel {
+                model,
+                cost_usd,
+                tokens,
+            })
+            .collect();
+
+        let (cost_usd, cost_source) = if self.counter_disjoint_from_tokens {
+            match (self.counter_cost_usd, estimated) {
+                // A $0 counter is not a cost source of its own.
+                (Some(c), Some(e)) => (
+                    Some(c + e),
+                    Some(if c > 0.0 { "mixed" } else { "estimated" }.to_string()),
+                ),
+                (Some(c), None) => (Some(c), Some("actual".to_string())),
+                (None, Some(e)) => (Some(e), Some("estimated".to_string())),
+                (None, None) => (None, Some("estimated".to_string())),
+            }
+        } else {
+            match self.counter_cost_usd {
+                Some(actual) => (Some(actual), Some("actual".to_string())),
+                None => (estimated, Some("estimated".to_string())),
+            }
+        };
+
+        ProjectRollup {
+            project_id: self.project_id,
+            sessions: self.sessions,
+            cost_usd,
+            cost_source,
+            tokens,
+            top_models,
         }
     }
 }
@@ -1594,4 +1742,172 @@ pub struct HourOfDayBucket {
     pub hour: u8,
     pub llm_calls: usize,
     pub tool_calls: usize,
+}
+
+#[cfg(test)]
+mod project_rollup_tests {
+    use super::*;
+    use crate::pricing::PricingDatabase;
+
+    fn priced_db() -> PricingDatabase {
+        // $2.5/M input, $10/M output.
+        PricingDatabase::from_litellm_json(
+            r#"{ "m1": { "input_cost_per_token": 2.5e-6, "output_cost_per_token": 1e-5 } }"#,
+        )
+        .unwrap()
+    }
+
+    fn usage(input: u64, output: u64) -> AgentTokenUsage {
+        AgentTokenUsage {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        }
+    }
+
+    fn storage(
+        project_id: &str,
+        sessions: u64,
+        counter: Option<f64>,
+        disjoint: bool,
+        models: Vec<(&str, AgentTokenUsage)>,
+    ) -> ProjectRollupStorage {
+        ProjectRollupStorage {
+            project_id: project_id.to_string(),
+            sessions,
+            counter_cost_usd: counter,
+            counter_disjoint_from_tokens: disjoint,
+            models: models
+                .into_iter()
+                .map(|(m, t)| (m.to_string(), t))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn enrich_actual_counter_wins_over_estimate() {
+        let r = storage("p1", 4, Some(1.2), false, vec![("m1", usage(1_000, 100))])
+            .enrich(&priced_db());
+        assert_eq!(r.cost_usd, Some(1.2), "opencode's counter is authoritative");
+        assert_eq!(r.cost_source.as_deref(), Some("actual"));
+        assert_eq!(r.sessions, 4);
+        assert_eq!(r.tokens.input, 1_000);
+        // top models still priced individually
+        assert_eq!(r.top_models.len(), 1);
+        assert!(
+            (r.top_models[0].cost_usd.unwrap() - (1000.0 * 2.5e-6 + 100.0 * 1e-5)).abs() < 1e-9
+        );
+    }
+
+    #[test]
+    fn enrich_estimated_when_no_counter() {
+        let r = storage(
+            "unattributed",
+            2,
+            None,
+            true,
+            vec![("m1", usage(1_000, 100))],
+        )
+        .enrich(&priced_db());
+        // 1000 x 2.5e-6 + 100 x 1e-5 = 0.0025 + 0.001 = 0.0035
+        assert!((r.cost_usd.unwrap() - 0.0035).abs() < 1e-9);
+        assert_eq!(r.cost_source.as_deref(), Some("estimated"));
+    }
+
+    #[test]
+    fn enrich_mixed_adds_disjoint_costs() {
+        // counter covers label-less opencode sessions; models price
+        // codex/claude tokens — disjoint, so they add.
+        let r = storage(
+            "unattributed",
+            3,
+            Some(0.5),
+            true,
+            vec![("m1", usage(1_000, 100))],
+        )
+        .enrich(&priced_db());
+        assert!((r.cost_usd.unwrap() - (0.5 + 0.0035)).abs() < 1e-9);
+        assert_eq!(r.cost_source.as_deref(), Some("mixed"));
+    }
+
+    #[test]
+    fn enrich_zero_disjoint_counter_is_not_a_source() {
+        let r = storage(
+            "unattributed",
+            1,
+            Some(0.0),
+            true,
+            vec![("m1", usage(1_000, 0))],
+        )
+        .enrich(&priced_db());
+        assert!((r.cost_usd.unwrap() - 0.0025).abs() < 1e-9);
+        assert_eq!(
+            r.cost_source.as_deref(),
+            Some("estimated"),
+            "a $0 counter must not upgrade the source to mixed"
+        );
+    }
+
+    #[test]
+    fn enrich_no_pricing_gives_null_cost() {
+        let r = storage(
+            "p1",
+            1,
+            None,
+            false,
+            vec![("unknown-model", usage(100, 100))],
+        )
+        .enrich(&PricingDatabase::empty());
+        assert_eq!(r.cost_usd, None, "never a fabricated zero");
+        assert_eq!(r.cost_source.as_deref(), Some("estimated"));
+        assert_eq!(r.top_models[0].cost_usd, None);
+    }
+
+    #[test]
+    fn enrich_unpriced_models_sort_last() {
+        let r = storage(
+            "p1",
+            1,
+            None,
+            false,
+            vec![("m1", usage(10, 0)), ("unknown-model", usage(9_999, 0))],
+        )
+        .enrich(&priced_db());
+        assert_eq!(
+            r.top_models
+                .iter()
+                .map(|m| m.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1", "unknown-model"],
+            "priced model sorts ahead of a bigger unpriced one"
+        );
+    }
+
+    #[test]
+    fn enrich_caps_top_models_at_five() {
+        let names: Vec<String> = (0..7).map(|i| format!("m{i}")).collect();
+        let models: Vec<(&str, AgentTokenUsage)> =
+            names.iter().map(|n| (n.as_str(), usage(1, 1))).collect();
+        let r = storage("p1", 1, None, false, models).enrich(&priced_db());
+        assert_eq!(r.top_models.len(), 5);
+    }
+
+    #[test]
+    fn fold_tokens_sums_all_categories() {
+        let mut a = AgentTokenUsage {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 5,
+        };
+        a.fold_tokens(usage(10, 20));
+        assert_eq!(a.input, 11);
+        assert_eq!(a.output, 22);
+        assert_eq!(a.cache_read, 3);
+        assert_eq!(a.cache_write, 4);
+        assert_eq!(a.reasoning, 5);
+    }
 }
