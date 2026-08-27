@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.72] - 2026-08-27
+
 ### Fixed
 
 - **Cache-economics token figures were inflated for some models.**
