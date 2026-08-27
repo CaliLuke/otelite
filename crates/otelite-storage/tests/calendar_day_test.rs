@@ -271,3 +271,191 @@ fn test_rolling_mode_end_ts_and_no_empty_buckets() {
         assert!(p.p50_ms.is_some());
     }
 }
+
+// ── issue #142: repeated model patterns + series calendar/throughput ────────
+
+/// A model cohort (exact or glob) must filter the summary totals and every
+/// latency detail view on the same set of spans.
+#[test]
+fn test_model_cohort_filters_summary_and_latency_consistently() {
+    let conn = setup_test_db();
+    // modelA-* spans: two calls on D0. modelB: one call on D0.
+    insert_span(
+        &conn,
+        "a1",
+        "modelA-1",
+        t::D0 + NS_PER_HOUR,
+        1_000_000_000,
+        10,
+    );
+    insert_span(
+        &conn,
+        "a2",
+        "modelA-2",
+        t::D0 + 2 * NS_PER_HOUR,
+        2_000_000_000,
+        20,
+    );
+    insert_span(
+        &conn,
+        "b1",
+        "modelB",
+        t::D0 + 3 * NS_PER_HOUR,
+        3_000_000_000,
+        5,
+    );
+
+    let unfiltered =
+        reader::query_token_usage(&conn, Some(t::D0), Some(t::D3), &GenAiFilters::default())
+            .unwrap();
+    assert_eq!(unfiltered.0.total_requests, 3);
+
+    for (name, filters, expected_calls) in [
+        (
+            "exact",
+            GenAiFilters {
+                model: Some("modelA-1".into()),
+                ..Default::default()
+            },
+            1u64,
+        ),
+        (
+            "glob",
+            GenAiFilters {
+                models: Some(vec!["modelA-*".into()]),
+                ..Default::default()
+            },
+            2,
+        ),
+    ] {
+        // Summary totals are computed on the cohort, not post-filtered.
+        let (summary, by_model, _systems) =
+            reader::query_token_usage(&conn, Some(t::D0), Some(t::D3), &filters).unwrap();
+        assert_eq!(
+            summary.total_requests as u64, expected_calls,
+            "{name}: summary cohort"
+        );
+        let mut names: Vec<String> = by_model.iter().map(|m| m.model.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            if name == "exact" {
+                vec!["modelA-1".to_string()]
+            } else {
+                vec!["modelA-1".to_string(), "modelA-2".to_string()]
+            },
+            "{name}: by_model rows"
+        );
+        assert!(
+            by_model.iter().all(|m| m.model != "modelB"),
+            "{name}: modelB must not leak into detail rows"
+        );
+
+        // Latency stats cohort.
+        let stats = reader::query_latency_stats(&conn, Some(t::D0), Some(t::D3), &filters).unwrap();
+        let stats_total: u64 = stats.iter().map(|s| s.count as u64).sum();
+        assert_eq!(stats_total, expected_calls, "{name}: latency stats cohort");
+
+        // Percentiles cohort.
+        let resp = reader::query_latency_percentiles(
+            &conn,
+            Some(t::D0),
+            Some(t::D3),
+            3600,
+            &["duration"],
+            &filters,
+            None,
+        )
+        .unwrap();
+        let total: u64 = resp.metrics["duration"].all.iter().map(|p| p.count).sum();
+        assert_eq!(total, expected_calls, "{name}: percentile cohort");
+    }
+}
+
+/// The latency series supports calendar-day buckets (local midnights) and
+/// per-bucket throughput from per-call rates; empty days are absent (a
+/// trend, unlike the percentile grid).
+#[test]
+fn test_latency_series_calendar_day_and_throughput() {
+    let conn = setup_test_db();
+    // London in August is BST: local midnight starting 2026-08-01 is
+    // 2026-07-31T23:00:00Z.
+    let d0_local_midnight = t::D0 - NS_PER_HOUR;
+    let d1_local_midnight = t::D1 - NS_PER_HOUR;
+    let d2_local_midnight = t::D2 - NS_PER_HOUR;
+    insert_span(
+        &conn,
+        "a",
+        "m",
+        d0_local_midnight + 2 * NS_PER_HOUR,
+        1_000_000_000,
+        10,
+    ); // 10 tok/s
+    insert_span(
+        &conn,
+        "b",
+        "m",
+        d0_local_midnight + 3 * NS_PER_HOUR,
+        2_000_000_000,
+        40,
+    ); // 20 tok/s
+    insert_span(
+        &conn,
+        "c",
+        "m",
+        d1_local_midnight + NS_PER_HOUR,
+        1_000_000_000,
+        0,
+    ); // ineligible
+
+    let points = reader::query_latency_series(
+        &conn,
+        Some(d0_local_midnight),
+        Some(d2_local_midnight),
+        3600,
+        &GenAiFilters::default(),
+        false,
+        Some("Europe/London"),
+    )
+    .unwrap();
+    assert_eq!(points.len(), 2, "calendar days with data only");
+    assert_eq!(
+        points[0].timestamp, d0_local_midnight,
+        "local-midnight boundary"
+    );
+    assert_eq!(points[1].timestamp, d1_local_midnight);
+    assert_eq!(points[0].count, 2);
+    assert_eq!(points[0].throughput_sample_count, 2);
+    // Rank estimator, n=2: p10=sorted[0], p50/p90=sorted[1].
+    assert_eq!(points[0].throughput_p10_tok_s, Some(10.0));
+    assert_eq!(points[0].throughput_p50_tok_s, Some(20.0));
+    assert_eq!(points[0].throughput_p90_tok_s, Some(20.0));
+    assert_eq!(points[1].count, 1);
+    assert_eq!(points[1].throughput_sample_count, 0);
+    assert!(points[1].throughput_p50_tok_s.is_none());
+
+    // Rolling mode on the same data: epoch-grid buckets, throughput present.
+    let rolling = reader::query_latency_series(
+        &conn,
+        Some(d0_local_midnight),
+        Some(d2_local_midnight),
+        3600,
+        &GenAiFilters::default(),
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(rolling.len() >= 2);
+    // The two day-0 calls sit in different 1-hour buckets; each carries
+    // its own single-call rate.
+    let rates: Vec<Option<f64>> = rolling
+        .iter()
+        .filter(|p| p.count == 1 && p.throughput_sample_count == 1)
+        .map(|p| p.throughput_p50_tok_s)
+        .collect();
+    assert_eq!(
+        rates,
+        vec![Some(10.0), Some(20.0)],
+        "per-call rates in rolling buckets"
+    );
+}

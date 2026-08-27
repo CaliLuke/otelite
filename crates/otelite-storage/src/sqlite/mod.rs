@@ -694,8 +694,10 @@ impl StorageBackend for SqliteBackend {
         bucket_secs: u64,
         filters: &GenAiFilters,
         all_spans: bool,
+        timezone: Option<&str>,
     ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
         let filters = filters.clone();
+        let tz = timezone.map(str::to_string);
         self.read_query(move |conn| {
             reader::query_latency_series(
                 conn,
@@ -704,6 +706,7 @@ impl StorageBackend for SqliteBackend {
                 bucket_secs,
                 &filters,
                 all_spans,
+                tz.as_deref(),
             )
             .map_err(StorageError::from)
         })

@@ -1713,6 +1713,21 @@ pub struct LatencySeriesPoint {
     /// True when at least 10 valid values exist and 90% are near complete duration.
     #[serde(default)]
     pub ttft_degenerate: bool,
+    /// End-to-end output throughput p10 tok/s across throughput-eligible
+    /// calls in this bucket (output tokens > 0 and duration > 0), computed
+    /// per call from the raw nanosecond duration. `None` when no call in
+    /// the bucket is eligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_p10_tok_s: Option<f64>,
+    /// 50th percentile end-to-end output throughput in tokens/s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_p50_tok_s: Option<f64>,
+    /// 90th percentile end-to-end output throughput in tokens/s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_p90_tok_s: Option<f64>,
+    /// Number of throughput-eligible calls (distinct from `count`).
+    #[serde(default)]
+    pub throughput_sample_count: usize,
 }
 
 /// One time bucket of the latency percentile series (issue #132).

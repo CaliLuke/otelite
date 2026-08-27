@@ -27,12 +27,30 @@ pub(crate) fn validate_since(s: &str) -> std::result::Result<String, String> {
 #[derive(Debug, Args)]
 pub struct UsageCommand {
     /// Time range to query (e.g., "1h", "24h", "7d", "30d")
-    #[arg(long, default_value = "24h", value_parser = validate_since)]
+    #[arg(
+        long,
+        default_value = "24h",
+        value_parser = validate_since,
+        conflicts_with_all = ["start", "end"]
+    )]
     pub since: String,
 
-    /// Filter by model name (e.g., "gpt-4", "claude-sonnet-4")
+    /// Exact start (overrides --since). `YYYY-MM-DD` (midnight UTC),
+    /// `YYYY-MM-DDTHH:MM:SS` (UTC when no zone is given), or epoch
+    /// seconds/nanoseconds
+    #[arg(long, conflicts_with = "since")]
+    pub start: Option<String>,
+
+    /// Exact end (overrides --since); same formats as --start. Defaults
+    /// to now when --start is given
+    #[arg(long, conflicts_with = "since")]
+    pub end: Option<String>,
+
+    /// Filter by model. Repeatable. A value without `*` matches exactly;
+    /// a value with `*` is a glob (`claude-opus-*`). Multiple values are
+    /// ORed. Applied to every panel — summary totals included.
     #[arg(long)]
-    pub model: Option<String>,
+    pub model: Vec<String>,
 
     /// Filter by system/provider (e.g., "openai", "anthropic")
     #[arg(long)]
@@ -116,6 +134,12 @@ pub struct UsageCommand {
     /// IANA timezone for --calendar-day (e.g. Europe/London); default UTC
     #[arg(long, requires = "calendar_day")]
     pub timezone: Option<String>,
+
+    /// Show throughput columns (tok/s p10/p50/p90 + eligible count) in
+    /// --latency-series; --latency and --latency-percentiles show them by
+    /// default
+    #[arg(long)]
+    pub throughput: bool,
 
     /// Show tool approval/rejection decision summary (Claude Code)
     #[arg(long)]
@@ -251,22 +275,31 @@ impl UsageCommand {
         storage: Arc<dyn StorageBackend>,
         format: crate::config::OutputFormat,
     ) -> Result<()> {
-        let (start_time, end_time) = parse_time_range(&self.since)?;
+        // Exact --start/--end win over the rolling --since window.
+        let (start_time, end_time) = match (self.start.as_deref(), self.end.as_deref()) {
+            (Some(start), end) => {
+                let start = parse_cli_time(start)?;
+                let end = match end {
+                    Some(end) => parse_cli_time(end)?,
+                    None => now_ns()?,
+                };
+                if start >= end {
+                    return Err(Error::ApiError("--start must be before --end".to_string()));
+                }
+                (start, end)
+            },
+            (None, Some(_)) => return Err(Error::ApiError("--end requires --start".to_string())),
+            (None, None) => parse_time_range(&self.since)?,
+        };
+
+        // One model cohort for every panel: summary totals and all detail
+        // views are computed on the same filtered set (#142).
+        let filters = build_model_filters(&self.model);
 
         let (summary, by_model_raw, by_system_raw) = storage
-            .query_token_usage(Some(start_time), Some(end_time), &GenAiFilters::default())
+            .query_token_usage(Some(start_time), Some(end_time), &filters)
             .await
             .map_err(|e| Error::ApiError(format!("Failed to query token usage: {}", e)))?;
-
-        // Filter results if requested
-        let by_model_raw: Vec<otelite_core::api::ModelUsage> = if let Some(ref f) = self.model {
-            by_model_raw
-                .into_iter()
-                .filter(|m| m.model.contains(f))
-                .collect()
-        } else {
-            by_model_raw
-        };
 
         let by_system_raw: Vec<otelite_core::api::SystemUsage> = if let Some(ref f) = self.system {
             by_system_raw
@@ -333,7 +366,7 @@ impl UsageCommand {
                 .query_top_spans(
                     Some(start_time),
                     Some(end_time),
-                    &GenAiFilters::default(),
+                    &filters,
                     n,
                     otelite_core::api::TopSpanSort::TotalTokens,
                     false,
@@ -368,7 +401,7 @@ impl UsageCommand {
         let latency_stats: Option<Vec<otelite_core::api::LatencyStats>> = if self.latency {
             Some(
                 storage
-                    .query_latency_stats(Some(start_time), Some(end_time), &GenAiFilters::default())
+                    .query_latency_stats(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query latency stats: {}", e))
@@ -387,8 +420,10 @@ impl UsageCommand {
                             Some(start_time),
                             Some(end_time),
                             self.bucket_secs,
-                            &GenAiFilters::default(),
+                            &filters,
                             false,
+                            self.calendar_day
+                                .then(|| self.timezone.as_deref().unwrap_or("UTC")),
                         )
                         .await
                         .map_err(|e| {
@@ -404,11 +439,7 @@ impl UsageCommand {
             if self.truncation {
                 Some(
                     storage
-                        .query_truncation_rate(
-                            Some(start_time),
-                            Some(end_time),
-                            &GenAiFilters::default(),
-                        )
+                        .query_truncation_rate(Some(start_time), Some(end_time), &filters)
                         .await
                         .map_err(|e| {
                             Error::ApiError(format!("Failed to query truncation rate: {}", e))
@@ -423,11 +454,7 @@ impl UsageCommand {
         {
             Some(
                 storage
-                    .query_cache_hit_rate(
-                        Some(start_time),
-                        Some(end_time),
-                        &GenAiFilters::default(),
-                    )
+                    .query_cache_hit_rate(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query cache hit rate: {}", e))
@@ -442,11 +469,7 @@ impl UsageCommand {
             if self.request_params {
                 Some(
                     storage
-                        .query_request_param_profile(
-                            Some(start_time),
-                            Some(end_time),
-                            &GenAiFilters::default(),
-                        )
+                        .query_request_param_profile(Some(start_time), Some(end_time), &filters)
                         .await
                         .map_err(|e| {
                             Error::ApiError(format!("Failed to query request param profile: {}", e))
@@ -461,11 +484,7 @@ impl UsageCommand {
             if self.conv_depth {
                 Some(
                     storage
-                        .query_conversation_depth(
-                            Some(start_time),
-                            Some(end_time),
-                            &GenAiFilters::default(),
-                        )
+                        .query_conversation_depth(Some(start_time), Some(end_time), &filters)
                         .await
                         .map_err(|e| {
                             Error::ApiError(format!("Failed to query conversation depth: {}", e))
@@ -479,12 +498,7 @@ impl UsageCommand {
         let tool_usage: Option<Vec<otelite_core::api::ToolUsage>> = if self.tools {
             Some(
                 storage
-                    .query_tool_usage(
-                        Some(start_time),
-                        Some(end_time),
-                        &GenAiFilters::default(),
-                        50,
-                    )
+                    .query_tool_usage(Some(start_time), Some(end_time), &filters, 50)
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query tool usage: {}", e)))?,
             )
@@ -496,7 +510,7 @@ impl UsageCommand {
         let error_types: Option<Vec<otelite_core::api::ErrorTypeBreakdown>> = if self.error_types {
             Some(
                 storage
-                    .query_error_types(Some(start_time), Some(end_time), &GenAiFilters::default())
+                    .query_error_types(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query error types: {}", e)))?,
             )
@@ -508,7 +522,7 @@ impl UsageCommand {
         let model_drift: Option<Vec<otelite_core::api::ModelDriftPair>> = if self.model_drift {
             Some(
                 storage
-                    .query_model_drift(Some(start_time), Some(end_time), &GenAiFilters::default())
+                    .query_model_drift(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query model drift: {}", e)))?,
             )
@@ -521,11 +535,7 @@ impl UsageCommand {
             if self.latency_context {
                 Some(
                     storage
-                        .query_latency_by_context(
-                            Some(start_time),
-                            Some(end_time),
-                            &GenAiFilters::default(),
-                        )
+                        .query_latency_by_context(Some(start_time), Some(end_time), &filters)
                         .await
                         .map_err(|e| {
                             Error::ApiError(format!("Failed to query latency by context: {}", e))
@@ -549,7 +559,7 @@ impl UsageCommand {
                         .query_latency_percentiles(
                             Some(start_time),
                             Some(end_time),
-                            &GenAiFilters::default(),
+                            &filters,
                             self.bucket_secs,
                             &["duration", "ttft"],
                             tz,
@@ -567,11 +577,7 @@ impl UsageCommand {
         let tool_approvals: Option<otelite_core::api::ToolApprovalStats> = if self.tool_approvals {
             Some(
                 storage
-                    .query_tool_approvals(
-                        Some(start_time),
-                        Some(end_time),
-                        &GenAiFilters::default(),
-                    )
+                    .query_tool_approvals(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query tool approvals: {}", e))
@@ -585,7 +591,7 @@ impl UsageCommand {
         let stop_reasons: Option<Vec<otelite_core::api::StopReasonCount>> = if self.stop_reasons {
             Some(
                 storage
-                    .query_stop_reasons(Some(start_time), Some(end_time), &GenAiFilters::default())
+                    .query_stop_reasons(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query stop reasons: {}", e)))?,
             )
@@ -598,11 +604,7 @@ impl UsageCommand {
         {
             Some(
                 storage
-                    .query_context_type_split(
-                        Some(start_time),
-                        Some(end_time),
-                        &GenAiFilters::default(),
-                    )
+                    .query_context_type_split(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query context split: {}", e))
@@ -618,12 +620,7 @@ impl UsageCommand {
         {
             Some(
                 storage
-                    .query_tool_errors(
-                        Some(start_time),
-                        Some(end_time),
-                        &GenAiFilters::default(),
-                        n,
-                    )
+                    .query_tool_errors(Some(start_time), Some(end_time), &filters, n)
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query tool errors: {}", e)))?,
             )
@@ -635,7 +632,7 @@ impl UsageCommand {
         let hour_of_day: Option<Vec<otelite_core::api::HourOfDayBucket>> = if self.hour_of_day {
             Some(
                 storage
-                    .query_hour_of_day(Some(start_time), Some(end_time), &GenAiFilters::default())
+                    .query_hour_of_day(Some(start_time), Some(end_time), &filters)
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query hour of day: {}", e)))?,
             )
@@ -688,7 +685,7 @@ impl UsageCommand {
                     .query_calls_series(
                         Some(start_time),
                         Some(end_time),
-                        &GenAiFilters::default(),
+                        &filters,
                         self.bucket_secs,
                         false,
                     )
@@ -705,7 +702,7 @@ impl UsageCommand {
                 .query_top_spans(
                     Some(start_time),
                     Some(end_time),
-                    &GenAiFilters::default(),
+                    &filters,
                     200,
                     otelite_core::api::TopSpanSort::TotalTokens,
                     false,
@@ -786,14 +783,17 @@ impl UsageCommand {
                 );
             },
             OutputFormat::Pretty => {
-                println!("\n{}", format_header(&self.since));
+                println!(
+                    "\n{}",
+                    format_header(&self.since, self.start.as_deref(), self.end.as_deref())
+                );
                 println!();
 
                 display_summary(&summary);
                 println!();
 
                 if self.by_model
-                    || self.model.is_some()
+                    || !self.model.is_empty()
                     || (!self.by_system && self.system.is_none())
                 {
                     display_by_model(&by_model);
@@ -856,7 +856,12 @@ impl UsageCommand {
                 }
 
                 if let Some(ref points) = latency_series {
-                    display_latency_series(points);
+                    display_latency_series(
+                        points,
+                        self.throughput,
+                        self.calendar_day
+                            .then(|| self.timezone.as_deref().unwrap_or("UTC")),
+                    );
                     println!();
                 }
 
@@ -868,7 +873,7 @@ impl UsageCommand {
                 if let Some(ref resp) = latency_percentiles {
                     display_latency_percentiles(
                         resp,
-                        self.model.as_deref(),
+                        &self.model,
                         self.calendar_day
                             .then(|| self.timezone.as_deref().unwrap_or("UTC")),
                     );
@@ -920,6 +925,74 @@ impl UsageCommand {
 
 // ── display helpers ───────────────────────────────────────────────────────────
 
+/// Current wall-clock time in nanoseconds since the Unix epoch.
+fn now_ns() -> Result<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| Error::ApiError(format!("Failed to get current time: {}", e)))
+        .map(|d| d.as_nanos() as i64)
+}
+
+/// Parse an exact --start/--end value (#142) to epoch nanoseconds:
+/// `YYYY-MM-DD` (midnight UTC), `YYYY-MM-DDTHH:MM:SS[.ffffff]` (UTC when no
+/// zone is given, RFC 3339 offsets otherwise), or epoch seconds/nanoseconds.
+fn parse_cli_time(value: &str) -> Result<i64> {
+    // Epoch: 10-digit values are seconds, 16+ are nanoseconds.
+    if value.chars().all(|c| c.is_ascii_digit()) {
+        let n: i64 = value
+            .parse()
+            .map_err(|_| Error::ApiError(format!("Invalid epoch time: {value}")))?;
+        return Ok(if value.len() >= 16 {
+            n
+        } else {
+            n * 1_000_000_000
+        });
+    }
+    let bad = || {
+        Error::ApiError(format!(
+            "Invalid time '{value}': use YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS[.ffffff] \
+         (UTC when no zone is given), or epoch seconds/nanoseconds"
+        ))
+    };
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let ns = date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_utc().timestamp_nanos_opt());
+        return ns.ok_or_else(bad);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return dt.timestamp_nanos_opt().ok_or_else(bad);
+    }
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(value, fmt) {
+            return ndt.and_utc().timestamp_nanos_opt().ok_or_else(bad);
+        }
+    }
+    Err(bad())
+}
+
+/// Build the model cohort for every panel from repeated --model values
+/// (#142): a single plain value uses the exact-match `model` dimension,
+/// globs (`*`) and multiple values use the `models` patterns (ORed).
+fn build_model_filters(values: &[String]) -> GenAiFilters {
+    match values {
+        [] => GenAiFilters::default(),
+        [single] if !single.contains('*') => GenAiFilters {
+            model: Some(single.clone()),
+            ..Default::default()
+        },
+        _ => GenAiFilters {
+            models: Some(values.to_vec()),
+            ..Default::default()
+        },
+    }
+}
+
 pub(crate) fn parse_time_range(range: &str) -> Result<(i64, i64)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -951,8 +1024,18 @@ pub(crate) fn parse_time_range(range: &str) -> Result<(i64, i64)> {
     Ok((start_time, now))
 }
 
-fn format_header(range: &str) -> String {
-    format!("Token Usage Summary (Last {})", range)
+/// Human-readable range label for the summary header: exact --start/--end
+/// when given, otherwise the rolling --since window.
+fn format_header(range: &str, start: Option<&str>, end: Option<&str>) -> String {
+    match (start, end) {
+        (Some(start), Some(end)) => {
+            format!("Token Usage Summary ({start} → {end})")
+        },
+        (Some(start), None) => {
+            format!("Token Usage Summary ({start} → now)")
+        },
+        _ => format!("Token Usage Summary (Last {range})"),
+    }
 }
 
 fn display_summary(summary: &otelite_core::api::TokenUsageSummary) {
@@ -1272,7 +1355,11 @@ fn ttft_stream_status(
     })
 }
 
-fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
+fn display_latency_series(
+    points: &[otelite_core::api::LatencySeriesPoint],
+    show_throughput: bool,
+    calendar_timezone: Option<&str>,
+) {
     use chrono::{DateTime, Local, Utc};
 
     if points.is_empty() {
@@ -1285,7 +1372,7 @@ fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic);
 
-    table.set_header(vec![
+    let mut header: Vec<Cell> = vec![
         Cell::new("Bucket").fg(Color::Cyan),
         Cell::new("Model").fg(Color::Cyan),
         Cell::new("N").fg(Color::Cyan),
@@ -1296,11 +1383,22 @@ fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
         Cell::new("max ms").fg(Color::Red),
         Cell::new("TTFT avg").fg(Color::Cyan),
         Cell::new("TTFT p95").fg(Color::Cyan),
-    ]);
+    ];
+    if show_throughput {
+        header.push(Cell::new("N*").fg(Color::Cyan));
+        header.push(Cell::new("Tok/s* (p10/p50/p90)").fg(Color::Yellow));
+    }
+    table.set_header(header);
 
     for p in points {
         let dt = DateTime::<Utc>::from_timestamp_nanos(p.timestamp);
-        let bucket_str = dt.with_timezone(&Local).format("%m-%d %H:%M").to_string();
+        let bucket_str = match calendar_timezone {
+            Some(tz) => match <chrono_tz::Tz as std::str::FromStr>::from_str(tz) {
+                Ok(tz) => dt.with_timezone(&tz).format("%Y-%m-%d").to_string(),
+                Err(_) => dt.with_timezone(&Local).format("%Y-%m-%d").to_string(),
+            },
+            None => dt.with_timezone(&Local).format("%m-%d %H:%M").to_string(),
+        };
         let model = p.model.as_deref().unwrap_or("(unknown)");
         let err_str = if p.error_count > 0 {
             format!("{}", p.error_count)
@@ -1318,22 +1416,40 @@ fn display_latency_series(points: &[otelite_core::api::LatencySeriesPoint]) {
                     .map_or("—".to_string(), |v| format!("{:.0}ms", v))
             });
 
-        table.add_row(vec![
-            &bucket_str,
-            model,
-            &p.count.to_string(),
-            &err_str,
-            &format!("{}", p.min_ms),
-            &format!("{:.0}", p.avg_ms),
-            &format!("{}", p.p95_ms),
-            &format!("{}", p.max_ms),
-            &ttft_avg,
-            &ttft_p95,
-        ]);
+        let mut row: Vec<String> = vec![
+            bucket_str,
+            model.to_string(),
+            p.count.to_string(),
+            err_str,
+            p.min_ms.to_string(),
+            format!("{:.0}", p.avg_ms),
+            p.p95_ms.to_string(),
+            p.max_ms.to_string(),
+            ttft_avg,
+            ttft_p95,
+        ];
+        if show_throughput {
+            row.push(p.throughput_sample_count.to_string());
+            row.push(
+                match (
+                    p.throughput_p10_tok_s,
+                    p.throughput_p50_tok_s,
+                    p.throughput_p90_tok_s,
+                ) {
+                    (Some(a), Some(b), Some(c)) => format!("{a:.0}/{b:.0}/{c:.0}"),
+                    _ => "—".to_string(),
+                },
+            );
+        }
+        let row_refs: Vec<&String> = row.iter().collect();
+        table.add_row(row_refs);
     }
 
     println!("Latency Trend (per bucket × model):");
-    println!("{}", table);
+    println!("{table}");
+    if show_throughput {
+        println!("* N* = throughput-eligible calls (output tokens > 0, duration > 0); Tok/s = derived end-to-end output throughput per call.");
+    }
 }
 
 fn display_latency_context(bins: &[otelite_core::api::LatencyByContextBin]) {
@@ -1381,88 +1497,107 @@ fn display_latency_context(bins: &[otelite_core::api::LatencyByContextBin]) {
 
 fn display_latency_percentiles<'a>(
     resp: &'a otelite_core::api::LatencyPercentilesResponse,
-    model_filter: Option<&str>,
+    model_filter: &[String],
     calendar_timezone: Option<&str>,
 ) {
     use chrono::{DateTime, Local, Utc};
+    use otelite_core::filters::model_matches;
 
-    let pick = |series: &'a otelite_core::api::LatencyPercentileSeries| -> (
-        String,
-        Vec<&'a otelite_core::api::LatencyPercentilePoint>,
-    ) {
-        match model_filter {
-            Some(m) => (
-                m.to_string(),
+    // One row group per (label, points). With a model filter each matching
+    // model becomes its own group (patterns are matched against the stored
+    // model names, so globs work); without one, rolling mode shows the
+    // aggregated "all models" series and calendar mode shows every model
+    // separately.
+    let pick = |series: &'a otelite_core::api::LatencyPercentileSeries| -> Vec<
+        (String, Vec<&'a otelite_core::api::LatencyPercentilePoint>),
+    > {
+        if model_filter.is_empty() {
+            if calendar_timezone.is_some() {
                 series
                     .models
-                    .get(m)
-                    .map(|v| v.iter().collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            ),
-            None => ("all models".to_string(), series.all.iter().collect()),
+                    .iter()
+                    .map(|(m, pts)| (m.clone(), pts.iter().collect()))
+                    .collect()
+            } else {
+                vec![("all models".to_string(), series.all.iter().collect())]
+            }
+        } else {
+            let mut matched: Vec<(String, Vec<&'a otelite_core::api::LatencyPercentilePoint>)> =
+                Vec::new();
+            for (m, pts) in &series.models {
+                if model_filter.iter().any(|pat| model_matches(pat, m)) {
+                    matched.push((m.clone(), pts.iter().collect()));
+                }
+            }
+            matched
         }
     };
 
     let mut any = false;
     for (metric, series) in &resp.metrics {
-        let (label, points) = pick(series);
-        if points.is_empty() {
-            if model_filter.is_some() {
-                println!("Latency Percentiles ({metric}, {label}): no data in range");
+        let groups = pick(series);
+        if groups.is_empty() || groups.iter().all(|(_, pts)| pts.is_empty()) {
+            if !model_filter.is_empty() {
+                println!("Latency Percentiles ({metric}): no data in range");
             }
             continue;
         }
         any = true;
-        let mut table = Table::new();
-        table
-            .load_preset(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic);
-        table.set_header(vec![
-            Cell::new("Bucket").fg(Color::Cyan),
-            Cell::new("Model").fg(Color::Cyan),
-            Cell::new("N").fg(Color::Cyan),
-            Cell::new("p10 ms").fg(Color::Green),
-            Cell::new("p50 ms").fg(Color::Green),
-            Cell::new("p90 ms").fg(Color::Yellow),
-            Cell::new("p95 ms").fg(Color::Yellow),
-            Cell::new("p99 ms").fg(Color::Red),
-            Cell::new("Tok/s* (p10/p50/p90)").fg(Color::Yellow),
-        ]);
         let pct = |v: Option<f64>| v.map_or("—".to_string(), |x| format!("{x:.0}"));
-        for p in points {
-            let dt = DateTime::<Utc>::from_timestamp_nanos(p.ts);
-            // Calendar mode: label the day in the bucket's own timezone.
-            let bucket_str = match calendar_timezone {
-                Some(tz) => match <chrono_tz::Tz as std::str::FromStr>::from_str(tz) {
-                    Ok(tz) => dt.with_timezone(&tz).format("%Y-%m-%d").to_string(),
-                    Err(_) => dt.with_timezone(&Local).format("%Y-%m-%d").to_string(),
-                },
-                None => dt.with_timezone(&Local).format("%m-%d %H:%M").to_string(),
-            };
-            let tok = match (
-                p.throughput_p10_tok_s,
-                p.throughput_p50_tok_s,
-                p.throughput_p90_tok_s,
-            ) {
-                (Some(a), Some(b), Some(c)) => format!("{a:.0}/{b:.0}/{c:.0}"),
-                _ => "—".to_string(),
-            };
-            table.add_row(vec![
-                Cell::new(bucket_str),
-                Cell::new(&label),
-                Cell::new(p.count),
-                Cell::new(pct(p.p10_ms)),
-                Cell::new(pct(p.p50_ms)),
-                Cell::new(pct(p.p90_ms)),
-                Cell::new(pct(p.p95_ms)),
-                Cell::new(pct(p.p99_ms)),
-                Cell::new(tok),
+        for (label, points) in groups {
+            if points.is_empty() {
+                continue;
+            }
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_FULL)
+                .set_content_arrangement(ContentArrangement::Dynamic);
+            table.set_header(vec![
+                Cell::new("Bucket").fg(Color::Cyan),
+                Cell::new("Model").fg(Color::Cyan),
+                Cell::new("N").fg(Color::Cyan),
+                Cell::new("p10 ms").fg(Color::Green),
+                Cell::new("p50 ms").fg(Color::Green),
+                Cell::new("p90 ms").fg(Color::Yellow),
+                Cell::new("p95 ms").fg(Color::Yellow),
+                Cell::new("p99 ms").fg(Color::Red),
+                Cell::new("Tok/s* (p10/p50/p90)").fg(Color::Yellow),
             ]);
+            for p in points {
+                let dt = DateTime::<Utc>::from_timestamp_nanos(p.ts);
+                // Calendar mode: label the day in the bucket's own timezone.
+                let bucket_str = match calendar_timezone {
+                    Some(tz) => match <chrono_tz::Tz as std::str::FromStr>::from_str(tz) {
+                        Ok(tz) => dt.with_timezone(&tz).format("%Y-%m-%d").to_string(),
+                        Err(_) => dt.with_timezone(&Local).format("%Y-%m-%d").to_string(),
+                    },
+                    None => dt.with_timezone(&Local).format("%m-%d %H:%M").to_string(),
+                };
+                let tok = match (
+                    p.throughput_p10_tok_s,
+                    p.throughput_p50_tok_s,
+                    p.throughput_p90_tok_s,
+                ) {
+                    (Some(a), Some(b), Some(c)) => format!("{a:.0}/{b:.0}/{c:.0}"),
+                    _ => "—".to_string(),
+                };
+                table.add_row(vec![
+                    Cell::new(bucket_str),
+                    Cell::new(&label),
+                    Cell::new(p.count),
+                    Cell::new(pct(p.p10_ms)),
+                    Cell::new(pct(p.p50_ms)),
+                    Cell::new(pct(p.p90_ms)),
+                    Cell::new(pct(p.p95_ms)),
+                    Cell::new(pct(p.p99_ms)),
+                    Cell::new(tok),
+                ]);
+            }
+            println!("Latency Percentiles ({metric}, {label}):");
+            println!("{table}");
+            println!("* Tok/s = derived end-to-end output throughput per call (raw ns durations); N = calls, not the throughput sample.");
+            println!();
         }
-        println!("Latency Percentiles ({metric}, {label}):");
-        println!("{table}");
-        println!("* Tok/s = derived end-to-end output throughput per call (raw ns durations); N = calls, not the throughput sample.");
-        println!();
     }
     if !any {
         println!("Latency Percentiles: no data in range");
@@ -2031,6 +2166,77 @@ mod tests {
         let diff = end - start;
         let expected = 30 * 60 * 1_000_000_000i64;
         assert_eq!(diff, expected);
+    }
+
+    #[test]
+    fn test_parse_cli_time_formats() {
+        let day: i64 = 86_400_000_000_000;
+        // 2026-08-01T00:00:00Z == 1785542400 s
+        assert_eq!(
+            parse_cli_time("2026-08-01").unwrap(),
+            1_785_542_400 * 1_000_000_000
+        );
+        assert_eq!(
+            parse_cli_time("2026-08-01T01:30:00").unwrap(),
+            1_785_542_400 * 1_000_000_000 + 5_400_000_000_000
+        );
+        // Space separator and fractional seconds.
+        assert_eq!(
+            parse_cli_time("2026-08-01 01:30:00").unwrap(),
+            1_785_542_400 * 1_000_000_000 + 5_400_000_000_000
+        );
+        assert_eq!(
+            parse_cli_time("2026-08-01T01:30:00.250").unwrap(),
+            1_785_542_400 * 1_000_000_000 + 5_400_250_000_000
+        );
+        // RFC 3339 with explicit offsets.
+        assert_eq!(
+            parse_cli_time("2026-08-01T02:30:00Z").unwrap(),
+            1_785_542_400 * 1_000_000_000 + 9_000_000_000_000
+        );
+        // 02:30+02:00 == 00:30Z
+        assert_eq!(
+            parse_cli_time("2026-08-01T02:30:00+02:00").unwrap(),
+            1_785_542_400 * 1_000_000_000 + 1_800_000_000_000
+        );
+        // Epoch seconds and nanoseconds.
+        assert_eq!(
+            parse_cli_time("1785542400").unwrap(),
+            1_785_542_400_000_000_000
+        );
+        assert_eq!(
+            parse_cli_time("1785542400000000000").unwrap(),
+            1_785_542_400_000_000_000
+        );
+        // Sanity: the day constant is consistent.
+        assert_eq!(day, 86_400 * 1_000_000_000);
+        // Garbage is a clean error, not a panic.
+        assert!(parse_cli_time("not-a-time").is_err());
+        assert!(parse_cli_time("2026-13-45").is_err());
+    }
+
+    #[test]
+    fn test_build_model_filters_semantics() {
+        // No values: no filter.
+        let f = build_model_filters(&[]);
+        assert!(f.model.is_none() && f.models.is_none());
+        // Single plain value keeps the exact-match dimension.
+        let f = build_model_filters(&["claude-sonnet-4-6".to_string()]);
+        assert_eq!(f.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert!(f.models.is_none());
+        // A single glob uses the patterns dimension.
+        let f = build_model_filters(&["claude-opus-*".to_string()]);
+        assert!(f.model.is_none());
+        assert_eq!(
+            f.models.as_deref(),
+            Some(&vec!["claude-opus-*".to_string()][..])
+        );
+        // Multiple values are ORed patterns.
+        let f = build_model_filters(&["a".to_string(), "b-*".to_string()]);
+        assert_eq!(
+            f.models.as_deref(),
+            Some(&vec!["a".to_string(), "b-*".to_string()][..])
+        );
     }
 
     #[test]

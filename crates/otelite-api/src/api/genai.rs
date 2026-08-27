@@ -32,6 +32,9 @@ macro_rules! genai_filter_impl {
                 GenAiFilters {
                     agent: self.agent.clone(),
                     model: self.model.clone(),
+                    // The filter bar sends a single exact model; the
+                    // repeatable `models` patterns are CLI-only for now.
+                    models: None,
                     provider: self.provider.clone(),
                     project: self.project.clone(),
                     session: self.session.clone(),
@@ -1891,6 +1894,7 @@ pub async fn get_latency_series(
             bucket_secs,
             &filters,
             all_spans,
+            None,
         )
         .await
         .map_err(|e| {

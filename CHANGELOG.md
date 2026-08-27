@@ -11,6 +11,18 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Exact time ranges, repeatable model filters and throughput toggles for
+  `otelite usage`.** `--start`/`--end` now accept exact values (`YYYY-MM-DD`,
+  `YYYY-MM-DDTHH:MM:SS[.ffffff]` — UTC when no zone is given — or epoch
+  seconds/nanoseconds) instead of only rolling `--since` durations. `--model`
+  can be repeated; a plain value matches exactly, a value with `*` is a glob
+  (`claude-opus-*`), and the pattern is applied to every panel — summary
+  totals included — on the same cohort. `--latency-series` gains
+  `--throughput` (per-bucket tok/s p10/p50/p90 + eligible-call count) and
+  supports `--calendar-day`/`--timezone` like the percentile views.
+
 ## [0.1.80] - 2026-08-27
 
 ### Added

@@ -454,6 +454,7 @@ pub trait StorageBackend: Send + Sync {
         bucket_secs: u64,
         filters: &GenAiFilters,
         all_spans: bool,
+        timezone: Option<&str>,
     ) -> Result<Vec<LatencySeriesPoint>>;
 
     /// Call volume per time bucket grouped by model or span name.

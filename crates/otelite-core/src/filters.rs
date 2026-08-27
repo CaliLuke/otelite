@@ -33,12 +33,71 @@ pub struct GenAiFilters {
     pub agent: Option<String>,
     /// Model name, e.g. `claude-sonnet-4-6` or `aws/claude-sonnet-5`.
     pub model: Option<String>,
+    /// Repeated model patterns (CLI `--model`, issue #142). Each pattern
+    /// matches exactly when it contains no `*`, or as a glob when it does
+    /// (`*` matches any substring, e.g. `claude-opus-*`). Patterns are ORed.
+    /// When both `model` and `models` are set, both predicates apply.
+    pub models: Option<Vec<String>>,
     /// Provider, e.g. `anthropic`, `openai`, `amazon`.
     pub provider: Option<String>,
     /// Project id (opencode spans/metrics only).
     pub project: Option<String>,
     /// Session id.
     pub session: Option<String>,
+}
+
+/// Match a model name against a `--model` pattern (issue #142).
+///
+/// A pattern without `*` requires an exact match; a pattern with `*` is a
+/// glob where each `*` matches any (possibly empty) substring — the first
+/// segment must prefix the name, the last must suffix it, and middle
+/// segments must occur in order. This mirrors the SQL `LIKE` translation
+/// used by [`GenAiFilters::span_scope`], so storage queries and any
+/// client-side filtering agree on what a pattern means.
+pub fn model_matches(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    let segments: Vec<&str> = pattern.split('*').collect();
+    let mut rest = name;
+    for (i, seg) in segments.iter().enumerate() {
+        if seg.is_empty() {
+            continue;
+        }
+        match i {
+            0 => {
+                if !rest.starts_with(*seg) {
+                    return false;
+                }
+                rest = &rest[seg.len()..];
+            },
+            _ if i + 1 == segments.len() => {
+                if !rest.ends_with(*seg) {
+                    return false;
+                }
+                rest = &rest[..rest.len() - seg.len()];
+            },
+            _ => match rest.find(*seg) {
+                Some(pos) => rest = &rest[pos + seg.len()..],
+                None => return false,
+            },
+        }
+    }
+    true
+}
+
+/// SQL `LIKE` pattern (with `%`/`_` escaped) for a `--model` glob.
+fn model_like_pattern(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    for c in pattern.chars() {
+        match c {
+            '*' => out.push('%'),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl GenAiFilters {
@@ -54,7 +113,11 @@ impl GenAiFilters {
                     .agent
                     .as_ref()
                     .and_then(|a| agent_span_predicate(a).map(|_| name.to_string())),
-                "model" => self.model.as_ref().map(|_| name.to_string()),
+                "model" => self
+                    .model
+                    .as_ref()
+                    .map(|_| name.to_string())
+                    .or_else(|| self.models.as_ref().map(|_| name.to_string())),
                 "provider" => self.provider.as_ref().map(|_| name.to_string()),
                 "project" => self.project.as_ref().map(|_| name.to_string()),
                 "session" => self.session.as_ref().map(|_| name.to_string()),
@@ -81,6 +144,22 @@ impl GenAiFilters {
                 coalesce_extract("attributes", MODEL_KEYS)
             ));
             params.push(m.clone());
+        }
+        if let Some(patterns) = &self.models {
+            let mut arms: Vec<String> = Vec::new();
+            for p in patterns {
+                let expr = coalesce_extract("attributes", MODEL_KEYS);
+                if p.contains('*') {
+                    arms.push(format!("{} LIKE ? ESCAPE '\\'", expr));
+                    params.push(model_like_pattern(p));
+                } else {
+                    arms.push(format!("{} = ?", expr));
+                    params.push(p.clone());
+                }
+            }
+            if !arms.is_empty() {
+                parts.push(format!("({})", arms.join(" OR ")));
+            }
         }
         if let Some(p) = &self.provider {
             parts.push(format!(
@@ -181,6 +260,7 @@ mod tests {
         let f = GenAiFilters {
             agent: Some("claude".into()),
             model: Some("m1".into()),
+            models: None,
             provider: Some("anthropic".into()),
             project: Some("p1".into()),
             session: Some("s1".into()),
@@ -254,5 +334,55 @@ mod tests {
             "agent is not a metric predicate: {frag}"
         );
         assert_eq!(params, vec!["m1", "p1", "s1"]);
+    }
+
+    #[test]
+    fn model_matches_exact_and_glob() {
+        // Exact: no `*` means full equality, not substring.
+        assert!(model_matches("claude-sonnet-4-6", "claude-sonnet-4-6"));
+        assert!(!model_matches("sonnet", "claude-sonnet-4-6"));
+        assert!(!model_matches("claude-sonnet-4", "claude-sonnet-4-6"));
+        // Glob: prefix, suffix, middle, multiple stars.
+        assert!(model_matches("claude-opus-*", "claude-opus-4-1"));
+        assert!(!model_matches("claude-opus-*", "claude-sonnet-4-6"));
+        assert!(model_matches("*-4-1", "claude-opus-4-1"));
+        assert!(model_matches("claude-*-4-1", "claude-opus-4-1"));
+        assert!(!model_matches("claude-*-9-9", "claude-opus-4-1"));
+        assert!(model_matches("*", "anything"));
+        assert!(model_matches("a*b*c", "aXXbYYc"));
+        assert!(!model_matches("a*b*c", "aXXc"));
+        // `*` can match empty.
+        assert!(model_matches("claude-**opus", "claude-opus"));
+    }
+
+    #[test]
+    fn span_scope_models_predicate_exact_and_glob() {
+        let f = GenAiFilters {
+            models: Some(vec!["m1".into(), "claude-opus-*".into()]),
+            ..Default::default()
+        };
+        let (frag, params) = f.span_scope().unwrap();
+        // Exact arm uses `=`, glob arm uses LIKE with the `*`→`%` mapping.
+        assert!(frag.contains("= ?"), "exact arm: {frag}");
+        assert!(frag.contains("LIKE ? ESCAPE '\\'"), "glob arm: {frag}");
+        assert_eq!(params, vec!["m1", "claude-opus-%"]);
+
+        // LIKE metacharacters in the pattern are escaped so they stay literal.
+        let f = GenAiFilters {
+            models: Some(vec!["a%b_*".into()]),
+            ..Default::default()
+        };
+        let (_, params) = f.span_scope().unwrap();
+        assert_eq!(params, vec!["a\\%b\\_%"]);
+
+        // models alone still echoes the model dimension.
+        assert_eq!(
+            GenAiFilters {
+                models: Some(vec!["m1".into()]),
+                ..Default::default()
+            }
+            .applied(&["model", "session"]),
+            vec!["model"]
+        );
     }
 }

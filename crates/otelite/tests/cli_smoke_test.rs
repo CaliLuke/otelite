@@ -140,3 +140,49 @@ fn global_flags_accepted_on_subcommands() {
             .success();
     }
 }
+
+// ── issue #142: exact time ranges and repeated --model ───────────────────────
+
+/// --start/--end conflict with the rolling --since window.
+#[test]
+fn usage_start_conflicts_with_since() {
+    otelite()
+        .args(["usage", "--since", "24h", "--start", "2026-08-01"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+}
+
+/// --end without --start is rejected before any query.
+#[test]
+fn usage_end_requires_start() {
+    otelite()
+        .args(["usage", "--end", "2026-08-08"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--end requires --start"));
+}
+
+/// Repeated --model and the calendar/throughput flags parse together.
+#[test]
+fn usage_repeated_model_and_calendar_flags_parse() {
+    otelite()
+        .args([
+            "usage",
+            "--latency-percentiles",
+            "--calendar-day",
+            "--timezone",
+            "Europe/London",
+            "--model",
+            "claude-opus-*",
+            "--model",
+            "claude-sonnet-*",
+            "--throughput",
+            "--start",
+            "2026-08-01",
+            "--end",
+            "2026-08-08",
+        ])
+        .assert()
+        .success();
+}

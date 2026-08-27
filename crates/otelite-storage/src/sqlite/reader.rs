@@ -6298,7 +6298,7 @@ pub fn query_conversation_depth(
 ///
 /// Fetches raw (bucket, model, duration_ms, ttft_ms, is_error) rows then aggregates in Rust
 /// so that p95 can be computed without a SQLite percentile extension.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // filter bar (#135) and calendar mode (#141/#142) pushed us past 5
 pub fn query_latency_series(
     conn: &Connection,
     start_time: Option<i64>,
@@ -6306,9 +6306,37 @@ pub fn query_latency_series(
     bucket_secs: u64,
     filters: &GenAiFilters,
     all_spans: bool,
+    timezone: Option<&str>,
 ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
     let exprs = token_exprs();
     let bucket_ns = bucket_secs as i64 * 1_000_000_000;
+
+    // Calendar-day mode: precompute local-midnight boundaries so every row
+    // is assigned to its day in Rust (SQL cannot express DST-aware
+    // boundaries). Requires an explicit window, as in the percentiles
+    // query (#141).
+    let calendar_bounds: Option<Vec<i64>> = match timezone {
+        Some(tz_name) => {
+            let (start_ns, end_ns) = match (start_time, end_time) {
+                (Some(s), Some(e)) if s < e => (s, e),
+                _ => {
+                    return Err(StorageError::QueryError(
+                        "calendar-day mode requires explicit start_time and end_time".to_string(),
+                    ))
+                },
+            };
+            let tz = std::str::FromStr::from_str(tz_name).map_err(|e| {
+                StorageError::QueryError(format!("unknown IANA timezone '{tz_name}': {e}"))
+            })?;
+            Some(
+                calendar_day_buckets(start_ns, end_ns, &tz)?
+                    .into_iter()
+                    .map(|(s, _)| s)
+                    .collect(),
+            )
+        },
+        None => None,
+    };
     // In all_spans mode group by span name; otherwise group by model.
     let group_col = if all_spans {
         "name".to_string()
@@ -6340,12 +6368,16 @@ pub fn query_latency_series(
             json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
             json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
             json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms,
-            CASE WHEN status_code = 2 THEN 1 ELSE 0 END AS is_error
+            CASE WHEN status_code = 2 THEN 1 ELSE 0 END AS is_error,
+            start_time AS start_ns,
+            (end_time - start_time) AS duration_ns,
+            {output_tokens} AS output_tokens
         FROM spans
         {where_clause}
         ORDER BY bucket ASC",
         bucket_ns = bucket_ns,
         group_col = group_col,
+        output_tokens = exprs.output,
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -6361,6 +6393,9 @@ pub fn query_latency_series(
         llm_ttft_secs: Option<String>,
         custom_ttft_ms: Option<String>,
         is_error: bool,
+        start_ns: i64,
+        duration_ns: i64,
+        output_tokens: Option<i64>,
     }
 
     let raw: Vec<RawRow> = stmt
@@ -6373,6 +6408,9 @@ pub fn query_latency_series(
                 llm_ttft_secs: row.get::<_, Option<String>>(4)?,
                 custom_ttft_ms: row.get::<_, Option<String>>(5)?,
                 is_error: row.get::<_, i64>(6)? != 0,
+                start_ns: row.get::<_, i64>(7)?,
+                duration_ns: row.get::<_, i64>(8)?,
+                output_tokens: row.get::<_, Option<i64>>(9)?,
             })
         })
         .map_err(|e| {
@@ -6384,12 +6422,21 @@ pub fn query_latency_series(
         })?;
 
     type BucketKey = (i64, Option<String>);
-    type BucketAccum = (Vec<i64>, TtftAccum, usize);
+    type BucketAccum = (Vec<i64>, TtftAccum, usize, Vec<f64>);
 
     let mut groups: std::collections::BTreeMap<BucketKey, BucketAccum> =
         std::collections::BTreeMap::new();
     for r in raw {
-        let entry = groups.entry((r.bucket, r.label)).or_default();
+        // Calendar mode re-buckets by local day from the call start time;
+        // rolling mode keeps the SQL epoch-grid bucket.
+        let bucket = match &calendar_bounds {
+            Some(bounds) => match bounds.partition_point(|&b| b <= r.start_ns) {
+                0 => continue,
+                i => bounds[i - 1],
+            },
+            None => r.bucket,
+        };
+        let entry = groups.entry((bucket, r.label)).or_default();
         entry.0.push(r.duration_ms);
         entry.1.record(
             r.duration_ms,
@@ -6402,10 +6449,14 @@ pub fn query_latency_series(
         if r.is_error {
             entry.2 += 1;
         }
+        if let Some(rate) = throughput_rate_tok_s(r.duration_ns, r.output_tokens.map(|t| t as f64))
+        {
+            entry.3.push(rate);
+        }
     }
 
     let mut out = Vec::with_capacity(groups.len());
-    for ((bucket, label), (mut durations, ttft, error_count)) in groups {
+    for ((bucket, label), (mut durations, ttft, error_count, mut rates)) in groups {
         if durations.is_empty() {
             continue;
         }
@@ -6438,6 +6489,18 @@ pub fn query_latency_series(
             (label, None)
         };
 
+        rates.sort_by(|a, b| a.total_cmp(b));
+        let (throughput_p10_tok_s, throughput_p50_tok_s, throughput_p90_tok_s) = if rates.is_empty()
+        {
+            (None, None, None)
+        } else {
+            (
+                Some(percentile_f64(&rates, 0.10)),
+                Some(percentile_f64(&rates, 0.50)),
+                Some(percentile_f64(&rates, 0.90)),
+            )
+        };
+
         out.push(otelite_core::api::LatencySeriesPoint {
             timestamp: bucket,
             model,
@@ -6454,6 +6517,10 @@ pub fn query_latency_series(
             ttft_invalid_count,
             ttft_degenerate_count,
             ttft_degenerate,
+            throughput_p10_tok_s,
+            throughput_p50_tok_s,
+            throughput_p90_tok_s,
+            throughput_sample_count: rates.len(),
         });
     }
 

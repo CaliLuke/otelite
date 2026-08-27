@@ -471,6 +471,7 @@ pub async fn list_sessions(
     let filters = GenAiFilters {
         agent: params.agent.clone(),
         model: params.model.clone(),
+        models: None,
         provider: params.provider.clone(),
         project: params.project.clone(),
         session: params.session.clone(),

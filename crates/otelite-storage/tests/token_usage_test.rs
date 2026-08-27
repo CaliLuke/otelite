@@ -302,9 +302,16 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     assert_eq!(codex_latency.derived_tokens_per_sec_p50, None);
     assert_eq!(codex_latency.output_input_ratio_p50, None);
 
-    let series =
-        reader::query_latency_series(&conn, None, None, 3600, &GenAiFilters::default(), false)
-            .unwrap();
+    let series = reader::query_latency_series(
+        &conn,
+        None,
+        None,
+        3600,
+        &GenAiFilters::default(),
+        false,
+        None,
+    )
+    .unwrap();
     assert_eq!(series.len(), 2);
     assert!(series.iter().any(|row| {
         row.model.as_deref() == Some("codex-test-model") && row.count == 1 && row.avg_ms == 4000.0
@@ -452,9 +459,16 @@ fn test_latency_stats_normalizes_ttft_and_flags_degenerate_groups() {
     assert_eq!(invalid.ttft_count, 0);
     assert_eq!(invalid.ttft_invalid_count, 1);
 
-    let series =
-        reader::query_latency_series(&conn, None, None, 3600, &GenAiFilters::default(), false)
-            .unwrap();
+    let series = reader::query_latency_series(
+        &conn,
+        None,
+        None,
+        3600,
+        &GenAiFilters::default(),
+        false,
+        None,
+    )
+    .unwrap();
     let buffered_series = series
         .iter()
         .find(|row| row.model.as_deref() == Some("buffered-model"))
