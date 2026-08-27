@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.77] - 2026-08-27
+
 ### Added
 
 - **Global filter bar for GenAI analytics.** The GenAI tab and the Sessions
