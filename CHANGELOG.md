@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.75] - 2026-08-27
+
 ### Added
 
 - **Session cost analysis: which sessions spent what, and which are
