@@ -123,9 +123,16 @@ pub fn build_session_costs(
 }
 
 /// Flag anomalous sessions in place and return `(median, threshold)` —
-/// `None` (nothing flagged) when fewer than two sessions have a cost.
+/// `None` (nothing flagged) when fewer than two sessions have a
+/// *positive* cost. The median is taken over positive costs only: most
+/// sessions are free, so a median over all costs is 0 and the rule
+/// `cost > 3 x 0` would flag every session that spent anything at all.
 pub fn apply_anomaly_flags(sessions: &mut [crate::api::SessionCost]) -> Option<(f64, f64)> {
-    let costs: Vec<f64> = sessions.iter().filter_map(|s| s.cost_usd).collect();
+    let costs: Vec<f64> = sessions
+        .iter()
+        .filter_map(|s| s.cost_usd)
+        .filter(|c| *c > 0.0)
+        .collect();
     let rule = cost_median_threshold(&costs)?;
     for s in sessions.iter_mut() {
         s.anomaly = s.cost_usd.is_some_and(|c| c > rule.1);
@@ -313,6 +320,56 @@ mod tests {
                 ("e", false)
             ]
         );
+    }
+
+    #[test]
+    fn anomaly_median_ignores_free_sessions() {
+        // Zero-cost sessions must not dilute the median: with them
+        // included the median is 0 and every positive cost would be
+        // flagged.
+        let mut out = build_session_costs(
+            vec![
+                row("f1", "opencode", Some(0.0)),
+                row("f2", "opencode", Some(0.0)),
+                row("f3", "opencode", Some(0.0)),
+                row("low", "opencode", Some(1.0)),
+                row("mid", "opencode", Some(2.0)),
+                row("out", "opencode", Some(100.0)),
+            ],
+            &PricingDatabase::empty(),
+        );
+        let (median, threshold) = apply_anomaly_flags(&mut out).unwrap();
+        // median of positive costs [1, 2, 100]
+        assert_eq!(median, 2.0);
+        assert_eq!(threshold, 6.0);
+        let flags: Vec<_> = out
+            .iter()
+            .map(|s| (s.session_id.as_str(), s.anomaly))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("out", true),
+                ("mid", false),
+                ("low", false),
+                ("f1", false),
+                ("f2", false),
+                ("f3", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn anomaly_needs_two_positive_cost_sessions() {
+        let mut out = build_session_costs(
+            vec![
+                row("f", "opencode", Some(0.0)),
+                row("solo", "opencode", Some(10.0)),
+            ],
+            &PricingDatabase::empty(),
+        );
+        assert_eq!(apply_anomaly_flags(&mut out), None);
+        assert!(!out.iter().any(|s| s.anomaly));
     }
 
     #[test]

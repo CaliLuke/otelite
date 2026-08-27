@@ -113,7 +113,7 @@ class SessionsView {
                 </div>`;
         }
         if (costs && costs.anomaly_rule && (costs.median_cost_usd != null)) {
-            html += `<p class="section-hint">Anomaly rule: ${this._escape(costs.anomaly_rule)} — median ${this._escape(`$${costs.median_cost_usd.toFixed(4)}`)}.</p>`;
+            html += `<p class="section-hint">Anomaly rule: ${this._escape(costs.anomaly_rule)} — median of positive-cost sessions: ${this._escape(`$${costs.median_cost_usd.toFixed(4)}`)}.</p>`;
         }
         panel.innerHTML = html;
     }
