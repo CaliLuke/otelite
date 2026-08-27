@@ -17,6 +17,9 @@ have to work around), not implementation detail.
   listener addresses consistently for `serve`, `start`, and `restart` with
   `--grpc-addr` / `--http-addr` or environment variables, and see the resolved
   endpoints in startup, daemon status, health, and the web status popover.
+- Query the active `otelite.db` from scripts and agents with independent
+  read-only SQLite connections while OTLP ingestion continues, with documented
+  table schemas, resource attributes, retention behavior, and JSON recipes.
 
 ### Changed
 

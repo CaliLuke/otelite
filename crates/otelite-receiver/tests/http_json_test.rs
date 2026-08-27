@@ -10,6 +10,8 @@ use otelite_receiver::config::ReceiverConfig;
 use otelite_receiver::http::HttpServer;
 use otelite_storage::{sqlite::SqliteBackend, StorageBackend, StorageConfig};
 use reqwest::StatusCode;
+use rusqlite::{Connection, OpenFlags};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -46,6 +48,30 @@ async fn start_test_server() -> (String, HttpServer, TempDir) {
         .expect("Failed to get local address");
 
     (format!("http://{}", addr), server, temp_dir)
+}
+
+fn create_log_json(body: &str) -> String {
+    let mut request: serde_json::Value =
+        serde_json::from_str(&create_logs_json()).expect("valid log fixture");
+    request["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["body"]["stringValue"] =
+        serde_json::Value::String(body.to_string());
+    request.to_string()
+}
+
+async fn ingest_log(client: &reqwest::Client, base_url: &str, body: &str) {
+    let response = client
+        .post(format!("{base_url}/v1/logs"))
+        .header("Content-Type", "application/json")
+        .body(create_log_json(body))
+        .send()
+        .await
+        .expect("OTLP log request must succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+fn open_read_only(database_path: &Path) -> Connection {
+    Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("live database must accept an independent read-only connection")
 }
 
 #[tokio::test]
@@ -256,4 +282,59 @@ async fn test_http_json_concurrent_requests() {
         let response = handle.await.expect("Task panicked");
         assert_eq!(response.status(), StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn independent_read_only_connection_sees_live_ingested_log() {
+    let (base_url, server, temp_dir) = start_test_server().await;
+    let client = reqwest::Client::new();
+    ingest_log(&client, &base_url, "visible during live ingestion").await;
+
+    let connection = open_read_only(&temp_dir.path().join("otelite.db"));
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("external read must report the active journal mode");
+    let locking_mode: String = connection
+        .query_row("PRAGMA locking_mode", [], |row| row.get(0))
+        .expect("external read must report a non-exclusive locking mode");
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM logs ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("external read must see the newly ingested log before shutdown");
+
+    assert_eq!(journal_mode, "wal");
+    assert_eq!(locking_mode, "normal");
+    assert_eq!(body, "visible during live ingestion");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn repeated_read_only_queries_see_continued_ingestion() {
+    let (base_url, server, temp_dir) = start_test_server().await;
+    let client = reqwest::Client::new();
+    let connection = open_read_only(&temp_dir.path().join("otelite.db"));
+
+    for (expected_count, body) in [
+        (1, "live read 1"),
+        (2, "live read 2"),
+        (3, "live read 3"),
+        (4, "live read 4"),
+        (5, "live read 5"),
+    ] {
+        ingest_log(&client, &base_url, body).await;
+        let (count, latest): (i64, String) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM logs), body FROM logs ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("every external read must succeed while ingestion continues");
+        assert_eq!(count, expected_count);
+        assert_eq!(latest, body);
+    }
+
+    server.shutdown();
 }

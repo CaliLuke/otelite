@@ -47,19 +47,6 @@ impl SqliteBackend {
         }
     }
 
-    fn db_path(&self) -> PathBuf {
-        if self
-            .config
-            .data_dir
-            .to_string_lossy()
-            .starts_with(":memory:")
-        {
-            self.config.data_dir.clone()
-        } else {
-            self.config.data_dir.join("otelite.db")
-        }
-    }
-
     /// Run a read-only query on a blocking thread.
     ///
     /// Uses a pooled read connection when available (file-backed DB),
@@ -96,7 +83,7 @@ impl SqliteBackend {
 impl StorageBackend for SqliteBackend {
     async fn initialize(&mut self) -> Result<()> {
         self.config.validate()?;
-        let db_path = self.db_path();
+        let db_path = self.config.database_path();
 
         if !db_path.to_string_lossy().starts_with(":memory:") {
             std::fs::create_dir_all(&self.config.data_dir).map_err(|e| {

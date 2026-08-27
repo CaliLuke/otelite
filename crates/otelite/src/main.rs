@@ -679,6 +679,7 @@ async fn create_storage(_config: &Config) -> Result<Arc<dyn StorageBackend>> {
 
 async fn run_dashboard(server: ServerArgs) -> Result<()> {
     let storage_config = server.storage_config()?;
+    let database_path = storage_config.database_path();
     let ServerArgs {
         addr,
         grpc_addr,
@@ -692,7 +693,7 @@ async fn run_dashboard(server: ServerArgs) -> Result<()> {
         println!("  Dashboard:  http://{}", addr);
         println!("  OTLP gRPC:  {}", grpc_addr);
         println!("  OTLP HTTP:  {}", http_addr);
-        println!("  Storage:    {}\n", storage_config.data_dir.display());
+        println!("  Database:   {}\n", database_path.display());
 
         println!("To send test data:");
         println!(
@@ -718,17 +719,14 @@ async fn run_dashboard(server: ServerArgs) -> Result<()> {
     }
 
     info!("Starting Otelite Dashboard with OTLP Receiver...");
-    info!(
-        "Initializing storage at {}",
-        storage_config.data_dir.display()
-    );
+    info!("Initializing storage at {}", database_path.display());
     info!(
         retention_days = storage_config.retention_days,
         auto_purge_enabled = storage_config.auto_purge_enabled,
         purge_schedule = %storage_config.purge_schedule,
         "Resolved storage retention settings"
     );
-    let data_dir_str = storage_config.data_dir.to_string_lossy().into_owned();
+    let database_path_str = database_path.to_string_lossy().into_owned();
 
     let mut storage = SqliteBackend::new(storage_config);
     storage
@@ -762,12 +760,11 @@ async fn run_dashboard(server: ServerArgs) -> Result<()> {
 
     info!("HTTP receiver started on {}", http_addr);
 
-    // Start dashboard server
     info!("Dashboard enabled at http://{}", addr);
 
     let config = DashboardConfig::default()
         .with_bind_address(addr)
-        .with_storage_path(data_dir_str)
+        .with_storage_path(database_path_str)
         .with_otlp_addresses(grpc_addr, http_addr);
 
     let server = DashboardServer::new(config, storage);
