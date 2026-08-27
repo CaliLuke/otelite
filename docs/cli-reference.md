@@ -57,6 +57,8 @@ directory defaults to `~/.otelite/data`.
 
 Otelite opens a valid existing `otelite.db` in place. Startup does not rotate,
 replace, or reset it.
+See [Query the Live SQLite Database](agent-querying.md) for the resolved
+pathname, read-only access contract, table schemas, and agent-ready queries.
 
 ---
 

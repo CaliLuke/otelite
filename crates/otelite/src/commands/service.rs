@@ -17,7 +17,7 @@ struct DaemonState {
     dashboard_addr: SocketAddr,
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
-    storage_path: PathBuf,
+    database_path: PathBuf,
 }
 
 #[cfg(target_os = "macos")]
@@ -366,6 +366,7 @@ pub async fn handle_start(
             .map_err(|e| Error::ConfigError(format!("Failed to spawn daemon process: {}", e)))?;
 
     let pid = child.id();
+    let database_path = storage_config.database_path();
     let state_file = get_state_file()?;
     write_daemon_state(
         &state_file,
@@ -373,16 +374,16 @@ pub async fn handle_start(
             dashboard_addr: addr,
             grpc_addr,
             http_addr,
-            storage_path: storage_config.data_dir.clone(),
+            database_path: database_path.clone(),
         },
     )?;
     write_pid(pid)?;
 
-    let storage_display = storage_config.data_dir.display();
+    let database_display = database_path.display();
 
     println!("✓ Otelite daemon started with PID {}", pid);
     println!("  Logs: {}", log_file.display());
-    println!("  Storage: {}", storage_display);
+    println!("  Database: {}", database_display);
     println!("  Dashboard: http://{}", addr);
     println!("  OTLP gRPC: {}", grpc_addr);
     println!("  OTLP HTTP: {}", http_addr);
@@ -540,7 +541,7 @@ fn display_running_status(pid: u32, supervisor: Option<&str>) -> Result<()> {
         println!("Dashboard: http://{}", state.dashboard_addr);
         println!("OTLP gRPC: {}", state.grpc_addr);
         println!("OTLP HTTP: {}", state.http_addr);
-        println!("Storage: {}", state.storage_path.display());
+        println!("Database: {}", state.database_path.display());
     }
 
     Ok(())
@@ -745,7 +746,7 @@ mod tests {
             dashboard_addr: SocketAddr::from(([127, 0, 0, 1], 3852)),
             grpc_addr: SocketAddr::from(([127, 0, 0, 1], 3850)),
             http_addr: SocketAddr::from(([127, 0, 0, 1], 3851)),
-            storage_path: PathBuf::from("/tmp/otelite"),
+            database_path: PathBuf::from("/tmp/otelite/otelite.db"),
         };
 
         write_daemon_state(&state_file, &state).unwrap();
@@ -761,7 +762,7 @@ mod tests {
             dashboard_addr: SocketAddr::from(([127, 0, 0, 1], 3852)),
             grpc_addr: SocketAddr::from(([127, 0, 0, 1], 3850)),
             http_addr: SocketAddr::from(([127, 0, 0, 1], 3851)),
-            storage_path: PathBuf::from("/tmp/otelite"),
+            database_path: PathBuf::from("/tmp/otelite/otelite.db"),
         };
         write_daemon_state(&state_file, &state).unwrap();
 

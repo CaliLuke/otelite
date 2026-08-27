@@ -2078,6 +2078,7 @@ dependencies = [
  "pretty_assertions",
  "prost",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

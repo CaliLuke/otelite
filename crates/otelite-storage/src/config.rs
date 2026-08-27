@@ -44,6 +44,15 @@ impl StorageConfig {
             .join("data")
     }
 
+    /// Pathname of the SQLite database opened by this configuration.
+    pub fn database_path(&self) -> PathBuf {
+        if self.data_dir.to_string_lossy().starts_with(":memory:") {
+            self.data_dir.clone()
+        } else {
+            self.data_dir.join("otelite.db")
+        }
+    }
+
     /// Create configuration from environment variables
     pub fn from_env() -> Result<Self> {
         let mut config = Self::default();
@@ -255,6 +264,16 @@ mod tests {
             std::path::Path::new(".otelite/data"),
             "data dir must be ~/.otelite/data, got {:?}",
             dir
+        );
+    }
+
+    #[test]
+    fn database_path_appends_filename_to_data_directory() {
+        let config =
+            StorageConfig::default().with_data_dir(PathBuf::from("/tmp/otelite-agent-query"));
+        assert_eq!(
+            config.database_path(),
+            PathBuf::from("/tmp/otelite-agent-query/otelite.db")
         );
     }
 

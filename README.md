@@ -57,6 +57,10 @@ otelite serve \
   --http-addr 0.0.0.0:4318
 ```
 
+Agents and scripts may run arbitrary read-only SQL against the live WAL database.
+See [Query the Live SQLite Database](docs/agent-querying.md) for the resolved
+path, schema, JSON output, and query recipes.
+
 ## Features
 
 - **Fast**: Starts in <3s, <100MB memory, <5% CPU idle

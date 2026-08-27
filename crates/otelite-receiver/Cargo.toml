@@ -54,3 +54,4 @@ tempfile = { workspace = true }
 reqwest = { workspace = true }
 otelite-api = { path = "../otelite-api", version = "0.1.0" }
 otelite-storage = { path = "../otelite-storage", version = "0.1.0" }
+rusqlite = { version = "0.31", features = ["bundled"] }
