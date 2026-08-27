@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.70] - 2026-08-27
+
 ### Added
 
 - **Quantify what prompt caching is saving you.** The *Cache economics by
