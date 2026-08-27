@@ -810,6 +810,22 @@ class AnalyticsView {
         try {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
+            // Daily throughput needs an explicit window spanning more than one
+            // local day (calendar-day bucketing, issue #144).
+            let dailyThroughput = null;
+            let dailyTz = null;
+            if (params.start_time) {
+                const days = (params.end_time - params.start_time) / (86_400 * 1_000_000_000);
+                if (days >= 2) {
+                    dailyTz = this._localTimezone() || 'UTC';
+                    dailyThroughput = await this.api.getLatencyPercentiles({
+                        ...params,
+                        calendar_day: '1',
+                        timezone: dailyTz,
+                        metrics: 'duration',
+                    }).catch(() => null);
+                }
+            }
             const [latencyStats, latencySeries, latencyByContext, conversationDepth, latencyPercentiles, durationDist] = await Promise.all([
                 this.api.getLatencyStats(params),
                 this.api.getLatencySeries(params).catch(() => null),
@@ -828,6 +844,7 @@ class AnalyticsView {
                 cards,
                 this._buildLatencyTable(latencyStats || []),
                 this._buildLatencySeriesChart(latencySeries || [], bucket),
+                this._buildDailyThroughputTable(dailyThroughput, dailyTz),
                 this._buildLatencyPercentilesChart(latencyPercentiles),
                 this._buildDistributionChart('Request duration distribution', durationDist),
                 this._buildLatencyByContext(latencyByContext || []),
@@ -1188,6 +1205,70 @@ class AnalyticsView {
                     <th title="Output divided by uncached input, cache reads, and cache creation">Out/context ratio (p50/p95)</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
+            </table>`;
+    }
+
+    /** Local IANA timezone name, or null when the browser doesn't expose one. */
+    _localTimezone() {
+        try {
+            return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Daily output-throughput table from the calendar-day percentile grid
+     * (issue #119 slice #144). One row per day × model with calls, the
+     * throughput-eligible sample and the p10/p50/p90 tok/s triple. Days with
+     * no calls are omitted; null percentiles render as —.
+     *
+     * @param {?object} resp - /api/genai/latency_percentiles response in calendar_day mode
+     * @param {?string} tz   - IANA timezone the buckets align to
+     * @returns {string} HTML block ('' when there is nothing to show)
+     */
+    _buildDailyThroughputTable(resp, tz) {
+        const series = resp && resp.metrics && resp.metrics.duration;
+        const models = (series && series.models) || {};
+        const rows = [];
+        for (const [model, points] of Object.entries(models)) {
+            for (const p of points) {
+                if (!p || (p.count || 0) === 0) continue; // omit empty days
+                const nStar = p.throughput_sample_count || 0;
+                const nCell = nStar > 0 ? (nStar < 10 ? `${nStar}†` : String(nStar)) : '—';
+                const t10 = p.throughput_p10_tok_s != null ? Math.round(p.throughput_p10_tok_s) : null;
+                const t50 = p.throughput_p50_tok_s != null ? Math.round(p.throughput_p50_tok_s) : null;
+                const t90 = p.throughput_p90_tok_s != null ? Math.round(p.throughput_p90_tok_s) : null;
+                const tpsCell = (t10 != null && t50 != null && t90 != null)
+                    ? `${t10} / ${t50} / ${t90}`
+                    : '—';
+                const day = chartAxisLabel(p.timestamp, true);
+                rows.push({ day, model, n: p.count || 0, nStar: nCell, tps: tpsCell });
+            }
+        }
+        rows.sort((a, b) => a.day.localeCompare(b.day) || a.model.localeCompare(b.model));
+        if (rows.length === 0) {
+            return `<h3>Output throughput by day${tz ? ` (${this._esc(tz)})` : ''}</h3>
+                <div class="empty-state-hint">No throughput data in this window.</div>`;
+        }
+        const body = rows.map(r => `
+            <tr>
+                <td>${this._esc(r.day)}</td>
+                <td>${this._esc(r.model)}</td>
+                <td class="num">${r.n}</td>
+                <td class="num">${r.nStar}</td>
+                <td class="num">${r.tps}</td>
+            </tr>`).join('');
+        return `
+            <h3>Output throughput by day${tz ? ` (${this._esc(tz)})` : ''}</h3>
+            <p class="table-hint">Tok/s is derived end-to-end output throughput per call (output tokens ÷ span duration); span duration includes provider, queue and network time, so this is not a provider-reported generation rate. Days with no calls are omitted. † = fewer than 10 throughput samples.</p>
+            <table class="data-table daily-throughput-table">
+                <thead><tr>
+                    <th>Day</th><th>Model</th><th>Calls</th>
+                    <th title="Calls with positive output and duration — the throughput sample, distinct from Calls">N*</th>
+                    <th title="Derived end-to-end output throughput per call: output tokens / span duration (raw ns). Span duration includes provider, queue and network time — not pure generation throughput. Lower-tail / median / upper-reference.">Tok/s* (p10/p50/p90)</th>
+                </tr></thead>
+                <tbody>${body}</tbody>
             </table>`;
     }
 
@@ -2762,4 +2843,11 @@ class AnalyticsView {
     }
 }
 
-window.AnalyticsView = AnalyticsView;
+// Expose to the browser global; also export for the node --test parity
+// tests (crates/otelite-api/tests/js/daily_throughput.test.mjs).
+if (typeof window !== 'undefined') {
+    window.AnalyticsView = AnalyticsView;
+}
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { AnalyticsView };
+}

@@ -88,6 +88,9 @@ jobs:
       - name: Run integration tests (receiver, single-threaded to avoid port conflicts)
         run: cargo nextest run -p otelite-receiver --test '*' --all-features --test-threads=1
 
+      - name: Run web parity tests (node --test)
+        run: node --test "crates/otelite-api/tests/js/*.test.mjs"
+
       - name: Run doc tests
         run: cargo test --workspace --doc --all-features
 

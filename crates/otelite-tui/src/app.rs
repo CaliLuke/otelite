@@ -573,6 +573,41 @@ impl App {
                         self.usage_state.set_error(e.to_string());
                     },
                 }
+                // Daily throughput panel (#144): calendar-day buckets over a
+                // fixed 7-day window, aligned to $TZ (UTC when unset/invalid).
+                // Optional panel — a failure only blanks this panel.
+                {
+                    // $TZ must name a real IANA zone (the API 400s on
+                    // unknown values); fall back to UTC.
+                    let tz = std::env::var("TZ")
+                        .ok()
+                        .filter(|t| !t.is_empty() && t.parse::<chrono_tz::Tz>().is_ok())
+                        .unwrap_or_else(|| "UTC".to_string());
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as i64)
+                        .unwrap_or(0);
+                    let window_start = (now_ns - 7 * 86_400_000_000_000).to_string();
+                    let window_end = now_ns.to_string();
+                    let params: Vec<(&str, String)> = vec![
+                        ("start_time", window_start),
+                        ("end_time", window_end),
+                        ("calendar_day", "1".to_string()),
+                        ("timezone", tz.clone()),
+                        ("metrics", "duration".to_string()),
+                    ];
+                    match self.api_client.fetch_latency_percentiles(params).await {
+                        Ok(resp) => {
+                            self.usage_state.daily_throughput_tz = Some(tz.clone());
+                            self.usage_state.daily_throughput =
+                                crate::ui::usage::daily_throughput_rows(&resp, &tz);
+                        },
+                        Err(_) => {
+                            self.usage_state.daily_throughput = Vec::new();
+                            self.usage_state.daily_throughput_tz = None;
+                        },
+                    }
+                }
                 // best-effort — Claude Code only; ignore errors silently
                 if let Ok(resp) = self.api_client.fetch_tool_approvals(vec![]).await {
                     self.usage_state.tool_approvals = Some(resp);

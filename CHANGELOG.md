@@ -11,6 +11,26 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Daily output-throughput views in the web dashboard and TUI.** When the
+  selected window spans more than one day, the web Latency section gains an
+  "Output throughput by day" table (day × model with calls, the
+  throughput-eligible sample, and tok/s p10/p50/p90) aligned to your local
+  timezone; the TUI gains a matching daily throughput panel (aligned to
+  `$TZ`, or UTC when unset). Weak samples (fewer than 10 eligible calls)
+  are marked `†`, and both make clear that tok/s is derived end-to-end
+  output throughput — span duration includes provider queue and network
+  time, so it is not a provider-reported generation rate.
+- **Versioned parity fixture for the throughput analytics family.** The
+  API and CLI JSON for the latency/throughput panels is now frozen against
+  a versioned fixture of spans (populated, low-sample, cached,
+  missing-output, buffered-TTFT and rerouted cohorts), so the API, CLI and
+  web surfaces stay byte-compatible. New `docs/throughput-analysis.md`
+  documents the throughput formula, percentile estimator, outcome
+  inclusion, model identity and the rolling vs calendar-day bucketing
+  rules.
+
 ## [0.1.82] - 2026-08-27
 
 ### Added

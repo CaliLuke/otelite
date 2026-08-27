@@ -625,8 +625,14 @@ async fn run_cli() -> Result<()> {
 }
 
 /// Create storage backend from config
+///
+/// `StorageConfig::from_env` honours `OTELITE_DATA_DIR` so the read-only CLI
+/// commands can be pointed at a specific database (used by the parity tests,
+/// issue #144); with the variable unset it resolves to the same default
+/// directory as before.
 async fn create_storage(_config: &Config) -> Result<Arc<dyn StorageBackend>> {
-    let storage_config = StorageConfig::default();
+    let storage_config = StorageConfig::from_env()
+        .map_err(|e| Error::ApiError(format!("Failed to build storage configuration: {}", e)))?;
 
     let mut storage = SqliteBackend::new(storage_config);
     storage

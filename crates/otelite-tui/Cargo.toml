@@ -27,6 +27,7 @@ otelite-client = { path = "../otelite-client", version = "0.1.0" }
 
 # Time handling
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 # Error handling
 anyhow = "1.0"

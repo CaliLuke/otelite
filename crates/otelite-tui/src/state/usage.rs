@@ -4,6 +4,18 @@ use otelite_core::api::{
     TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TruncationRateByModel,
 };
 
+/// One day × model row of the daily throughput panel (issue #119 slice #144).
+/// Cell text is pre-formatted so the render path stays trivially testable:
+/// "—" for missing values, "7†" for a weak (n < 10) throughput sample.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyThroughputRow {
+    pub day: String,
+    pub model: String,
+    pub calls: usize,
+    pub n_star: String,
+    pub tps: String,
+}
+
 /// State for the Usage analytics view.
 #[derive(Debug, Default)]
 pub struct UsageState {
@@ -21,6 +33,10 @@ pub struct UsageState {
     pub tool_errors: Vec<ToolErrorEntry>,
     pub hour_of_day: Vec<HourOfDayBucket>,
     pub calls_series: Vec<CallsSeriesPoint>,
+    /// Daily (calendar-day) throughput rows; empty until fetched.
+    pub daily_throughput: Vec<DailyThroughputRow>,
+    /// IANA timezone the daily buckets align to (None until fetched).
+    pub daily_throughput_tz: Option<String>,
     pub error: Option<String>,
     pub is_loading: bool,
 }

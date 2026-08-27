@@ -2104,6 +2104,7 @@ version = "0.1.82"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-tz",
  "crossterm 0.29.0",
  "mockito",
  "otelite-client",

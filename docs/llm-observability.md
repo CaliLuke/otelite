@@ -139,6 +139,10 @@ otelite usage --since 7d --latency
 
 Adds p50/p95/p99 total span latency and p50/p95 TTFT per model.
 
+For what the derived `tok/s` figures actually measure (and what they do not),
+the percentile estimator, and the rolling vs calendar-day bucketing rules,
+see [throughput-analysis.md](throughput-analysis.md).
+
 ### Prompt-cache efficiency
 
 ```bash

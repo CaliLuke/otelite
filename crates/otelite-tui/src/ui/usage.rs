@@ -1,5 +1,8 @@
+use crate::state::usage::DailyThroughputRow;
 use crate::state::UsageState;
 use crate::ui::render_tab_bar;
+use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
+use otelite_core::api::LatencyPercentilesResponse;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -8,6 +11,73 @@ use ratatui::{
     Frame,
 };
 use std::collections::HashMap;
+
+/// Project the calendar-day percentile grid (duration metric) into daily
+/// throughput rows: one row per day × model, empty days omitted, missing
+/// throughput rendered as "—", weak samples (n < 10) marked with "†".
+/// Wording mirrors the web's daily throughput table (#144).
+pub fn daily_throughput_rows(
+    resp: &LatencyPercentilesResponse,
+    tz: &str,
+) -> Vec<DailyThroughputRow> {
+    let series = match resp.metrics.get("duration") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    // Invalid timezone falls back to UTC (the API would have 400'd first).
+    let tz: chrono_tz::Tz = tz.parse().unwrap_or_else(|_| "UTC".parse().unwrap());
+    let mut rows: Vec<DailyThroughputRow> = Vec::new();
+    for (model, points) in &series.models {
+        for p in points {
+            if p.count == 0 {
+                continue; // omit empty days
+            }
+            let n_star = if p.throughput_sample_count > 0 {
+                if p.throughput_sample_count < 10 {
+                    format!("{}†", p.throughput_sample_count)
+                } else {
+                    p.throughput_sample_count.to_string()
+                }
+            } else {
+                "—".to_string()
+            };
+            let tps = match (
+                p.throughput_p10_tok_s,
+                p.throughput_p50_tok_s,
+                p.throughput_p90_tok_s,
+            ) {
+                (Some(p10), Some(p50), Some(p90)) => {
+                    format!("{:.0} / {:.0} / {:.0}", p10, p50, p90)
+                },
+                _ => "—".to_string(),
+            };
+            rows.push(DailyThroughputRow {
+                day: day_label_local(p.ts, &tz),
+                model: model.clone(),
+                calls: p.count as usize,
+                n_star,
+                tps,
+            });
+        }
+    }
+    rows.sort_by(|a, b| a.day.cmp(&b.day).then_with(|| a.model.cmp(&b.model)));
+    rows
+}
+
+/// Local calendar-day label (YYYY-MM-DD) for a bucket-start timestamp in ns.
+/// The API aligns `timestamp` to local midnight in the requested timezone, so
+/// shifting the instant by that timezone's offset yields the local date.
+fn day_label_local(ts_ns: i64, tz: &chrono_tz::Tz) -> String {
+    let dt: DateTime<Utc> = DateTime::from_timestamp_nanos(ts_ns);
+    // The offset at this instant shifts the instant into local wall time.
+    let local = dt.with_timezone(tz);
+    format!(
+        "{:04}-{:02}-{:02}",
+        local.year(),
+        local.month(),
+        local.day()
+    )
+}
 
 pub fn render_usage_view(
     frame: &mut Frame,
@@ -142,8 +212,12 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     let show_tool_errs = !state.tool_errors.is_empty();
     let show_hour = state.hour_of_day.iter().any(|b| b.llm_calls > 0);
     let show_calls = !state.calls_series.is_empty();
+    let show_daily = !state.daily_throughput.is_empty();
 
     let mut constraints = vec![Constraint::Min(5)]; // latency always shown
+    if show_daily {
+        constraints.push(Constraint::Length(9));
+    }
     if show_tools {
         constraints.push(Constraint::Length(6));
     }
@@ -177,6 +251,10 @@ fn render_tables(frame: &mut Frame, area: Rect, state: &UsageState) {
     render_latency_table(frame, sections[0], state);
 
     let mut idx = 1usize;
+    if show_daily {
+        render_daily_throughput_table(frame, sections[idx], state);
+        idx += 1;
+    }
     if show_tools {
         render_tool_usage_table(frame, sections[idx], state);
         idx += 1;
@@ -383,6 +461,80 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
             Constraint::Length(9), // o/ctx p95
             Constraint::Length(8), // TTFT p50
             Constraint::Length(8), // TTFT p95
+        ],
+    )
+    .header(header)
+    .block(block);
+
+    frame.render_widget(table, area);
+}
+
+fn render_daily_throughput_table(frame: &mut Frame, area: Rect, state: &UsageState) {
+    let tz = state.daily_throughput_tz.as_deref().unwrap_or("?");
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " Daily throughput {tz} (tok/s = derived end-to-end, span incl. provider/queue/network) "
+    ));
+
+    if state.daily_throughput.is_empty() {
+        let msg = if state.is_loading {
+            "Loading…"
+        } else {
+            "No throughput data"
+        };
+        frame.render_widget(Paragraph::new(msg).block(block), area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Day").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Model").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("N").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("N*†").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("tok/s p10/p50/p90").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let rows: Vec<Row> = state
+        .daily_throughput
+        .iter()
+        .map(|r| {
+            Row::new(vec![
+                Cell::from(r.day.clone()),
+                Cell::from(truncate(&r.model, 28)),
+                Cell::from(r.calls.to_string()),
+                Cell::from(r.n_star.clone()),
+                Cell::from(r.tps.clone()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10), // Day
+            Constraint::Min(20),    // Model
+            Constraint::Length(5),  // N
+            Constraint::Length(5),  // N*†
+            Constraint::Min(16),    // tok/s triple
         ],
     )
     .header(header)
@@ -1191,7 +1343,9 @@ fn render_calls_series(frame: &mut Frame, area: Rect, state: &UsageState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otelite_core::api::LatencyStats;
+    use otelite_core::api::{
+        LatencyPercentilePoint, LatencyPercentileSeries, LatencyPercentilesResponse, LatencyStats,
+    };
 
     fn make_latency(p95_ms: i64, ratio_p95: Option<f64>) -> LatencyStats {
         LatencyStats {
@@ -1274,5 +1428,127 @@ mod tests {
     fn test_truncate_short_string_unchanged() {
         let s = "short";
         assert_eq!(truncate(s, 20), "short");
+    }
+
+    fn percentile_point(
+        ts: i64,
+        count: u64,
+        n_star: u64,
+        tps: Option<(f64, f64, f64)>,
+    ) -> LatencyPercentilePoint {
+        LatencyPercentilePoint {
+            ts,
+            end_ts: ts + 86_400_000_000_000,
+            p10_ms: None,
+            p50_ms: Some(100.0),
+            p90_ms: None,
+            p95_ms: Some(200.0),
+            p99_ms: None,
+            count,
+            throughput_p10_tok_s: tps.map(|t| t.0),
+            throughput_p50_tok_s: tps.map(|t| t.1),
+            throughput_p90_tok_s: tps.map(|t| t.2),
+            throughput_sample_count: n_star,
+        }
+    }
+
+    fn percentile_resp(
+        models: Vec<(&str, Vec<LatencyPercentilePoint>)>,
+    ) -> LatencyPercentilesResponse {
+        let mut series = LatencyPercentileSeries::default();
+        for (m, pts) in models {
+            series.models.insert(m.to_string(), pts);
+        }
+        LatencyPercentilesResponse {
+            metrics: std::collections::BTreeMap::from([("duration".to_string(), series)]),
+            filters_applied: vec![],
+        }
+    }
+
+    #[test]
+    fn test_daily_rows_values_wording_and_empty_day_omission() {
+        // 2026-08-23T23:00:00Z == 2026-08-24 00:00 Europe/London (BST).
+        let d0 = 1_787_529_600_i64 * 1_000_000_000; // 2026-08-24T00:00Z
+                                                    // (verified: epoch 1787529600 = 2026-08-24 00:00 UTC)
+        let d1 = d0 + 86_400_000_000_000; // 2026-08-25T00:00Z
+        let d2 = d1 + 86_400_000_000_000; // 2026-08-26T00:00Z
+        let resp = percentile_resp(vec![
+            (
+                "alpha",
+                vec![
+                    // full sample: 12 eligible calls
+                    percentile_point(d0, 12, 12, Some((10.0, 20.0, 30.0))),
+                    // weak sample: 7 eligible calls -> "7†"
+                    percentile_point(d1, 7, 7, Some((5.0, 6.0, 7.0))),
+                    // empty day -> omitted entirely
+                    percentile_point(d2, 0, 0, None),
+                ],
+            ),
+            (
+                "beta",
+                // calls present but none throughput-eligible -> "—" / "—"
+                vec![percentile_point(d0, 3, 0, None)],
+            ),
+        ]);
+        let rows = daily_throughput_rows(&resp, "UTC");
+        assert_eq!(rows.len(), 3, "empty day must be omitted");
+        // Sorted day-first, then model: alpha 08-24, beta 08-24, alpha 08-25.
+        assert_eq!(rows[0].day, "2026-08-24");
+        assert_eq!(rows[0].model, "alpha");
+        assert_eq!(rows[0].calls, 12);
+        assert_eq!(rows[0].n_star, "12");
+        assert_eq!(rows[0].tps, "10 / 20 / 30");
+        assert_eq!(rows[1].day, "2026-08-24");
+        assert_eq!(rows[1].model, "beta");
+        assert_eq!(rows[1].n_star, "—");
+        assert_eq!(rows[1].tps, "—");
+        assert_eq!(rows[2].day, "2026-08-25");
+        assert_eq!(rows[2].model, "alpha");
+        assert_eq!(rows[2].n_star, "7†");
+        assert_eq!(rows[2].tps, "5 / 6 / 7");
+    }
+
+    #[test]
+    fn test_daily_rows_local_timezone_date_label() {
+        // Bucket aligned to London local midnight 2026-08-24 = 2026-08-23T23:00Z.
+        let london_midnight = 1_787_529_600_i64 * 1_000_000_000 - 3_600_000_000_000;
+        let resp = percentile_resp(vec![(
+            "alpha",
+            vec![percentile_point(
+                london_midnight,
+                12,
+                12,
+                Some((1.0, 2.0, 3.0)),
+            )],
+        )]);
+        let rows = daily_throughput_rows(&resp, "Europe/London");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].day, "2026-08-24",
+            "label must be the local calendar day"
+        );
+    }
+
+    #[test]
+    fn test_daily_rows_no_metric_is_no_data() {
+        let resp = LatencyPercentilesResponse {
+            metrics: std::collections::BTreeMap::new(),
+            filters_applied: vec![],
+        };
+        assert!(daily_throughput_rows(&resp, "UTC").is_empty());
+    }
+
+    #[test]
+    fn test_daily_rows_partial_triple_is_missing() {
+        // One missing percentile leg renders as missing, not a partial triple.
+        let resp = percentile_resp(vec![(
+            "alpha",
+            vec![LatencyPercentilePoint {
+                throughput_p90_tok_s: None,
+                ..percentile_point(1_787_529_600_000_000_000, 12, 12, Some((1.0, 2.0, 3.0)))
+            }],
+        )]);
+        let rows = daily_throughput_rows(&resp, "UTC");
+        assert_eq!(rows[0].tps, "—");
     }
 }
