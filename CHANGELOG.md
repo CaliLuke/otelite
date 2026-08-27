@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.67] - 2026-08-27
+
 ### Fixed
 
 - **Session reports and the remaining analytics sections load in well under
