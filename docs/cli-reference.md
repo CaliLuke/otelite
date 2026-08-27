@@ -44,6 +44,22 @@ then loopback default. Pass an explicit `0.0.0.0:<PORT>` address for container
 or LAN access. Startup output, `otelite status`, `/api/health`, and the web
 status popover report the resolved receiver addresses.
 
+Browser OTLP/HTTP requests also require an allowed `Origin`. The defaults are
+loopback development origins on ports `3000` and `5173`:
+
+```text
+http://localhost:3000
+http://127.0.0.1:3000
+http://localhost:5173
+http://127.0.0.1:5173
+```
+
+Add or replace origins with repeatable `--cors-origin <ORIGIN>` arguments.
+`OTELITE_CORS_ORIGINS` accepts a comma-separated list. Explicit CLI origins
+override the environment list. Otelite answers browser preflights for
+`/v1/logs`, `/v1/traces`, and `/v1/metrics`; remote origins are not allowed
+unless configured explicitly.
+
 Storage settings use the same resolution for `serve`, `start`, and `restart`.
 `--storage-path <DIR>` overrides `OTELITE_DATA_DIR`; otherwise the database
 directory defaults to `~/.otelite/data`.

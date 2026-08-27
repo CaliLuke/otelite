@@ -3,7 +3,7 @@
 use crate::error::ReceiverError;
 use axum::{
     extract::Request,
-    http::{header, HeaderValue},
+    http::header,
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -73,27 +73,6 @@ pub async fn handle_compression(req: Request, next: Next) -> Response {
             error.into_response()
         },
     }
-}
-
-/// Middleware to add CORS headers
-pub async fn add_cors_headers(req: Request, next: Next) -> Response {
-    let mut response = next.run(req).await;
-
-    // Add CORS headers
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, OPTIONS"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Content-Type, Content-Encoding"),
-    );
-
-    response
 }
 
 #[cfg(test)]

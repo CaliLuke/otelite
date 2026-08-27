@@ -1,15 +1,18 @@
 // HTTP routes for OTLP receiver
 
+use crate::error::ReceiverError;
 use crate::health::HealthChecker;
 use crate::http::handlers::{
     handle_health, handle_logs, handle_metrics, handle_traces, handle_unified,
 };
 use crate::signals::{LogsHandler, MetricsHandler, TracesHandler};
 use axum::{
+    http::{header, HeaderValue, Method},
     routing::{get, post},
     Router,
 };
 use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 
 /// Create the main router with all OTLP endpoints
 pub fn create_router(
@@ -17,24 +20,38 @@ pub fn create_router(
     logs_handler: Arc<LogsHandler>,
     traces_handler: Arc<TracesHandler>,
     health_checker: Arc<HealthChecker>,
-) -> Router {
-    Router::new()
-        // Health check endpoint
-        .route("/health", get(handle_health))
-        .route("/healthz", get(handle_health))
-        // OTLP v1 signal-specific endpoints (recommended)
+    cors_allowed_origins: &[String],
+) -> Result<Router, ReceiverError> {
+    let origins = cors_allowed_origins
+        .iter()
+        .map(|origin| {
+            origin.parse::<HeaderValue>().map_err(|e| {
+                ReceiverError::Internal(format!("Invalid CORS origin {origin:?}: {e}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::CONTENT_ENCODING]);
+    let otlp = Router::new()
         .route("/v1/metrics", post(handle_metrics))
         .route("/v1/logs", post(handle_logs))
         .route("/v1/traces", post(handle_traces))
-        // Legacy unified endpoint (for backward compatibility)
         .route("/v1/otlp", post(handle_unified))
-        // Add shared state
+        .layer(cors);
+
+    Ok(Router::new()
+        // Health check endpoint
+        .route("/health", get(handle_health))
+        .route("/healthz", get(handle_health))
+        .merge(otlp)
         .with_state(AppState {
             metrics_handler,
             logs_handler,
             traces_handler,
             health_checker,
-        })
+        }))
 }
 
 /// Shared application state
@@ -68,12 +85,15 @@ mod tests {
         let traces_handler = Arc::new(TracesHandler::new(storage));
         let health_checker = Arc::new(HealthChecker::new());
 
-        let _router = create_router(
+        let router = create_router(
             metrics_handler,
             logs_handler,
             traces_handler,
             health_checker,
+            &crate::ReceiverConfig::default().cors_allowed_origins,
         );
+
+        assert!(router.is_ok());
 
         // Router created successfully - test passes if no panic
     }
