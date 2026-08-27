@@ -651,8 +651,18 @@ pub async fn get_metric_timeseries(
         }
     }
 
-    // Build query parameters
-    let mut params = QueryParams::default();
+    // Build query parameters. The name predicate keeps the filter in SQL
+    // (an idx_metrics_name_ts seek) instead of pulling every metric in the
+    // window into memory and filtering here.
+    let name_predicate = QueryPredicate {
+        field: "name".to_string(),
+        operator: Operator::Equal,
+        value: QueryValue::String(name.clone()),
+    };
+    let mut params = QueryParams {
+        predicates: vec![name_predicate.clone()],
+        ..Default::default()
+    };
     if let Some(start) = query.start_time {
         params.start_time = Some(start);
     }
@@ -671,15 +681,17 @@ pub async fn get_metric_timeseries(
         )
     })?;
 
-    // Filter by name
-    let metrics: Vec<_> = metrics.into_iter().filter(|m| m.name == name).collect();
-
-    // If time-filtered query is empty, check if metric exists at all (without time filter)
+    // If time-filtered query is empty, check if metric exists at all (without time filter).
+    // A single-row existence probe, not a full-table load.
     if metrics.is_empty() {
-        let all_params = QueryParams::default();
+        let exists_params = QueryParams {
+            predicates: vec![name_predicate],
+            limit: Some(1),
+            ..Default::default()
+        };
         let all_metrics = state
             .storage
-            .query_metrics(&all_params)
+            .query_metrics(&exists_params)
             .await
             .map_err(|e| {
                 (
@@ -690,8 +702,7 @@ pub async fn get_metric_timeseries(
                     ))),
                 )
             })?;
-        let exists = all_metrics.iter().any(|m| m.name == name);
-        if !exists {
+        if all_metrics.is_empty() {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse::not_found(format!("Metric '{}'", name))),

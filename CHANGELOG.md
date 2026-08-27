@@ -11,6 +11,18 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Session reports and the remaining analytics sections load in well under
+  a second instead of 20–300 seconds.** Opening a session's report from the
+  Sessions tab no longer takes a minute or more (session-id lookups now use a
+  dedicated index instead of scanning and JSON-parsing every span), and the
+  finish-reasons, tool-usage, tool-approvals, tool-errors, retrieval-stats and
+  hour-of-day analytics sections no longer scan the whole time window (each
+  now runs on a narrow partial index). A metric's timeseries also no longer
+  loads unrelated metrics from the database, and no longer re-reads the whole
+  metrics table just to check whether the metric exists.
+
 ## [0.1.66] - 2026-08-27
 
 ### Fixed

@@ -1335,6 +1335,36 @@ async fn test_get_metric_timeseries_with_time_range() {
         .all(|b| b.timestamp >= 1_000_000_000 && b.timestamp <= 3_000_000_000));
 }
 
+#[tokio::test]
+async fn test_get_metric_timeseries_empty_window_existing_metric() {
+    let (storage, _tmp) = setup_test_storage().await;
+
+    // The metric exists, but only far outside the requested window.
+    storage
+        .write_metric(&create_test_metric("cpu.usage", 1_000_000_000, 45.5))
+        .await
+        .unwrap();
+
+    let app = build_test_router(storage);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/metrics/cpu.usage/timeseries?start_time=100000000000&end_time=200000000000&step=60")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Exists outside the window → 200 with an empty series (not 404).
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let timeseries: Vec<otelite_api::api::metrics::TimeBucket> =
+        serde_json::from_slice(&body).unwrap();
+    assert!(timeseries.is_empty());
+}
+
 // NEW TEST: GET /api/openapi.json
 #[tokio::test]
 async fn test_openapi_spec() {

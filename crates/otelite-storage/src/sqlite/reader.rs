@@ -3,6 +3,7 @@
 use crate::error::{Result, StorageError};
 use crate::{QueryParams, StorageStats};
 use otelite_core::query::{Operator, QueryPredicate, QueryValue};
+use otelite_core::semconv;
 use otelite_core::telemetry::log::SeverityLevel;
 use otelite_core::telemetry::trace::{SpanKind, SpanStatus, StatusCode};
 use otelite_core::telemetry::{
@@ -439,7 +440,7 @@ fn predicate_to_sql(
     let lhs = field_to_sql(signal_type, &predicate.field)?;
     let operator = sql_operator(&predicate.operator);
 
-    match (&predicate.field[..], &predicate.operator, &predicate.value) {
+    let clause = match (&predicate.field[..], &predicate.operator, &predicate.value) {
         ("duration", op, QueryValue::Duration(value)) if signal_type == "spans" => {
             sql_params.push(Box::new(*value as i64));
             Ok(format!("((end_time - start_time) {} ?)", sql_operator(op)))
@@ -468,6 +469,24 @@ fn predicate_to_sql(
             sql_params.push(Box::new(*value as i64));
             Ok(format!("{} {} ?", lhs, operator))
         },
+    }?;
+
+    // Session-id predicates run against idx_spans_session_id, a partial
+    // index: SQLite only considers a partial index when the query carries
+    // the index predicate as conjuncts. The equality already implies it, so
+    // appending it changes no results — it only makes the index usable.
+    if predicate.field == otelite_core::semconv::SESSION_ID_KEY
+        || predicate
+            .field
+            .strip_prefix("attributes.")
+            .is_some_and(|f| f == otelite_core::semconv::SESSION_ID_KEY)
+    {
+        Ok(format!(
+            "{clause} AND {}",
+            otelite_core::semconv::session_id_index_predicate("attributes")
+        ))
+    } else {
+        Ok(clause)
     }
 }
 
@@ -497,6 +516,9 @@ fn field_to_sql(signal_type: &str, field: &str) -> Result<String> {
     }
 
     if let Some(attribute_field) = field.strip_prefix("attributes.") {
+        if attribute_field == otelite_core::semconv::SESSION_ID_KEY {
+            return Ok(otelite_core::semconv::session_id_expr("attributes"));
+        }
         return Ok(format!(
             "json_extract(attributes, '{}')",
             json_path_for_key(attribute_field)
@@ -508,6 +530,10 @@ fn field_to_sql(signal_type: &str, field: &str) -> Result<String> {
             "json_extract(resource, '$.attributes{}')",
             json_key_accessor(resource_field)
         ));
+    }
+
+    if field == otelite_core::semconv::SESSION_ID_KEY {
+        return Ok(otelite_core::semconv::session_id_expr("attributes"));
     }
 
     Ok(format!(
@@ -1580,22 +1606,42 @@ pub fn query_finish_reasons(
         params.push(Box::new(end));
     }
 
+    // Both spans branches carry the finish-reason guard verbatim so the
+    // planner can answer them from idx_spans_finish_reason instead of
+    // scanning the whole window. The branch-specific IS NOT NULL /
+    // json_type conditions remain, so each branch still returns exactly
+    // the rows it always did.
+    let singular = format!(
+        "json_extract(attributes, '$.\"{}\"')",
+        semconv::FINISH_REASON_KEY
+    );
+    let plural = format!(
+        "json_extract(attributes, '$.\"{}\"')",
+        semconv::FINISH_REASONS_KEY
+    );
     let sql = format!(
         "WITH reasons AS (
-            SELECT json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') AS reason
+            SELECT {singular} AS reason
             FROM spans
-            WHERE json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') IS NOT NULL
+            WHERE {fr_guard}
+              AND {singular} IS NOT NULL
             {spans_time_filter}
 
             UNION ALL
 
             SELECT je.value AS reason
             FROM (
-                SELECT json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"') AS arr
+                SELECT {plural} AS arr
                 FROM spans
-                WHERE json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"') IS NOT NULL
-                  AND json_valid(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"'))
-                  AND json_type(json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"')) = 'array'
+                WHERE {fr_guard}
+                  AND {plural} IS NOT NULL
+                  -- json_valid on the extracted value (not just the
+                  -- attributes document): an extracted JSON string such as
+                  -- stop is not itself a JSON document, and json_type
+                  -- raises on it. json_valid never raises and short-
+                  -- circuits the row before json_type is evaluated.
+                  AND json_valid({plural})
+                  AND json_type({plural}) = 'array'
                 {spans_time_filter}
             ) s, json_each(s.arr) je
 
@@ -1605,7 +1651,7 @@ pub fn query_finish_reasons(
             FROM (
                 SELECT json_extract(attributes, '$.body') AS body_json
                 FROM logs
-                WHERE body = 'claude_code.api_response_body'
+                WHERE body = '{api_body}'
                   AND json_extract(attributes, '$.body') IS NOT NULL
                   AND json_valid(json_extract(attributes, '$.body'))
                   {logs_time_filter}
@@ -1616,7 +1662,11 @@ pub fn query_finish_reasons(
         FROM reasons
         WHERE reason IS NOT NULL
         GROUP BY reason
-        ORDER BY cnt DESC"
+        ORDER BY cnt DESC",
+        singular = singular,
+        plural = plural,
+        fr_guard = semconv::finish_reason_guard("attributes"),
+        api_body = semconv::API_RESPONSE_BODY_LOG_BODY
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -2026,7 +2076,11 @@ pub fn query_tool_usage(
     end_time: Option<i64>,
     limit: usize,
 ) -> Result<Vec<otelite_core::api::ToolUsage>> {
-    let mut where_clause = String::from("WHERE 1=1");
+    // The tool-span guard (verbatim conjunct) scopes the scan to
+    // idx_spans_tool instead of the whole window; it is exactly the
+    // condition for the COALESCE below to be non-NULL, so results are
+    // unchanged.
+    let mut where_clause = format!("WHERE {}", semconv::tool_span_guard("attributes"));
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(start) = start_time {
@@ -2041,10 +2095,8 @@ pub fn query_tool_usage(
     let sql = format!(
         "SELECT
             COALESCE(
-                json_extract(attributes, '$.\"gen_ai.tool.name\"'),
-                json_extract(attributes, '$.\"tool.name\"'),
-                json_extract(attributes, '$.\"tool_name\"'),
-                CASE WHEN name LIKE 'claude_code.tool%' AND name != 'claude_code.tool' THEN name ELSE NULL END
+                {},
+                CASE WHEN name LIKE '{prefix}%' AND name != '{prefix}' THEN name ELSE NULL END
             ) AS tool_name,
             COUNT(*) AS cnt,
             SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
@@ -2055,7 +2107,9 @@ pub fn query_tool_usage(
         GROUP BY tool_name
         HAVING tool_name IS NOT NULL
         ORDER BY cnt DESC
-        LIMIT ?"
+        LIMIT ?",
+        semconv::coalesce_extract("attributes", semconv::TOOL_NAME_KEYS),
+        prefix = semconv::TOOL_SPAN_NAME_PREFIX
     );
 
     params.push(Box::new(limit as i64));
@@ -2198,7 +2252,10 @@ pub fn query_retrieval_stats(
     }
 
     // CTE: per-retrieval-span query, document count, and top-1 score.
-    // Reused by both the summary and top-queries aggregations.
+    // Reused by both the summary and top-queries aggregations. The
+    // retrieval guard (verbatim conjunct) scopes the scan to
+    // idx_spans_retrieval; it is the same condition the old inline
+    // OR used, plus the json_valid gate that makes it total.
     let cte = format!(
         "WITH retrieval_spans AS (
             SELECT
@@ -2209,12 +2266,10 @@ pub fn query_retrieval_stats(
                 ) AS doc_count,
                 CAST(json_extract(attributes, '$.\"retrieval.documents\"[0].\"document.score\"') AS REAL) AS top_score
             FROM spans
-            WHERE (
-                json_extract(attributes, '$.\"openinference.span.kind\"') = 'RETRIEVER'
-                OR json_extract(attributes, '$.\"retrieval.query\"') IS NOT NULL
-            )
+            WHERE {guard}
             {time_filter}
-        )"
+        )",
+        guard = semconv::retrieval_span_guard("attributes")
     );
 
     // Summary query: totals plus averages. AVG(top_score) auto-ignores NULLs.
@@ -3245,7 +3300,9 @@ pub fn query_tool_approvals(
     start_time: Option<i64>,
     end_time: Option<i64>,
 ) -> Result<otelite_core::api::ToolApprovalStats> {
-    let mut where_clause = String::from("WHERE name = 'claude_code.tool.blocked_on_user'");
+    // name = TOOL_APPROVAL_SPAN_NAME scopes the scan to
+    // idx_spans_tool_approval.
+    let mut where_clause = format!("WHERE name = '{}'", semconv::TOOL_APPROVAL_SPAN_NAME);
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(s) = start_time {
         where_clause.push_str(" AND start_time >= ?");
@@ -3438,10 +3495,15 @@ pub fn query_tool_errors(
     end_time: Option<i64>,
     limit: usize,
 ) -> Result<Vec<otelite_core::api::ToolErrorEntry>> {
-    let mut where_clause = String::from(
-        "WHERE name = 'claude_code.tool.execution'
+    // name = TOOL_EXECUTION_SPAN_NAME scopes the scan to
+    // idx_spans_tool_exec; the json_valid gate keeps corrupt rows from
+    // raising in the json_extract filters (no-op for valid rows).
+    let mut where_clause = format!(
+        "WHERE name = '{}'
+           AND json_valid(attributes)
            AND json_extract(attributes, '$.success') = 'false'
            AND json_extract(attributes, '$.error') IS NOT NULL",
+        semconv::TOOL_EXECUTION_SPAN_NAME
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(s) = start_time {
@@ -3505,8 +3567,19 @@ pub fn query_hour_of_day(
     }
 
     // Duplicate params for the two sub-queries (SQLite doesn't support named params easily here)
-    let llm_filter = format!("WHERE name = 'claude_code.llm_request'{}", time_filter);
-    let tool_filter = format!("WHERE name = 'claude_code.tool.execution'{}", time_filter);
+    // Each name-equality filter matches a partial index
+    // (idx_spans_llm_request_name / idx_spans_tool_exec), so both scans
+    // are index-only instead of full-window scans.
+    let llm_filter = format!(
+        "WHERE name = '{}'{}",
+        semconv::LLM_REQUEST_SPAN_NAME,
+        time_filter
+    );
+    let tool_filter = format!(
+        "WHERE name = '{}'{}",
+        semconv::TOOL_EXECUTION_SPAN_NAME,
+        time_filter
+    );
 
     // Build hour table by merging two separate queries in Rust — simpler than a FULL OUTER JOIN
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -4365,5 +4438,226 @@ mod tests {
                 assert_eq!(b.tool_calls, 0, "hour {i} should have 0 tool calls");
             }
         }
+    }
+
+    // ── session.id predicate (idx_spans_session_id) ────────────────────
+
+    #[test]
+    fn test_query_spans_session_id_predicate_returns_only_that_session() {
+        let conn = setup_test_db();
+        let insert = |sid: Option<&str>| {
+            let attrs = serde_json::json!({"session.id": sid, "x": "1"});
+            conn.execute(
+                "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, status_code, attributes, resource, events, links, scope)
+                 VALUES (?, ?, 'test.span', 0, 1000000000, 2000000000, 0, ?, '{}', '[]', '[]', '{}')",
+                rusqlite::params![next_id(), next_id(), attrs.to_string()],
+            )
+            .unwrap();
+        };
+        insert(Some("ses_a"));
+        insert(Some("ses_a"));
+        insert(Some("ses_b"));
+        insert(None);
+        // Corrupt attributes must not raise (total-form expression).
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, status_code, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'test.span', 0, 1000000000, 2000000000, 0, '{', '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id()],
+        )
+        .unwrap();
+
+        let params = QueryParams {
+            predicates: vec![QueryPredicate {
+                field: "session.id".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String("ses_a".to_string()),
+            }],
+            ..Default::default()
+        };
+        let spans = query_spans(&conn, &params).unwrap();
+        assert_eq!(spans.len(), 2, "exactly the two ses_a spans");
+
+        // Attributes prefix form must behave identically.
+        let params = QueryParams {
+            predicates: vec![QueryPredicate {
+                field: "attributes.session.id".to_string(),
+                operator: Operator::Equal,
+                value: QueryValue::String("ses_b".to_string()),
+            }],
+            ..Default::default()
+        };
+        let spans = query_spans(&conn, &params).unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].attributes.get("session.id"),
+            Some(&"ses_b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_query_spans_session_id_predicate_plan_uses_expression_index() {
+        let conn = setup_test_db();
+        let plan: String = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT * FROM spans WHERE 1=1 AND CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END = ? AND json_valid(attributes) AND json_extract(attributes, '$.\"session.id\"') IS NOT NULL ORDER BY start_time DESC LIMIT ?")
+            .unwrap()
+            .query_map(rusqlite::params!["ses_x", 10], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            plan.contains("idx_spans_session_id"),
+            "session-id predicate must seek idx_spans_session_id, got: {plan}"
+        );
+    }
+
+    // ── finish reasons (idx_spans_finish_reason) ───────────────────────
+
+    #[test]
+    fn test_query_finish_reasons_unions_spans_and_logs() {
+        let conn = setup_test_db();
+        // Singular finish_reason span in the window.
+        let attrs = serde_json::json!({"gen_ai.response.finish_reason": "stop"});
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'gen_ai.chat', 0, 1000000000, 2000000000, ?, '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), attrs.to_string()],
+        )
+        .unwrap();
+        // Plural finish_reasons span (a framework outside the LLM name
+        // patterns — the guard is attribute-based, so it must be counted).
+        let attrs = serde_json::json!({"gen_ai.response.finish_reasons": ["tool_calls", "stop"]});
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'pi.llm_request', 0, 1000000000, 2000000000, ?, '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), attrs.to_string()],
+        )
+        .unwrap();
+        // Finish reason outside the window: excluded.
+        let attrs = serde_json::json!({"gen_ai.response.finish_reason": "length"});
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+             VALUES (?, ?, 'gen_ai.chat', 0, 900000000, 950000000, ?, '{}', '[]', '[]', '{}')",
+            rusqlite::params![next_id(), next_id(), attrs.to_string()],
+        )
+        .unwrap();
+        // Log with a stop_reason inside an API response body.
+        let attrs = serde_json::json!({"body": {"stop_reason": "stop"}});
+        conn.execute(
+            "INSERT INTO logs (timestamp, severity_number, body, attributes, resource)
+             VALUES (1500000000, 9, 'claude_code.api_response_body', ?, '{}')",
+            rusqlite::params![attrs.to_string()],
+        )
+        .unwrap();
+
+        let rows = query_finish_reasons(&conn, Some(1000000000), Some(2000000000), None).unwrap();
+        let count = |reason: &str| {
+            rows.iter()
+                .find(|r| r.reason == reason)
+                .map(|r| r.count)
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            count("stop"),
+            3,
+            "singular span + plural array + log stop_reason"
+        );
+        assert_eq!(count("tool_calls"), 1);
+        assert_eq!(count("length"), 0, "outside the window");
+    }
+
+    // ── tool usage (idx_spans_tool) ────────────────────────────────────
+
+    #[test]
+    fn test_query_tool_usage_covers_all_name_sources_and_window() {
+        let conn = setup_test_db();
+        let insert_tool = |attrs: serde_json::Value, name: &str, ts: i64| {
+            conn.execute(
+                "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+                 VALUES (?, ?, ?, 0, ?, ?, ?, '{}', '[]', '[]', '{}')",
+                rusqlite::params![next_id(), next_id(), name, ts, ts + 1000000000, attrs.to_string()],
+            )
+            .unwrap();
+        };
+        insert_tool(
+            serde_json::json!({"gen_ai.tool.name": "search"}),
+            "agent.tool",
+            1000000000,
+        );
+        insert_tool(
+            serde_json::json!({"tool.name": "search"}),
+            "agent.tool",
+            2000000000,
+        );
+        insert_tool(
+            serde_json::json!({"tool_name": "read_file"}),
+            "agent.tool",
+            3000000000,
+        );
+        insert_tool(serde_json::json!({}), "claude_code.tool.Bash", 4000000000);
+        insert_tool(serde_json::json!({}), "gen_ai.chat", 5000000000); // not a tool
+        insert_tool(
+            serde_json::json!({"gen_ai.tool.name": "outside"}),
+            "agent.tool",
+            9000000000,
+        ); // outside window
+
+        let rows = query_tool_usage(&conn, Some(1000000000), Some(8000000000), 10).unwrap();
+        let get = |tool: &str| rows.iter().find(|r| r.tool_name == tool);
+        assert_eq!(
+            get("search").unwrap().count,
+            2,
+            "both attribute aliases count"
+        );
+        assert_eq!(get("read_file").unwrap().count, 1);
+        assert_eq!(
+            get("claude_code.tool.Bash").unwrap().count,
+            1,
+            "name-based fallback"
+        );
+        assert!(get("gen_ai.chat").is_none(), "non-tool span excluded");
+        assert!(get("outside").is_none(), "outside the window");
+    }
+
+    // ── retrieval stats (idx_spans_retrieval) ──────────────────────────
+
+    #[test]
+    fn test_query_retrieval_stats_counts_retriever_spans() {
+        let conn = setup_test_db();
+        let insert = |attrs: serde_json::Value| {
+            conn.execute(
+                "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, resource, events, links, scope)
+                 VALUES (?, ?, 'retrieval', 0, 1000000000, 2000000000, ?, '{}', '[]', '[]', '{}')",
+                rusqlite::params![next_id(), next_id(), attrs.to_string()],
+            )
+            .unwrap();
+        };
+        insert(serde_json::json!({
+            "openinference.span.kind": "RETRIEVER",
+            "retrieval.documents": [{"document.score": 0.9}, {"document.score": 0.7}]
+        }));
+        insert(serde_json::json!({
+            "retrieval.query": "what is otelite",
+            "retrieval.documents": [{"document.score": 0.5}]
+        }));
+        insert(serde_json::json!({"gen_ai.request.model": "x"})); // not retrieval
+
+        let stats = query_retrieval_stats(&conn, None, None, 10).unwrap();
+        assert_eq!(
+            stats.total_retrievals, 2,
+            "RETRIEVER kind + retrieval.query span"
+        );
+        assert!((stats.avg_documents_per_query - 1.5).abs() < 1e-9);
+        assert_eq!(
+            stats.avg_top_document_score,
+            Some(0.7),
+            "average of 0.9 and 0.5"
+        );
+        assert_eq!(stats.top_queries.len(), 1);
+        assert_eq!(stats.top_queries[0].query, "what is otelite");
+
+        // Empty database returns defaults, not an error.
+        let empty = setup_test_db();
+        let stats = query_retrieval_stats(&empty, None, None, 10).unwrap();
+        assert_eq!(stats.total_retrievals, 0);
     }
 }

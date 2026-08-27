@@ -96,7 +96,7 @@ pub const OPENINFERENCE_LLM_KINDS: &[&str] = &["LLM", "EMBEDDING"];
 /// Claude Code emits `claude_code.llm_request` spans with flat `model`,
 /// `input_tokens`, `output_tokens` attributes but no `gen_ai.*` / `llm.*`
 /// marker attributes, so the normal guard misses them entirely.
-pub const VENDOR_SPAN_NAME_PREFIXES: &[&str] = &["claude_code.llm_request"];
+pub const VENDOR_SPAN_NAME_PREFIXES: &[&str] = &[LLM_REQUEST_SPAN_NAME];
 
 /// Codex CLI's span for one completed model sampling request.
 ///
@@ -107,6 +107,33 @@ pub const VENDOR_SPAN_NAME_PREFIXES: &[&str] = &["claude_code.llm_request"];
 /// attributes, so it is only included in request-count and latency analytics.
 pub const CODEX_LLM_REQUEST_SPAN_NAME: &str = "run_sampling_request";
 pub const CODEX_OTEL_SCOPE_NAME: &str = "codex_cli_rs";
+
+/// Attribute carrying the agent session identifier (Claude Code `session.id`).
+pub const SESSION_ID_KEY: &str = "session.id";
+
+/// Span name for one Claude Code LLM request.
+pub const LLM_REQUEST_SPAN_NAME: &str = "claude_code.llm_request";
+
+/// Prefix of Claude Code tool span names (`claude_code.tool.Bash`, ...).
+pub const TOOL_SPAN_NAME_PREFIX: &str = "claude_code.tool";
+
+/// Span name for one Claude Code tool execution.
+pub const TOOL_EXECUTION_SPAN_NAME: &str = "claude_code.tool.execution";
+
+/// Span name for one Claude Code tool-approval prompt.
+pub const TOOL_APPROVAL_SPAN_NAME: &str = "claude_code.tool.blocked_on_user";
+
+/// Log `body` value carrying a raw Claude Code API response body.
+pub const API_RESPONSE_BODY_LOG_BODY: &str = "claude_code.api_response_body";
+
+/// Attribute keys that name the tool a span executed, in priority order.
+pub const TOOL_NAME_KEYS: &[&str] = &["gen_ai.tool.name", "tool.name", "tool_name"];
+
+/// Attribute carrying a singular LLM finish reason.
+pub const FINISH_REASON_KEY: &str = "gen_ai.response.finish_reason";
+
+/// Attribute carrying a plural LLM finish-reason array.
+pub const FINISH_REASONS_KEY: &str = "gen_ai.response.finish_reasons";
 
 /// Build a `COALESCE(json_extract(col, '$."k1"'), ...)` expression over `keys`.
 pub fn coalesce_extract(attributes_col: &str, keys: &[&str]) -> String {
@@ -198,6 +225,82 @@ pub fn request_span_guard(attributes_col: &str) -> String {
     format!("({llm_guard} OR {codex_guard})")
 }
 
+/// Total-form SQL expression for the session-id attribute lookup.
+///
+/// A bare `json_extract(attributes, '$."session.id"')` raises on corrupt JSON;
+/// this `json_valid`-gated form returns NULL instead. The same expression
+/// defines `idx_spans_session_id`, so `session.id` predicates seek the index
+/// instead of scanning the table.
+pub fn session_id_expr(attributes_col: &str) -> String {
+    format!(
+        "CASE WHEN json_valid({col}) THEN json_extract({col}, '$.\"{key}\"') END",
+        col = attributes_col,
+        key = SESSION_ID_KEY
+    )
+}
+
+/// Partial-index predicate pairing [`session_id_expr`]: only spans that carry
+/// a session id are indexed.
+///
+/// A query on the expression must also carry this predicate (as conjuncts)
+/// for SQLite to consider the partial index at all — the equality itself
+/// implies it, so adding it is semantically redundant but planner-required.
+pub fn session_id_index_predicate(attributes_col: &str) -> String {
+    format!(
+        "json_valid({col}) AND json_extract({col}, '$.\"{key}\"') IS NOT NULL",
+        col = attributes_col,
+        key = SESSION_ID_KEY
+    )
+}
+
+/// Guard matching spans that carry a finish reason, singular attribute or
+/// plural array attribute. Total (every `json_extract` is `json_valid`-gated)
+/// for partial-index use.
+pub fn finish_reason_guard(attributes_col: &str) -> String {
+    format!(
+        "((json_valid({col}) AND json_extract({col}, '$.\"{s}\"') IS NOT NULL) \
+          OR (json_valid({col}) AND json_extract({col}, '$.\"{p}\"') IS NOT NULL))",
+        col = attributes_col,
+        s = FINISH_REASON_KEY,
+        p = FINISH_REASONS_KEY
+    )
+}
+
+/// Guard matching spans that identify a tool either by a tool-name attribute
+/// or by a Claude Code tool span name. Total for partial-index use (the
+/// attribute branch is `json_valid`-gated; the name branch needs no JSON).
+pub fn tool_span_guard(attributes_col: &str) -> String {
+    let attr_clauses = TOOL_NAME_KEYS
+        .iter()
+        .map(|k| {
+            format!(
+                "json_extract({col}, '$.\"{k}\"') IS NOT NULL",
+                col = attributes_col,
+                k = k
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!(
+        "((json_valid({col}) AND ({attrs})) \
+          OR (name LIKE '{prefix}%' AND name != '{prefix}'))",
+        col = attributes_col,
+        attrs = attr_clauses,
+        prefix = TOOL_SPAN_NAME_PREFIX
+    )
+}
+
+/// Guard matching retrieval spans: OpenInference `RETRIEVER` span kind or a
+/// `retrieval.query` attribute. Total for partial-index use.
+pub fn retrieval_span_guard(attributes_col: &str) -> String {
+    format!(
+        "(json_valid({col}) AND (json_extract({col}, '$.\"openinference.span.kind\"') = 'RETRIEVER' \
+          OR json_extract({col}, '$.\"{k}\"') IS NOT NULL))",
+        col = attributes_col,
+        k = "retrieval.query"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +363,60 @@ mod tests {
             !llm_span_guard("attributes").contains("run_sampling_request"),
             "standard LLM guard must exclude Codex spans without token or outcome attributes"
         );
+    }
+
+    #[test]
+    fn session_id_expr_is_total_and_predicate_pairs() {
+        let expr = session_id_expr("attributes");
+        assert_eq!(
+            expr,
+            "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END"
+        );
+        let pred = session_id_index_predicate("attributes");
+        assert_eq!(
+            pred,
+            "json_valid(attributes) AND json_extract(attributes, '$.\"session.id\"') IS NOT NULL"
+        );
+    }
+
+    #[test]
+    fn finish_reason_guard_covers_singular_and_plural() {
+        let sql = finish_reason_guard("attributes");
+        assert!(sql.contains(
+            "json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') IS NOT NULL"
+        ));
+        assert!(sql.contains(
+            "json_extract(attributes, '$.\"gen_ai.response.finish_reasons\"') IS NOT NULL"
+        ));
+        // Every extract is gated.
+        assert_eq!(sql.matches("json_extract").count(), 2);
+        assert_eq!(sql.matches("json_valid").count(), 2);
+    }
+
+    #[test]
+    fn tool_span_guard_covers_attributes_and_names() {
+        let sql = tool_span_guard("attributes");
+        for key in TOOL_NAME_KEYS {
+            assert!(
+                sql.contains(&format!(
+                    "json_extract(attributes, '$.\"{key}\"') IS NOT NULL"
+                )),
+                "expected {key} clause in: {sql}"
+            );
+        }
+        assert!(
+            sql.contains("name LIKE 'claude_code.tool%' AND name != 'claude_code.tool'"),
+            "expected tool name prefix clause in: {sql}"
+        );
+    }
+
+    #[test]
+    fn retrieval_span_guard_covers_kind_and_query() {
+        let sql = retrieval_span_guard("attributes");
+        assert!(
+            sql.contains("json_extract(attributes, '$.\"openinference.span.kind\"') = 'RETRIEVER'")
+        );
+        assert!(sql.contains("json_extract(attributes, '$.\"retrieval.query\"') IS NOT NULL"));
+        assert!(sql.contains("json_valid(attributes)"));
     }
 }
