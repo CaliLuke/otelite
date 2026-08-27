@@ -180,7 +180,7 @@ class OverviewView {
             }).join('');
             this._setBody('models', `
                 <div class="overview-bars">${bars}</div>
-                <button class="btn btn-secondary btn-sm overview-cta" data-target="analytics">Open Analytics →</button>
+                <button class="btn btn-secondary btn-sm overview-cta" data-target="analytics">Open GenAI →</button>
             `);
             this._wireCta('models');
         } catch (err) {
@@ -209,7 +209,7 @@ class OverviewView {
                 <div class="overview-stat-large">${(last / 1000).toFixed(2)}s</div>
                 <div class="overview-stat-sub">peak ${(peak / 1000).toFixed(2)}s · ${values.length} buckets</div>
                 ${this._sparkline(values)}
-                <button class="btn btn-secondary btn-sm overview-cta" data-target="analytics">Open Analytics →</button>
+                <button class="btn btn-secondary btn-sm overview-cta" data-target="analytics">Open GenAI →</button>
             `);
             this._wireCta('latency');
         } catch (err) {
@@ -235,7 +235,7 @@ class OverviewView {
                 <div class="overview-stat-large">${sum.toLocaleString()}</div>
                 <div class="overview-stat-sub">tokens across ${totals.length} hourly buckets</div>
                 ${this._sparkline(totals)}
-                <button class="btn btn-secondary btn-sm overview-cta" data-target="analytics">Open Analytics →</button>
+                <button class="btn btn-secondary btn-sm overview-cta" data-target="analytics">Open GenAI →</button>
             `);
             this._wireCta('tokens');
         } catch (err) {

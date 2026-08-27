@@ -24,6 +24,14 @@ have to work around), not implementation detail.
   model's output rate, so unpriced models show no cost rather than a
   guessed one.
 
+### Changed
+
+- **The web UI's "Analytics" tab is now "GenAI".** Every panel on that tab
+  (tokens, cost, models, cache, reasoning, agents, parameters, sessions,
+  context) is LLM-specific, and otelite itself stays a generic
+  OpenTelemetry store — the tab name now says what it actually shows. The
+  page heading and all endpoints are unchanged.
+
 ## [0.1.72] - 2026-08-27
 
 ### Fixed
