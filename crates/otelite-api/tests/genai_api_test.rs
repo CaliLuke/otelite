@@ -1468,5 +1468,8 @@ async fn test_get_session_context_window_filter() {
         1,
         "only the later span starts in the window"
     );
-    assert_eq!(ctx.spans_total, 2, "total ignores the window");
+    assert_eq!(
+        ctx.spans_total, 1,
+        "totals count the queried scope (window, when given)"
+    );
 }

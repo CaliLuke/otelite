@@ -1416,7 +1416,9 @@ pub struct SessionContextTimelineEvent {
 
 /// GET /api/sessions/:id/context — everything observed for one session on
 /// one timeline (issue #134). Spans and logs are truncated to `limit` with
-/// `*_total` counts; metrics are aggregated per name, not raw-dumped.
+/// `*_total` counts (counting the queried scope: the time window, when one
+/// is given, else the whole session); metrics are aggregated per name, not
+/// raw-dumped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SessionContextResponse {

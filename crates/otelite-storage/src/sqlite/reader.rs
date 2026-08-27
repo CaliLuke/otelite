@@ -5039,19 +5039,20 @@ pub fn query_session_context(
         .map_err(|e| StorageError::QueryError(format!("Failed to read session spans: {e}")))?
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| StorageError::QueryError(format!("Failed to parse session spans: {e}")))?;
-    let spans_total = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM spans WHERE {expr} = ?1 AND {pred} AND json_valid(attributes)",
-                expr = sess_expr,
-                pred = semconv::session_id_index_predicate("attributes")
-            ),
-            rusqlite::params![session_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(|e| {
-            StorageError::QueryError(format!("Failed to count session spans: {e}"))
-        })?;
+    // Totals count the queried scope: the window, when one is given
+    // (bounded + index-friendly), else the whole session. A windowed
+    // request must not pay for a full-history count.
+    let mut q = format!(
+        "SELECT COUNT(*) FROM spans WHERE {expr} = ?1 AND {pred} AND json_valid(attributes)",
+        expr = sess_expr,
+        pred = semconv::session_id_index_predicate("attributes")
+    );
+    let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session_id.to_string())];
+    window("start_time", &mut q, &mut p);
+    let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+    let spans_total: i64 = conn
+        .query_row(&q, param_refs.as_slice(), |r| r.get(0))
+        .map_err(|e| StorageError::QueryError(format!("Failed to count session spans: {e}")))?;
 
     // ── logs (window-bounded scan; no session index on logs) ──
     let mut q = format!(
@@ -5079,30 +5080,37 @@ pub fn query_session_context(
         .map_err(|e| StorageError::QueryError(format!("Failed to read session logs: {e}")))?
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| StorageError::QueryError(format!("Failed to parse session logs: {e}")))?;
-    let logs_total = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM logs WHERE json_valid(attributes) AND ({sess} OR {conv})",
-                sess = sess_pred,
-                conv = conv_pred
-            ),
-            rusqlite::params![session_id],
-            |r| r.get::<_, i64>(0),
-        )
+    let mut q = format!(
+        "SELECT COUNT(*) FROM logs WHERE json_valid(attributes) AND ({sess} OR {conv})",
+        sess = sess_pred,
+        conv = conv_pred
+    );
+    let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session_id.to_string())];
+    window("timestamp", &mut q, &mut p);
+    let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+    let logs_total: i64 = conn
+        .query_row(&q, param_refs.as_slice(), |r| r.get(0))
         .map_err(|e| StorageError::QueryError(format!("Failed to count session logs: {e}")))?;
 
     // ── metrics (aggregated in SQL; session.id addressing) ──
-    // CASE-wrapped equality, like the span index expression: a bare
-    // `json_extract(...) = ?` also matches rows whose attributes lack the
-    // key entirely (NULL = NULL compares true under json_extract's
-    // three-valued handling in this position), leaking every
-    // session-less metric row into the context for any window query.
+    // CASE-wrapped equality, matching the span index expression so the
+    // predicate reads the same as `session_id_expr` elsewhere. (A bare
+    // `json_extract(...) = ?` is equivalent — `NULL = ?` is never true —
+    // but the shared form keeps the two stores' session addressing
+    // visually identical; the regression test pins that unlabelled
+    // metric rows stay out.)
+    // project.id rides along as the 10th aggregate column: it is a
+    // per-session constant on opencode metrics, so MAX() over the rows
+    // already scanned costs nothing — a separate lookup would mean a
+    // second full-table scan of the metrics table.
     let mut q = format!(
         "SELECT name, unit, metric_type AS mtype, COUNT(*), \
          SUM(COALESCE(value_double, CAST(value_int AS REAL))), \
          MIN(COALESCE(value_double, CAST(value_int AS REAL))), \
          MAX(COALESCE(value_double, CAST(value_int AS REAL))), \
-         MIN(timestamp), MAX(timestamp) \
+         MIN(timestamp), MAX(timestamp), \
+         MAX(CASE WHEN json_extract(attributes, '$.\"project.id\"') IS NOT NULL \
+                 THEN json_extract(attributes, '$.\"project.id\"') END) \
          FROM metrics WHERE {expr} IS NOT NULL AND {expr} = ?",
         expr = semconv::session_id_expr("attributes")
     );
@@ -5125,6 +5133,7 @@ pub fn query_session_context(
         Option<f64>,
         i64,
         i64,
+        Option<String>,
     );
     let metrics: Vec<MetricAggRow> = stmt
         .query_map(param_refs.as_slice(), |r| {
@@ -5138,6 +5147,7 @@ pub fn query_session_context(
                 r.get::<_, Option<f64>>(6)?,
                 r.get::<_, i64>(7)?,
                 r.get::<_, i64>(8)?,
+                r.get::<_, Option<String>>(9)?,
             ))
         })
         .map_err(|e| StorageError::QueryError(format!("Failed to read session metrics: {e}")))?
@@ -5177,21 +5187,10 @@ pub fn query_session_context(
     // opencode carries project.id on its metrics; claude/codex don't.
     // (Scoped to opencode.* names so a foreign metric row for the same
     // session id can't leak another project label in.)
-    let project_id = conn
-        .query_row(
-            &format!(
-                "SELECT json_extract(attributes, '$.\"project.id\"') FROM metrics \
-                 WHERE {expr} IS NOT NULL AND {expr} = ? \
-                 AND name LIKE 'opencode.%' \
-                 AND json_extract(attributes, '$.\"project.id\"') IS NOT NULL \
-                 LIMIT 1",
-                expr = semconv::session_id_expr("attributes")
-            ),
-            rusqlite::params![session_id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten();
+    let project_id = metrics
+        .iter()
+        .find(|m| m.0.starts_with("opencode."))
+        .and_then(|m| m.9.clone());
 
     let spans_out: Vec<SessionContextSpan> = spans
         .iter()
@@ -5221,16 +5220,18 @@ pub fn query_session_context(
     let metrics_out: Vec<SessionContextMetric> = metrics
         .iter()
         .map(
-            |(name, unit, mtype, count, sum, min, max, first_ts, last_ts)| SessionContextMetric {
-                name: name.clone(),
-                unit: unit.clone(),
-                metric_type: *mtype as u8,
-                count: *count as u64,
-                sum: *sum,
-                min: *min,
-                max: *max,
-                first_ts: *first_ts,
-                last_ts: *last_ts,
+            |(name, unit, mtype, count, sum, min, max, first_ts, last_ts, _project)| {
+                SessionContextMetric {
+                    name: name.clone(),
+                    unit: unit.clone(),
+                    metric_type: *mtype as u8,
+                    count: *count as u64,
+                    sum: *sum,
+                    min: *min,
+                    max: *max,
+                    first_ts: *first_ts,
+                    last_ts: *last_ts,
+                }
             },
         )
         .collect();
@@ -9373,7 +9374,10 @@ mod tests {
             3,
             "spans 3,4,5 start after the window start"
         );
-        assert_eq!(resp.spans_total, 6, "total ignores the window");
+        assert_eq!(
+            resp.spans_total, 3,
+            "totals count the queried scope (window, when given)"
+        );
     }
 
     #[test]

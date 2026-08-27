@@ -527,12 +527,25 @@ class TracesView {
         modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
 
         try {
-            // Context (spans/logs/metrics, issue #134) is best-effort: the
-            // diagnose report still renders if the context endpoint is down.
-            const [data, context] = await Promise.all([
-                this.apiClient.getSessionDiagnose(sessionId),
-                this.apiClient.getSessionContext(sessionId).catch(() => null),
-            ]);
+            const data = await this.apiClient.getSessionDiagnose(sessionId);
+            // Session context (spans/logs/metrics, issue #134) is
+            // best-effort: the report renders even if the fetch fails.
+            // It is bounded to the session's own period (±5 min:
+            // session.created can precede the first LLM interaction by up
+            // to ~0.25s, measured) so storage never pays for a
+            // full-history scan.
+            let context = null;
+            const starts = (data.interactions || []).map(i => i.start_time_ns).filter(n => Number.isFinite(n));
+            if (starts.length) {
+                const marginNs = 5 * 60 * 1_000_000_000;
+                const startNs = Math.min(...starts) - marginNs;
+                const endNs = Math.max(...(data.interactions || []).map(
+                    i => i.start_time_ns + (i.duration_ms || 0) * 1_000_000,
+                )) + marginNs;
+                context = await this.apiClient
+                    .getSessionContext(sessionId, { start_time: startNs, end_time: endNs })
+                    .catch(() => null);
+            }
             document.getElementById('session-diagnose-body').innerHTML =
                 this._renderSessionDiagnose(data) + this._renderSessionContext(sessionId, context);
         } catch (e) {
