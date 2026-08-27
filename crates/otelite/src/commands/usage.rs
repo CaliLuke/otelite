@@ -120,6 +120,10 @@ pub struct UsageCommand {
     /// Show hour-of-day activity distribution (0–23 UTC, LLM + tool calls)
     #[arg(long)]
     pub hour_of_day: bool,
+
+    /// Show cost and token attribution per sub-agent role (opencode `agent` label)
+    #[arg(long)]
+    pub agent_roles: bool,
 }
 
 // ── serialisable output types (used for --format json) ───────────────────────
@@ -195,6 +199,8 @@ struct UsageOutput {
     hour_of_day: Option<Vec<otelite_core::api::HourOfDayBucket>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     calls_series: Option<Vec<otelite_core::api::CallsSeriesPoint>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_roles: Option<otelite_core::api::AgentRolesResponse>,
 }
 
 // ── pricing fetch ─────────────────────────────────────────────────────────────
@@ -556,6 +562,44 @@ impl UsageCommand {
             None
         };
 
+        // --agent-roles
+        let agent_roles: Option<otelite_core::api::AgentRolesResponse> = if self.agent_roles {
+            let mut response = storage
+                .query_agent_roles(Some(start_time), Some(end_time))
+                .await
+                .map_err(|e| Error::ApiError(format!("Failed to query agent roles: {}", e)))?;
+            // Cost is estimated from tokens x pricing (opencode's own cost
+            // counter is zero-valued). Covers the top-5 models per role.
+            for role in &mut response.roles {
+                let mut total: f64 = 0.0;
+                let mut all_priced = true;
+                for m in &mut role.top_models {
+                    let usage = TokenUsage {
+                        input: m.tokens.input,
+                        output: m.tokens.output,
+                        cache_creation: m.tokens.cache_write,
+                        cache_read: m.tokens.cache_read,
+                    };
+                    let cr = pricing_db.compute_cost(Some(m.model.as_str()), usage, None);
+                    m.cost = cr.cost;
+                    m.cost_source = Some(cr.source.as_str().to_string());
+                    m.cost_reason = cr.reason;
+                    match cr.cost {
+                        Some(c) => total += c,
+                        None => all_priced = false,
+                    }
+                }
+                role.cost = if all_priced && !role.top_models.is_empty() {
+                    Some(total)
+                } else {
+                    None
+                };
+            }
+            Some(response)
+        } else {
+            None
+        };
+
         // --calls
         let calls_series: Option<Vec<otelite_core::api::CallsSeriesPoint>> = if self.calls {
             Some(
@@ -640,6 +684,7 @@ impl UsageCommand {
                     tool_errors,
                     hour_of_day,
                     calls_series,
+                    agent_roles,
                 };
                 let json = if matches!(format, OutputFormat::JsonCompact) {
                     serde_json::to_string(&output)
@@ -758,6 +803,11 @@ impl UsageCommand {
 
                 if let Some(ref points) = calls_series {
                     display_calls_series(points);
+                    println!();
+                }
+
+                if let Some(ref roles) = agent_roles {
+                    display_agent_roles(roles);
                     println!();
                 }
 
@@ -1655,6 +1705,72 @@ fn display_hour_of_day(buckets: &[otelite_core::api::HourOfDayBucket]) {
     }
     println!("Activity by Hour of Day:");
     println!("{}", table);
+}
+
+fn display_agent_roles(response: &otelite_core::api::AgentRolesResponse) {
+    if response.roles.is_empty() {
+        println!("Agent Roles: no data in range (opencode only)");
+        return;
+    }
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("Role").fg(Color::Cyan),
+        Cell::new("Sessions").fg(Color::Cyan),
+        Cell::new("Tokens").fg(Color::Cyan),
+        Cell::new("In / Out").fg(Color::Cyan),
+        Cell::new("Cache r/w").fg(Color::Cyan),
+        Cell::new("Reasoning").fg(Color::Cyan),
+        Cell::new("Share").fg(Color::Cyan),
+        Cell::new("Cost (est.)").fg(Color::Cyan),
+        Cell::new("Top model").fg(Color::Cyan),
+    ]);
+    for r in &response.roles {
+        let top_model = r
+            .top_models
+            .first()
+            .map(|m| m.model.as_str())
+            .unwrap_or("—");
+        let in_out = format!(
+            "{}/{}",
+            format_number(r.tokens.input),
+            format_number(r.tokens.output)
+        );
+        let cache_rw = format!(
+            "{}/{}",
+            format_number(r.tokens.cache_read),
+            format_number(r.tokens.cache_write)
+        );
+        let share = r
+            .share_pct
+            .map(|p| format!("{:.1}%", p))
+            .unwrap_or_else(|| "—".to_string());
+        let cost = r
+            .cost
+            .map(|c| format!("${:.4}", c))
+            .unwrap_or_else(|| "n/a (local)".to_string());
+        table.add_row(vec![
+            &r.role,
+            &r.sessions.to_string(),
+            &format_number(r.tokens.total()),
+            &in_out,
+            &cache_rw,
+            &format_number(r.tokens.reasoning),
+            &share,
+            &cost,
+            &truncate(top_model, 28),
+        ]);
+    }
+    println!("Usage by Sub-Agent Role (opencode `agent` label):");
+    println!("{}", table);
+    if let Some(unknown) = response.unknown_share_pct {
+        println!(
+            "  Note: {:.1}% of tokens have no `agent` label (attribution gap).",
+            unknown
+        );
+    }
 }
 
 fn display_calls_series(points: &[otelite_core::api::CallsSeriesPoint]) {

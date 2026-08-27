@@ -207,6 +207,23 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_metrics_name_ts ON metrics(name, timestamp);",
     )?;
 
+    // Covering index for cumulative-counter windowed queries
+    // (reader::counter_window_deltas): the per-series baseline lookup seeks by
+    // the full label set + timestamp and reads the value without a table
+    // fetch. The json_valid-gated expressions are total (NULL on missing or
+    // malformed attributes), so evaluating them at INSERT time can never
+    // raise and break ingestion. The reader's baseline query must use these
+    // expressions verbatim for the index to be used (planner contract).
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_metrics_opencode_token_usage ON metrics(
+             CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.agent') END,
+             CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.model') END,
+             CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.type') END,
+             CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END,
+             timestamp, value_int)
+         WHERE name = 'opencode.token.usage';",
+    )?;
+
     // Create purge_history table
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS purge_history (

@@ -53,6 +53,7 @@ use utoipa::OpenApi;
         crate::api::genai::get_agent_framework_defs,
         crate::api::genai::get_truncation_rate,
         crate::api::genai::get_cache_hit_rate,
+        crate::api::genai::get_agent_roles,
         crate::api::genai::get_request_param_profile,
         crate::api::genai::get_conversation_depth,
         crate::api::genai::get_latency_series,
@@ -277,6 +278,7 @@ impl DashboardServer {
             .route("/api/genai/agent_framework_defs", get(crate::api::genai::get_agent_framework_defs))
             .route("/api/genai/truncation_rate", get(crate::api::genai::get_truncation_rate))
             .route("/api/genai/cache_hit_rate", get(crate::api::genai::get_cache_hit_rate))
+            .route("/api/genai/agent_roles", get(crate::api::genai::get_agent_roles))
             .route("/api/genai/request_param_profile", get(crate::api::genai::get_request_param_profile))
             .route("/api/genai/conversation_depth", get(crate::api::genai::get_conversation_depth))
             .route("/api/genai/latency_series", get(crate::api::genai::get_latency_series))

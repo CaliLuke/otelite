@@ -2563,6 +2563,340 @@ pub fn query_cache_hit_rate(
     Ok(rows)
 }
 
+/// One cumulative-counter series and its windowed delta.
+#[derive(Debug, Clone)]
+pub(crate) struct CounterWindowDelta {
+    /// Extracted label values, in the order of `label_paths`.
+    pub labels: Vec<Option<String>>,
+    /// Usage within the window: last value at or before `end_time` minus the
+    /// last value before `start_time` (0 when the series did not exist before
+    /// the window). A series whose in-window last value is below its baseline
+    /// (counter reset, e.g. app restart) is treated as restarting from zero.
+    pub delta: f64,
+}
+
+/// Compute windowed usage for a cumulative counter metric.
+///
+/// Agent telemetry (opencode, claude_code) emits cumulative counters keyed
+/// by the full label set, so summing window rows would overcount. The
+/// per-series delta is "last value at or before `end_time`" minus "last
+/// value before `start_time`"; rows sharing the maximum timestamp resolve to
+/// the max value (duplicate flushes at one tick).
+///
+/// The per-series baseline seeks rely on the covering indexes defined in
+/// `schema.rs` (e.g. `idx_metrics_opencode_token_usage`): the expressions
+/// below use the index's expression columns verbatim, and a metric added to
+/// counter queries without its covering index degrades every baseline seek
+/// to a full table scan.
+pub(crate) fn counter_window_deltas(
+    conn: &Connection,
+    metric_name: &str,
+    label_paths: &[&str],
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<CounterWindowDelta>> {
+    let label_exprs: Vec<String> = label_paths
+        .iter()
+        .map(|p| {
+            format!("CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{p}') END")
+        })
+        .collect();
+
+    let mut where_clause = String::from("WHERE name = ?1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(metric_name.to_string())];
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND timestamp >= ?2");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT {}, timestamp, \
+         COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics {}",
+        label_exprs.join(", "),
+        where_clause
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!(
+            "Failed to prepare counter window query for {metric_name}: {e}"
+        ))
+    })?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let labels = (0..label_paths.len())
+                .map(|i| row.get::<_, Option<String>>(i))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let ts = row.get::<_, i64>(label_paths.len())?;
+            let value = row
+                .get::<_, Option<i64>>(label_paths.len() + 1)?
+                .unwrap_or(0);
+            Ok((labels, ts, value))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to execute counter window query for {metric_name}: {e}"
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to parse counter window results for {metric_name}: {e}"
+            ))
+        })?;
+
+    // Group by label tuple -> (last timestamp, max value at that timestamp).
+    let mut last_values: HashMap<Vec<Option<String>>, (i64, i64)> = HashMap::new();
+    for (labels, ts, value) in rows {
+        match last_values.get_mut(&labels) {
+            Some(entry) => {
+                if ts > entry.0 {
+                    *entry = (ts, value);
+                } else if ts == entry.0 && value > entry.1 {
+                    entry.1 = value;
+                }
+            },
+            None => {
+                last_values.insert(labels, (ts, value));
+            },
+        }
+    }
+
+    // Baseline per series: last value strictly before the window start.
+    let mut baselines: HashMap<Vec<Option<String>>, i64> = HashMap::new();
+    if let Some(start) = start_time {
+        let mut predicate = String::new();
+        for (i, expr) in label_exprs.iter().enumerate() {
+            predicate.push_str(&format!(" AND {expr} IS ?{}", 3 + i));
+        }
+        let baseline_sql = format!(
+            "SELECT COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics \
+             WHERE name = ?1 AND timestamp < ?2{predicate} \
+             ORDER BY timestamp DESC, \
+               COALESCE(value_int, CAST(value_double AS INTEGER)) DESC \
+             LIMIT 1"
+        );
+        let mut baseline_stmt = conn.prepare(&baseline_sql).map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to prepare counter baseline query for {metric_name}: {e}"
+            ))
+        })?;
+        for labels in last_values.keys() {
+            let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(metric_name.to_string()), Box::new(start)];
+            binds.extend(
+                labels
+                    .iter()
+                    .map(|l| Box::new(l.clone()) as Box<dyn rusqlite::ToSql>),
+            );
+            let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+            match baseline_stmt.query_row(refs.as_slice(), |row| row.get::<_, Option<i64>>(0)) {
+                Ok(Some(v)) => {
+                    baselines.insert(labels.clone(), v);
+                },
+                Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => {},
+                Err(e) => {
+                    return Err(StorageError::QueryError(format!(
+                        "Failed to execute counter baseline query for {metric_name}: {e}"
+                    )))
+                },
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(last_values.len());
+    for (labels, (_ts, last)) in last_values {
+        let baseline = baselines.get(&labels).copied().unwrap_or(0);
+        let delta = if last < baseline {
+            last
+        } else {
+            last - baseline
+        };
+        if delta > 0 {
+            out.push(CounterWindowDelta {
+                labels,
+                delta: delta as f64,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Sub-agent role attribution (opencode `agent` label).
+///
+/// Tokens come from windowed deltas of `opencode.token.usage` (a cumulative
+/// counter). Session and model presence come from `opencode.model.usage`
+/// window rows (no counter math needed for presence). Cost is enriched by
+/// the API layer from the pricing table: opencode's own `cost.usage`
+/// counter is zero-valued in the wire data, so deriving cost from tokens is
+/// the only source.
+pub fn query_agent_roles(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<otelite_core::api::AgentRolesResponse> {
+    use otelite_core::api::{
+        AgentRoleBreakdown, AgentRolesResponse, RoleModelBreakdown, RoleTokenUsage,
+    };
+    use otelite_core::semconv::{
+        metric_labels as lbl, metric_names as mnames, opencode_token_types as ttypes,
+    };
+
+    const ROLE_UNKNOWN: &str = "unknown";
+
+    fn add_tokens(t: &mut RoleTokenUsage, kind: Option<&str>, v: u64) {
+        match kind {
+            Some(k) if k == ttypes::INPUT => t.input += v,
+            Some(k) if k == ttypes::OUTPUT => t.output += v,
+            Some(k) if k == ttypes::CACHE_READ => t.cache_read += v,
+            Some(k) if k == ttypes::CACHE_WRITE => t.cache_write += v,
+            Some(k) if k == ttypes::REASONING => t.reasoning += v,
+            _ => {}, // unknown token types are ignored, not misfiled
+        }
+    }
+
+    struct RoleAgg {
+        tokens: RoleTokenUsage,
+        sessions: std::collections::HashSet<String>,
+        models: std::collections::HashMap<String, RoleTokenUsage>,
+    }
+
+    let token_deltas = counter_window_deltas(
+        conn,
+        mnames::OPENCODE_TOKEN_USAGE,
+        &[lbl::AGENT, lbl::MODEL, lbl::TYPE, lbl::SESSION_ID],
+        start_time,
+        end_time,
+    )?;
+
+    let mut roles: HashMap<String, RoleAgg> = HashMap::new();
+    for d in token_deltas {
+        let role = d
+            .labels
+            .first()
+            .and_then(|l| l.clone())
+            .unwrap_or_else(|| ROLE_UNKNOWN.to_string());
+        let model = d
+            .labels
+            .get(1)
+            .and_then(|l| l.clone())
+            .unwrap_or_else(|| ROLE_UNKNOWN.to_string());
+        let kind = d.labels.get(2).and_then(|l| l.as_deref());
+        let agg = roles.entry(role).or_insert_with(|| RoleAgg {
+            tokens: RoleTokenUsage::default(),
+            sessions: std::collections::HashSet::new(),
+            models: std::collections::HashMap::new(),
+        });
+        add_tokens(&mut agg.tokens, kind, d.delta as u64);
+        add_tokens(agg.models.entry(model).or_default(), kind, d.delta as u64);
+    }
+
+    // Session and model presence from opencode.model.usage window rows.
+    // Presence only needs the name-indexed seek; labels are extracted from
+    // the fetched rows.
+    let mut where_clause = String::from("WHERE name = ?1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(mnames::OPENCODE_MODEL_USAGE.to_string())];
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND timestamp >= ?2");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+    // json_valid-gated (total) so a malformed attributes value can only
+    // yield NULL, never an error, for a corrupted metrics row.
+    let presence_sql = format!(
+        "SELECT CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.agent') END, \
+                 CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.model') END, \
+                 CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END \
+         FROM metrics {where_clause}",
+        where_clause = where_clause
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&presence_sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare agent_roles presence query: {e}"))
+    })?;
+    let presence_rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute agent_roles presence query: {e}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse agent_roles presence rows: {e}"))
+        })?;
+    for (role, model, sid) in presence_rows {
+        let role = role.unwrap_or_else(|| ROLE_UNKNOWN.to_string());
+        let agg = roles.entry(role).or_insert_with(|| RoleAgg {
+            tokens: RoleTokenUsage::default(),
+            sessions: std::collections::HashSet::new(),
+            models: std::collections::HashMap::new(),
+        });
+        if let Some(sid) = sid {
+            agg.sessions.insert(sid);
+        }
+        if let Some(model) = model {
+            agg.models.entry(model).or_default();
+        }
+    }
+
+    let total_tokens: u64 = roles.values().map(|a| a.tokens.total()).sum();
+    let mut role_rows: Vec<AgentRoleBreakdown> = roles
+        .into_iter()
+        .map(|(role, agg)| {
+            let mut models: Vec<(String, RoleTokenUsage)> = agg.models.into_iter().collect();
+            models.sort_by_key(|a| std::cmp::Reverse(a.1.total()));
+            let top_models = models
+                .into_iter()
+                .take(5)
+                .map(|(model, tokens)| RoleModelBreakdown {
+                    model,
+                    tokens,
+                    cost: None,
+                    cost_source: None,
+                    cost_reason: None,
+                })
+                .collect();
+            let share_pct = if total_tokens > 0 {
+                Some(agg.tokens.total() as f64 / total_tokens as f64 * 100.0)
+            } else {
+                None
+            };
+            AgentRoleBreakdown {
+                role,
+                tokens: agg.tokens,
+                sessions: agg.sessions.len() as u64,
+                cost: None,
+                share_pct,
+                top_models,
+            }
+        })
+        .collect();
+    role_rows.sort_by_key(|a| std::cmp::Reverse(a.tokens.total()));
+
+    let unknown_share_pct = role_rows
+        .iter()
+        .find(|r| r.role == ROLE_UNKNOWN)
+        .and_then(|r| r.share_pct);
+
+    Ok(AgentRolesResponse {
+        roles: role_rows,
+        unknown_share_pct,
+        agents_covered: vec!["opencode".to_string()],
+    })
+}
+
 /// Distribution of request parameter settings (temperature, max_tokens).
 pub fn query_request_param_profile(
     conn: &Connection,
@@ -4659,5 +4993,200 @@ mod tests {
         let empty = setup_test_db();
         let stats = query_retrieval_stats(&empty, None, None, 10).unwrap();
         assert_eq!(stats.total_retrievals, 0);
+    }
+
+    // ── counter_window_deltas ────────────────────────────────────────────────
+
+    fn insert_counter_row(
+        conn: &Connection,
+        name: &str,
+        timestamp: i64,
+        value: i64,
+        attributes: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO metrics (
+                name, metric_type, timestamp, value_int, attributes
+            ) VALUES (?1, 1, ?2, ?3, ?4)",
+            rusqlite::params![name, timestamp, value, attributes],
+        )
+        .unwrap();
+    }
+
+    fn label_key(labels: &[Option<String>]) -> String {
+        labels
+            .iter()
+            .map(|l| l.clone().unwrap_or_else(|| String::from("(null)")))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn deltas_by_label(deltas: Vec<CounterWindowDelta>) -> std::collections::HashMap<String, f64> {
+        deltas
+            .into_iter()
+            .map(|d| (label_key(&d.labels), d.delta))
+            .collect()
+    }
+
+    const COUNTER_TEST: &str = "opencode.token.usage";
+    const T0: i64 = 1_700_000_000_000_000_000;
+
+    #[test]
+    fn counter_window_deltas_monotonic_series() {
+        let conn = setup_test_db();
+        // Series A (agent=a): 100 @ T0, 150 @ T0+1, 250 @ T0+2.
+        let a = r#"{"agent":"a","model":"m","type":"input","session.id":"s1"}"#;
+        insert_counter_row(&conn, COUNTER_TEST, T0, 100, a);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 150, a);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 2, 250, a);
+
+        // Window [T0+1, T0+2]: delta = 250 - 100 = 150.
+        let deltas = counter_window_deltas(
+            &conn,
+            COUNTER_TEST,
+            &["$.agent"],
+            Some(T0 + 1),
+            Some(T0 + 2),
+        )
+        .unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(by_label.get("a"), Some(&150.0));
+
+        // Window starting at series start: no baseline -> delta = last value.
+        let deltas =
+            counter_window_deltas(&conn, COUNTER_TEST, &["$.agent"], Some(T0), Some(T0 + 2))
+                .unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(by_label.get("a"), Some(&250.0));
+    }
+
+    #[test]
+    fn counter_window_deltas_duplicate_timestamp_takes_max() {
+        let conn = setup_test_db();
+        // Two flushes at the same tick: the max value at the max timestamp wins.
+        let a = r#"{"agent":"a","model":"m","type":"input","session.id":"s1"}"#;
+        insert_counter_row(&conn, COUNTER_TEST, T0, 300, a);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 400, a);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 500, a);
+
+        let deltas = counter_window_deltas(
+            &conn,
+            COUNTER_TEST,
+            &["$.agent"],
+            Some(T0 + 1),
+            Some(T0 + 1),
+        )
+        .unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(
+            by_label.get("a"),
+            Some(&200.0),
+            "duplicate-timestamp max (500) minus baseline (300)"
+        );
+    }
+
+    #[test]
+    fn counter_window_deltas_reset_restarts_from_zero() {
+        let conn = setup_test_db();
+        let a = r#"{"agent":"a","model":"m","type":"input","session.id":"s1"}"#;
+        insert_counter_row(&conn, COUNTER_TEST, T0, 900, a);
+        // Counter reset (app restart): value drops below baseline.
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 50, a);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 2, 120, a);
+
+        let deltas = counter_window_deltas(
+            &conn,
+            COUNTER_TEST,
+            &["$.agent"],
+            Some(T0 + 1),
+            Some(T0 + 2),
+        )
+        .unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(
+            by_label.get("a"),
+            Some(&120.0),
+            "reset -> delta is in-window last value"
+        );
+    }
+
+    #[test]
+    fn counter_window_deltas_new_series_in_window() {
+        let conn = setup_test_db();
+        // Series b only exists inside the window -> no baseline, delta = last.
+        let b = r#"{"agent":"b","model":"m","type":"input","session.id":"s2"}"#;
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 70, b);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 2, 200, b);
+
+        let deltas = counter_window_deltas(
+            &conn,
+            COUNTER_TEST,
+            &["$.agent"],
+            Some(T0 + 1),
+            Some(T0 + 2),
+        )
+        .unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(by_label.get("b"), Some(&200.0));
+    }
+
+    #[test]
+    fn counter_window_deltas_no_start_returns_last_value() {
+        let conn = setup_test_db();
+        let a = r#"{"agent":"a","model":"m","type":"input","session.id":"s1"}"#;
+        insert_counter_row(&conn, COUNTER_TEST, T0, 100, a);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 300, a);
+
+        // No start bound: whole-history delta = last value seen at or before end.
+        let deltas =
+            counter_window_deltas(&conn, COUNTER_TEST, &["$.agent"], None, Some(T0 + 1)).unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(by_label.get("a"), Some(&300.0));
+
+        // End bound excludes later rows.
+        let deltas =
+            counter_window_deltas(&conn, COUNTER_TEST, &["$.agent"], None, Some(T0)).unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(by_label.get("a"), Some(&100.0));
+    }
+
+    #[test]
+    fn counter_window_deltas_zero_delta_series_dropped() {
+        let conn = setup_test_db();
+        // Series c has rows in the window but no progress -> zero delta, dropped.
+        let c = r#"{"agent":"c","model":"m","type":"input","session.id":"s3"}"#;
+        insert_counter_row(&conn, COUNTER_TEST, T0, 500, c);
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 500, c);
+
+        let deltas = counter_window_deltas(
+            &conn,
+            COUNTER_TEST,
+            &["$.agent"],
+            Some(T0 + 1),
+            Some(T0 + 1),
+        )
+        .unwrap();
+        assert!(deltas.is_empty(), "zero-delta series must be dropped");
+    }
+
+    #[test]
+    fn counter_window_deltas_malformed_attributes_do_not_raise() {
+        let conn = setup_test_db();
+        // Corrupt attributes row: the json_valid-gated expressions must yield
+        // NULL (never an error), and the row is still counted by name.
+        insert_counter_row(&conn, COUNTER_TEST, T0, 100, "{not json");
+        insert_counter_row(&conn, COUNTER_TEST, T0 + 1, 200, "{not json");
+
+        let deltas = counter_window_deltas(
+            &conn,
+            COUNTER_TEST,
+            &["$.agent"],
+            Some(T0 + 1),
+            Some(T0 + 1),
+        )
+        .unwrap();
+        // Both rows have NULL agent -> one (null) series; baseline 100, last 200.
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(by_label.get("(null)"), Some(&100.0));
     }
 }

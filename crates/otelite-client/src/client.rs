@@ -381,6 +381,21 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    pub async fn fetch_agent_roles(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::AgentRolesResponse> {
+        let url = format!("{}/api/genai/agent_roles", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch agent roles: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_conversation_depth(
         &self,
         params: Vec<(&str, String)>,

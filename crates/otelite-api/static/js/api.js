@@ -208,6 +208,7 @@ class ApiClient {
     async getContextTypeSplit(params = {}) { return this.get('/genai/context_type_split', params); }
     async getToolErrors(params = {})    { return this.get('/genai/tool_errors', params); }
     async getHourOfDay(params = {})     { return this.get('/genai/hour_of_day', params); }
+    async getAgentRoles(params = {})    { return this.get('/genai/agent_roles', params); }
 
     /**
      * Fetch session diagnose report

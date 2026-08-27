@@ -8,11 +8,12 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::api::{
-    CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow, ConversationDepthStats,
-    CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount,
-    GenAiCapabilityResponse, LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair,
-    ModelUsage, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, SystemUsage,
-    TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    AgentRolesResponse, CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow,
+    ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown,
+    FinishReasonCount, GenAiCapabilityResponse, LatencyByContextBin, LatencySeriesPoint,
+    LatencyStats, ModelDriftPair, ModelUsage, RequestParamProfile, RetrievalStats, RetryStats,
+    SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -297,6 +298,14 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<CacheHitRateByModel>>;
+
+    /// Sub-agent role attribution (cost and tokens per opencode `agent`
+    /// label) over the time window.
+    async fn query_agent_roles(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<AgentRolesResponse>;
 
     /// Distribution of request parameter settings (temperature, max_tokens).
     async fn query_request_param_profile(

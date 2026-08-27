@@ -11,6 +11,16 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **See which sub-agent drove your spend.** The new *Agent Roles* section on
+  the GenAI Analytics page (and `otelite usage --agent-roles`) breaks tokens
+  and estimated cost down by opencode's `agent` label — orchestrator vs
+  reviewer vs executor and friends — with per-role session counts, cache
+  read/write and reasoning split, token share, and the top models each role
+  used. Cost is estimated from tokens × the pricing table (opencode's own
+  cost counter arrives zero-valued); local or unpriced models show "—".
+
 ## [0.1.67] - 2026-08-27
 
 ### Fixed

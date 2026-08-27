@@ -301,6 +301,38 @@ pub fn retrieval_span_guard(attributes_col: &str) -> String {
     )
 }
 
+// ── Agent-emitted metric names and label paths ───────────────────────────────
+// Metric names as emitted by the agent OTel SDKs (external instruments, not
+// otelite's own). Label paths are JSON paths into the metrics `attributes`
+// column.
+
+/// Metric names emitted by the opencode agent.
+pub mod metric_names {
+    /// Cumulative per-(session, model, type, project) token counter.
+    pub const OPENCODE_TOKEN_USAGE: &str = "opencode.token.usage";
+    /// Per-(session, model, provider, agent, project) usage marker.
+    pub const OPENCODE_MODEL_USAGE: &str = "opencode.model.usage";
+}
+
+/// Attribute label paths for agent metrics.
+pub mod metric_labels {
+    /// Sub-agent role (opencode `agent` label, e.g. "orchestrator").
+    pub const AGENT: &str = "$.agent";
+    pub const MODEL: &str = "$.model";
+    /// Token category (see [`opencode_token_types`]).
+    pub const TYPE: &str = "$.type";
+    pub const SESSION_ID: &str = "$.\"session.id\"";
+}
+
+/// `type` label values on `opencode.token.usage`.
+pub mod opencode_token_types {
+    pub const INPUT: &str = "input";
+    pub const OUTPUT: &str = "output";
+    pub const REASONING: &str = "reasoning";
+    pub const CACHE_READ: &str = "cacheRead";
+    pub const CACHE_WRITE: &str = "cacheCreation";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

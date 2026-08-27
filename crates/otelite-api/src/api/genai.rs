@@ -7,12 +7,12 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    CacheHitRateByModel, CallsSeriesPoint, ContextTypeSplit, ConversationCostRow,
-    ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown,
-    FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket, LatencyByContextBin,
-    LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile, RetrievalStats,
-    RetryStats, SessionCostRow, StopReasonCount, TokenUsageResponse, ToolApprovalStats,
-    ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    AgentRolesResponse, CacheHitRateByModel, CallsSeriesPoint, ContextTypeSplit,
+    ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse,
+    ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket,
+    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile,
+    RetrievalStats, RetryStats, SessionCostRow, StopReasonCount, TokenUsageResponse,
+    ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -813,6 +813,69 @@ pub async fn get_cache_hit_rate(
             )
         })?;
     Ok(Json(rows))
+}
+
+/// Sub-agent role attribution: cost and tokens per opencode `agent` label.
+#[utoipa::path(
+    get,
+    path = "/api/genai/agent_roles",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Cost and token attribution per sub-agent role", body = AgentRolesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_agent_roles(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<AgentRolesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut response = state
+        .storage
+        .query_agent_roles(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query agent roles: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    // Enrich per-model cost from the pricing table. opencode's own cost
+    // counter is zero-valued in the wire data, so tokens x price is the only
+    // source. Reasoning tokens are not priced (no separate rate in the
+    // pricing table); role.cost covers the top-5 models and is None when any
+    // of them lacks pricing (e.g. local models).
+    let pricing = state.pricing.snapshot().await;
+    for role in &mut response.roles {
+        let mut total: f64 = 0.0;
+        let mut all_priced = true;
+        for m in &mut role.top_models {
+            let usage = TokenUsage {
+                input: m.tokens.input,
+                output: m.tokens.output,
+                cache_creation: m.tokens.cache_write,
+                cache_read: m.tokens.cache_read,
+            };
+            let result = pricing.db.compute_cost(Some(m.model.as_str()), usage, None);
+            m.cost = result.cost;
+            m.cost_source = Some(result.source.as_str().to_string());
+            m.cost_reason = result.reason;
+            match result.cost {
+                Some(c) => total += c,
+                None => all_priced = false,
+            }
+        }
+        role.cost = if all_priced && !role.top_models.is_empty() {
+            Some(total)
+        } else {
+            None
+        };
+    }
+    Ok(Json(response))
 }
 
 /// Distribution of request parameter settings (temperature, max_tokens).

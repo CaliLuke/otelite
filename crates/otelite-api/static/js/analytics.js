@@ -83,6 +83,7 @@ class AnalyticsView {
             <div id="analytics-empty-state"></div>
             <div id="analytics-sections">
                 ${this._renderSectionShell('cost', 'Cost', 'Tokens spent · pricing · most expensive calls')}
+                ${this._renderSectionShell('roles', 'Agent Roles', 'Sub-agent attribution · cost & tokens per role (opencode)')}
                 ${this._renderSectionShell('latency', 'Latency', 'Response time · throughput · context size')}
                 ${this._renderSectionShell('reliability', 'Reliability', 'Errors · retries · truncation · drift')}
                 ${this._renderSectionShell('behavior', 'Behavior', 'Tool use · retrieval · request volume')}
@@ -433,6 +434,7 @@ class AnalyticsView {
     _registerSectionLoaders() {
         this.sectionLoaders = {
             cost: () => this._loadCostSection(),
+            roles: () => this._loadRolesSection(),
             latency: () => this._loadLatencySection(),
             reliability: () => this._loadReliabilitySection(),
             behavior: () => this._loadBehaviorSection(),
@@ -772,6 +774,27 @@ class AnalyticsView {
             this.loadedSections.add('behavior');
         } catch (err) {
             this._setSectionError('behavior', err);
+        }
+    }
+
+    async _loadRolesSection() {
+        this._setSectionLoading('roles');
+        try {
+            const params = this._baseParams();
+            const response = await this.api.getAgentRoles(params);
+            const roles = (response && response.roles) || [];
+            const html = this._buildAgentRoles(response);
+            this._setSectionBody('roles', html ||
+                '<div class="empty-state-hint">No agent-role data in this window (opencode only).</div>');
+            const statEl = document.getElementById('analytics-section-stat-roles');
+            if (statEl) {
+                statEl.textContent = roles.length
+                    ? `${roles.length} role${roles.length === 1 ? '' : 's'}`
+                    : '—';
+            }
+            this.loadedSections.add('roles');
+        } catch (err) {
+            this._setSectionError('roles', err);
         }
     }
 
@@ -1852,6 +1875,54 @@ class AnalyticsView {
             <table class="data-table">
                 <thead><tr>
                     <th>Context</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th><th>Avg latency</th>
+                </tr></thead>
+                <tbody>${tableRows}</tbody>
+            </table>`;
+    }
+
+    _buildAgentRoles(response) {
+        const roles = (response && response.roles) || [];
+        if (!roles.length) return '';
+        const fmt = n => Number(n || 0).toLocaleString();
+        const tokenTotal = t => (t ? (t.input || 0) + (t.output || 0) + (t.cache_read || 0)
+            + (t.cache_write || 0) + (t.reasoning || 0) : 0);
+        const fmtCost = c => c != null ? `$${Number(c).toFixed(4)}` : '—';
+
+        const tableRows = roles.map(r => {
+            const t = r.tokens || {};
+            const top = (r.top_models || [])
+                .map(m => `${this._esc(m.model)} (${fmt(tokenTotal(m.tokens))})`)
+                .join('<br>');
+            return `
+                <tr>
+                    <td>${this._esc(r.role)}</td>
+                    <td class="num">${fmt(r.sessions)}</td>
+                    <td class="num">${fmt(tokenTotal(t))}</td>
+                    <td class="num">${fmt(t.input)} / ${fmt(t.output)}</td>
+                    <td class="num">${fmt(t.cache_read)} / ${fmt(t.cache_write)}</td>
+                    <td class="num">${fmt(t.reasoning)}</td>
+                    <td class="num">${r.share_pct != null ? r.share_pct.toFixed(1) + '%' : '—'}</td>
+                    <td class="num">${fmtCost(r.cost)}</td>
+                    <td class="small">${top || '—'}</td>
+                </tr>`;
+        }).join('');
+
+        const unknownNote = response.unknown_share_pct != null
+            ? `<p class="table-hint">⚠ ${response.unknown_share_pct.toFixed(1)}% of tokens have no
+              <code>agent</code> label (attribution gap).</p>` : '';
+
+        return `
+            <h3>Sub-agent role attribution</h3>
+            <p class="table-hint">Grouped by the opencode <code>agent</code> label — which sub-agent
+            (orchestrator, reviewer, executor, …) drove the spend. Cost is estimated from
+            tokens × pricing; local/unpriced models show <em>—</em>. Claude Code and Codex do
+            not emit a role label yet.</p>
+            ${unknownNote}
+            <table class="data-table">
+                <thead><tr>
+                    <th>Role</th><th>Sessions</th><th>Tokens</th><th>In / Out</th>
+                    <th>Cache r / w</th><th>Reasoning</th><th>Share</th><th>Cost (est.)</th>
+                    <th>Top models</th>
                 </tr></thead>
                 <tbody>${tableRows}</tbody>
             </table>`;

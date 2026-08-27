@@ -832,6 +832,74 @@ pub struct CacheHitRateByModel {
     pub hit_rate: Option<f64>,
 }
 
+/// Token usage split for one sub-agent role.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RoleTokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub reasoning: u64,
+}
+
+impl RoleTokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write + self.reasoning
+    }
+}
+
+/// Per-model token breakdown for one sub-agent role. Cost is enriched by the
+/// API layer from the pricing table; `cost` is `None` when the model has no
+/// known pricing (e.g. local models).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RoleModelBreakdown {
+    pub model: String,
+    pub tokens: RoleTokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_reason: Option<String>,
+}
+
+/// Cost and token attribution for one sub-agent role (the opencode `agent`
+/// label). `share_pct` is the role's share of total tokens across all roles
+/// (cost-based shares would be misleading while local models carry no price).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AgentRoleBreakdown {
+    /// Role name; missing `agent` labels are reported as "unknown".
+    pub role: String,
+    pub tokens: RoleTokenUsage,
+    /// Distinct sessions that used this role in the window.
+    pub sessions: u64,
+    /// Sum of per-model costs; `None` when no model in the role has pricing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_pct: Option<f64>,
+    /// Top 5 models by total tokens.
+    pub top_models: Vec<RoleModelBreakdown>,
+}
+
+/// Response for `GET /api/genai/agent_roles`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AgentRolesResponse {
+    /// Roles sorted by total tokens descending.
+    pub roles: Vec<AgentRoleBreakdown>,
+    /// Share of all tokens attributed to the "unknown" role (`None` when no
+    /// rows have an `agent` label at all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_share_pct: Option<f64>,
+    /// Agents whose telemetry this analysis covers. Claude Code and Codex do
+    /// not emit a role label today, so this is currently `["opencode"]`.
+    pub agents_covered: Vec<String>,
+}
+
 /// Distribution of `gen_ai.request.temperature` values across LLM calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
