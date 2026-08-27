@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.65] - 2026-08-27
+
 ### Added
 
 - **Overview and analytics pages load in seconds instead of 30+ seconds.**
