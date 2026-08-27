@@ -12,8 +12,8 @@ use crate::api::{
     ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel,
     ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, LatencyByContextBin,
     LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage, ProviderMixResponse,
-    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, SystemUsage,
-    TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
+    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -309,6 +309,17 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         bucket_ns: i64,
     ) -> Result<CacheEconomicsResponse>;
+
+    /// Reasoning-token share per model plus a global per-effort breakdown,
+    /// combining opencode `token.usage` counters (types `reasoning`/`output`)
+    /// and codex `turn.token_usage` histograms. Claude Code is absent: its
+    /// spans carry no thinking-token attributes. `cost_usd` is left
+    /// unenriched (None) for the API layer.
+    async fn query_reasoning_share(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<ReasoningShareResponse>;
 
     /// Sub-agent role attribution (cost and tokens per opencode `agent`
     /// label) over the time window.

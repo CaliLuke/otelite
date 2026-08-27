@@ -429,6 +429,21 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    pub async fn fetch_reasoning_share(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::ReasoningShareResponse> {
+        let url = format!("{}/api/genai/reasoning_share", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch reasoning share: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_conversation_depth(
         &self,
         params: Vec<(&str, String)>,

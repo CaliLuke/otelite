@@ -6,6 +6,7 @@ pub mod import;
 pub mod logs;
 pub mod metrics;
 pub mod providers;
+pub mod reasoning;
 pub mod service;
 pub mod traces;
 pub mod usage;

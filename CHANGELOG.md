@@ -11,6 +11,17 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Reasoning ("thinking") token share by model and effort.** See how much
+  of each model's output was thinking, and what that thinking costs —
+  `otelite reasoning --since 7d` (or `--format json`), the new
+  `GET /api/genai/reasoning_share` endpoint, and a "Reasoning share by
+  model" section on the web UI's Cost tab (per-model share bars with a
+  per-effort breakdown for codex). Reasoning tokens are billed at each
+  model's output rate, so unpriced models show no cost rather than a
+  guessed one.
+
 ## [0.1.72] - 2026-08-27
 
 ### Fixed

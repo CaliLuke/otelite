@@ -2745,6 +2745,169 @@ pub(crate) fn counter_window_deltas(
 /// `hit_rate` is `cache_read / (cache_read + input)` everywhere (same
 /// definition as `query_cache_hit_rate`). Savings are enriched by the API
 /// layer.
+/// One opencode `token.usage` counter row: its full stable label set
+/// (agent, model, type, session.id — the counter's series key), its
+/// timestamp, and its value.
+type OpencodeCounterRow = (Vec<Option<String>>, i64, i64);
+
+/// Fetch all opencode `token.usage` rows in the time window, in timestamp
+/// order (the `(name, timestamp)` index range).
+fn opencode_usage_rows(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<OpencodeCounterRow>> {
+    use otelite_core::semconv::metric_labels as lbl;
+    use otelite_core::semconv::metric_names as mnames;
+
+    let label_paths = [lbl::AGENT, lbl::MODEL, lbl::TYPE, lbl::SESSION_ID];
+    let label_exprs: Vec<String> = label_paths
+        .iter()
+        .map(|p| {
+            format!("CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{p}') END")
+        })
+        .collect();
+
+    let mut where_clause = String::from("WHERE name = ?1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(mnames::OPENCODE_TOKEN_USAGE.to_string())];
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND timestamp >= ?2");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT {}, timestamp, \
+         COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics {}",
+        label_exprs.join(", "),
+        where_clause
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare opencode usage query: {e}"))
+    })?;
+    let mapped = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let labels = (0..label_paths.len())
+                .map(|i| row.get::<_, Option<String>>(i))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let ts = row.get::<_, i64>(label_paths.len())?;
+            let value = row
+                .get::<_, Option<i64>>(label_paths.len() + 1)?
+                .unwrap_or(0);
+            Ok((labels, ts, value))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute opencode usage query: {e}"))
+        })?;
+    mapped
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse opencode usage results: {e}"))
+        })
+}
+
+/// Per-series baseline: last value strictly before the window start, for
+/// every series present in `rows`. Uses the covering-index pattern from
+/// `counter_window_deltas` — the predicate must use the index's expression
+/// columns verbatim.
+fn opencode_usage_baselines(
+    conn: &Connection,
+    rows: &[OpencodeCounterRow],
+    start_time: Option<i64>,
+) -> Result<HashMap<Vec<Option<String>>, i64>> {
+    use otelite_core::semconv::metric_labels as lbl;
+    use otelite_core::semconv::metric_names as mnames;
+
+    let mut baselines: HashMap<Vec<Option<String>>, i64> = HashMap::new();
+    let Some(start) = start_time else {
+        return Ok(baselines);
+    };
+    let label_paths = [lbl::AGENT, lbl::MODEL, lbl::TYPE, lbl::SESSION_ID];
+    let label_exprs: Vec<String> = label_paths
+        .iter()
+        .map(|p| {
+            format!("CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{p}') END")
+        })
+        .collect();
+    let mut predicate = String::new();
+    for (i, expr) in label_exprs.iter().enumerate() {
+        predicate.push_str(&format!(" AND {expr} IS ?{}", 3 + i));
+    }
+    let baseline_sql = format!(
+        "SELECT COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics \
+         WHERE name = ?1 AND timestamp < ?2{predicate} \
+         ORDER BY timestamp DESC, \
+           COALESCE(value_int, CAST(value_double AS INTEGER)) DESC \
+         LIMIT 1"
+    );
+    let known_series: Vec<Vec<Option<String>>> = rows.iter().map(|(l, _, _)| l.clone()).collect();
+    let mut seen: std::collections::HashSet<Vec<Option<String>>> = std::collections::HashSet::new();
+    let mut baseline_stmt = conn.prepare(&baseline_sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare opencode baseline query: {e}"))
+    })?;
+    for labels in known_series.into_iter().filter(|l| seen.insert(l.clone())) {
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(mnames::OPENCODE_TOKEN_USAGE.to_string()),
+            Box::new(start),
+        ];
+        binds.extend(
+            labels
+                .iter()
+                .map(|l| Box::new(l.clone()) as Box<dyn rusqlite::ToSql>),
+        );
+        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        match baseline_stmt.query_row(refs.as_slice(), |row| row.get::<_, Option<i64>>(0)) {
+            Ok(Some(v)) => {
+                baselines.insert(labels, v);
+            },
+            Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => {},
+            Err(e) => {
+                return Err(StorageError::QueryError(format!(
+                    "Failed to execute opencode baseline query: {e}"
+                )))
+            },
+        }
+    }
+    Ok(baselines)
+}
+
+/// Clamp each counter row's delta to its series' running value: a value
+/// below the previous one means the counter restarted, so that row's full
+/// value counts. An equal value is NOT a reset — it counts as zero (flat
+/// counters, e.g. opencode re-flushing resumed-session state, must not
+/// contribute their own value on every equal row).
+fn opencode_counter_deltas(
+    rows: Vec<OpencodeCounterRow>,
+    baselines: &HashMap<Vec<Option<String>>, i64>,
+) -> Vec<OpencodeCounterRow> {
+    let mut last_by_series: HashMap<Vec<Option<String>>, i64> = HashMap::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for (labels, ts, value) in rows {
+        let delta = match last_by_series.get(&labels) {
+            None => {
+                // First in-window row of this series.
+                match baselines.get(&labels) {
+                    Some(base) if value < *base => value, // reset: counts from zero
+                    Some(base) => value - base,
+                    None => value, // series did not exist before the window
+                }
+            },
+            Some(prev) if value < *prev => value, // in-window reset
+            Some(prev) => value - prev,
+        };
+        last_by_series.insert(labels.clone(), value);
+        if delta > 0 {
+            out.push((labels, ts, delta));
+        }
+    }
+    out
+}
+
 pub fn query_cache_economics(
     conn: &Connection,
     start_time: Option<i64>,
@@ -2790,135 +2953,12 @@ pub fn query_cache_economics(
             acc.cache_write += cw;
         };
     // ── opencode: cumulative counter, window fetch + per-series baseline ──
-    let label_paths = [lbl::AGENT, lbl::MODEL, lbl::TYPE, lbl::SESSION_ID];
-    let label_exprs: Vec<String> = label_paths
-        .iter()
-        .map(|p| {
-            format!("CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{p}') END")
-        })
-        .collect();
-
-    let mut where_clause = String::from("WHERE name = ?1");
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-        vec![Box::new(mnames::OPENCODE_TOKEN_USAGE.to_string())];
-    if let Some(start) = start_time {
-        where_clause.push_str(" AND timestamp >= ?2");
-        params.push(Box::new(start));
-    }
-    if let Some(end) = end_time {
-        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
-        params.push(Box::new(end));
-    }
-
-    let sql = format!(
-        "SELECT {}, timestamp, \
-         COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics {}",
-        label_exprs.join(", "),
-        where_clause
-    );
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql).map_err(|e| {
-        StorageError::QueryError(format!(
-            "Failed to prepare cache economics opencode query: {e}"
-        ))
-    })?;
-    let rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            let labels = (0..label_paths.len())
-                .map(|i| row.get::<_, Option<String>>(i))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let ts = row.get::<_, i64>(label_paths.len())?;
-            let value = row
-                .get::<_, Option<i64>>(label_paths.len() + 1)?
-                .unwrap_or(0);
-            Ok((labels, ts, value))
-        })
-        .map_err(|e| {
-            StorageError::QueryError(format!(
-                "Failed to execute cache economics opencode query: {e}"
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| {
-            StorageError::QueryError(format!(
-                "Failed to parse cache economics opencode results: {e}"
-            ))
-        })?;
-
-    // Per-series baseline: last value strictly before the window start
-    // (same covering-index pattern as counter_window_deltas — the predicate
-    // must use the index's expression columns verbatim).
-    let mut baselines: HashMap<Vec<Option<String>>, i64> = HashMap::new();
-    if let Some(start) = start_time {
-        let mut predicate = String::new();
-        for (i, expr) in label_exprs.iter().enumerate() {
-            predicate.push_str(&format!(" AND {expr} IS ?{}", 3 + i));
-        }
-        let baseline_sql = format!(
-            "SELECT COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics \
-             WHERE name = ?1 AND timestamp < ?2{predicate} \
-             ORDER BY timestamp DESC, \
-               COALESCE(value_int, CAST(value_double AS INTEGER)) DESC \
-             LIMIT 1"
-        );
-        let known_series: Vec<Vec<Option<String>>> =
-            rows.iter().map(|(l, _, _)| l.clone()).collect();
-        let mut seen: std::collections::HashSet<Vec<Option<String>>> =
-            std::collections::HashSet::new();
-        let mut baseline_stmt = conn.prepare(&baseline_sql).map_err(|e| {
-            StorageError::QueryError(format!(
-                "Failed to prepare cache economics baseline query: {e}"
-            ))
-        })?;
-        for labels in known_series.into_iter().filter(|l| seen.insert(l.clone())) {
-            let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                Box::new(mnames::OPENCODE_TOKEN_USAGE.to_string()),
-                Box::new(start),
-            ];
-            binds.extend(
-                labels
-                    .iter()
-                    .map(|l| Box::new(l.clone()) as Box<dyn rusqlite::ToSql>),
-            );
-            let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
-            match baseline_stmt.query_row(refs.as_slice(), |row| row.get::<_, Option<i64>>(0)) {
-                Ok(Some(v)) => {
-                    baselines.insert(labels, v);
-                },
-                Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => {},
-                Err(e) => {
-                    return Err(StorageError::QueryError(format!(
-                        "Failed to execute cache economics baseline query: {e}"
-                    )))
-                },
-            }
-        }
-    }
-
-    // Per-row pass in timestamp order: clamp each row's delta to the series'
-    // running total (a value below the previous one means the counter
-    // restarted, so that row's full value counts).
     {
-        let mut last_by_series: HashMap<Vec<Option<String>>, i64> = HashMap::new();
-        for (labels, ts, value) in rows {
+        let rows = opencode_usage_rows(conn, start_time, end_time)?;
+        let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
+        for (labels, ts, delta) in opencode_counter_deltas(rows, &baselines) {
             let model = labels.get(1).and_then(|m| m.clone());
             let kind = labels.get(2).and_then(|k| k.clone());
-            let delta = match last_by_series.get(&labels) {
-                None => {
-                    // First in-window row of this series.
-                    match baselines.get(&labels) {
-                        Some(base) if value < *base => value, // reset: counts from zero
-                        Some(base) => value - base,
-                        None => value, // series did not exist before the window
-                    }
-                },
-                Some(prev) if value < *prev => value, // in-window reset
-                Some(prev) => value - prev,
-            };
-            last_by_series.insert(labels.clone(), value);
-            if delta == 0 {
-                continue;
-            }
             let d = delta as u64;
             match kind.as_deref() {
                 Some(k) if k == otypes::INPUT => {
@@ -3133,6 +3173,216 @@ pub fn query_cache_economics(
     })
 }
 
+/// Reasoning-token share per model plus a global per-effort breakdown
+/// (issue #131).
+///
+/// Sources (one per harness, no double counting):
+/// - opencode `token.usage` cumulative counters, types `reasoning` and
+///   `output` — windowed per-row clamped deltas (reset-safe; a flat counter
+///   contributes zero, see `opencode_counter_deltas`);
+/// - codex `turn.token_usage` per-turn histograms, token types
+///   `reasoning_output` and `output` (the `total` category is the sum of the
+///   parts and is never counted);
+/// - claude_code is deliberately **absent**: its `llm_request` spans carry
+///   no thinking-token attributes (verified on the live DB), so nothing
+///   would be real to report rather than fabricate.
+///
+/// `cost_usd` is left `None` for the API layer, which prices the reasoning
+/// tokens at the model's output rate.
+pub fn query_reasoning_share(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<otelite_core::api::ReasoningShareResponse> {
+    use otelite_core::semconv::codex_token_types as ctt;
+    use otelite_core::semconv::metric_labels as lbl;
+    use otelite_core::semconv::metric_names as mnames;
+    use otelite_core::semconv::opencode_token_types as otypes;
+    use otelite_core::semconv::{
+        CODEX_HANDLE_RESPONSES_SPAN_NAME, CODEX_REASONING_EFFORT_KEY,
+        CODEX_REASONING_OUTPUT_TOKENS_KEY,
+    };
+
+    const UNKNOWN_MODEL: &str = "(unknown)";
+    #[derive(Default)]
+    struct ReasonAcc {
+        reasoning: u64,
+        output: u64,
+    }
+    let mut models: HashMap<String, ReasonAcc> = HashMap::new();
+
+    // ── opencode: cumulative counters, types reasoning + output ──
+    {
+        let rows = opencode_usage_rows(conn, start_time, end_time)?;
+        let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
+        for (labels, _ts, delta) in opencode_counter_deltas(rows, &baselines) {
+            let model = labels.get(1).and_then(|m| m.clone());
+            let kind = labels.get(2).and_then(|k| k.clone());
+            let acc = models
+                .entry(model.unwrap_or_else(|| UNKNOWN_MODEL.to_string()))
+                .or_default();
+            match kind.as_deref() {
+                Some(k) if k == otypes::REASONING => acc.reasoning += delta as u64,
+                Some(k) if k == otypes::OUTPUT => acc.output += delta as u64,
+                _ => {},
+            }
+        }
+    }
+
+    // ── codex: per-turn histogram sums, reasoning_output + output ──
+    {
+        let model_expr = format!(
+            "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END",
+            lbl::MODEL
+        );
+        let type_expr = format!(
+            "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END",
+            lbl::TOKEN_TYPE
+        );
+        let mut where_clause = format!(
+            "WHERE name = ?1 AND json_valid(attributes) \
+             AND {model_expr} IS NOT NULL AND {type_expr} IS NOT NULL"
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(mnames::CODEX_TURN_TOKEN_USAGE.to_string())];
+        if let Some(start) = start_time {
+            where_clause.push_str(&format!(" AND timestamp >= ?{}", params.len() + 1));
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+            params.push(Box::new(end));
+        }
+        let sql = format!(
+            "SELECT {model_expr} AS model, {type_expr} AS token_type, \
+             SUM(CASE WHEN json_valid(value_histogram) \
+                  THEN json_extract(value_histogram, '$[1]') ELSE 0 END) AS sum_tokens \
+             FROM metrics {where_clause} GROUP BY model, token_type"
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to prepare reasoning share codex query: {e}"
+            ))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to execute reasoning share codex query: {e}"
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to parse reasoning share codex results: {e}"
+                ))
+            })?;
+        for (model, token_type, sum) in rows {
+            let tokens = sum.round().max(0.0) as u64;
+            if tokens == 0 {
+                continue;
+            }
+            let acc = models
+                .entry(model.as_deref().unwrap_or(UNKNOWN_MODEL).to_string())
+                .or_default();
+            match token_type.as_str() {
+                t if t == ctt::REASONING => acc.reasoning += tokens,
+                t if t == ctt::OUTPUT => acc.output += tokens,
+                _ => continue, // input/cached_input/cache_write_input/total
+            }
+        }
+    }
+
+    // ── codex effort breakdown: handle_responses spans (no model attr) ──
+    let effort_expr = format!(
+        "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"{key}\"') END",
+        key = CODEX_REASONING_EFFORT_KEY
+    );
+    let rtok_expr = format!(
+        "CASE WHEN json_valid(attributes) THEN CAST(json_extract(attributes, '$.\"{key}\"') AS INTEGER) END",
+        key = CODEX_REASONING_OUTPUT_TOKENS_KEY
+    );
+    let mut where_clause = format!(
+        "WHERE name = '{name}' AND json_valid(attributes) AND {effort_expr} IS NOT NULL",
+        name = CODEX_HANDLE_RESPONSES_SPAN_NAME
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(start) = start_time {
+        where_clause.push_str(&format!(" AND start_time >= ?{}", params.len() + 1));
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND end_time <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+    let effort_sql = format!(
+        "SELECT {effort_expr} AS effort, COUNT(*) AS calls, \
+         COALESCE(SUM({rtok_expr}), 0) AS reasoning_tokens \
+         FROM spans {where_clause} GROUP BY effort"
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&effort_sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare reasoning effort query: {e}"))
+    })?;
+    let effort_rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute reasoning effort query: {e}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse reasoning effort results: {e}"))
+        })?;
+    let mut effort: Vec<otelite_core::api::ReasoningEffortEntry> = effort_rows
+        .into_iter()
+        .map(
+            |(effort, calls, tokens)| otelite_core::api::ReasoningEffortEntry {
+                effort,
+                calls: calls.max(0) as u64,
+                reasoning_tokens: tokens.max(0) as u64,
+            },
+        )
+        .collect();
+    effort.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.effort.cmp(&b.effort)));
+
+    let mut model_entries: Vec<otelite_core::api::ReasoningShareByModel> = models
+        .into_iter()
+        .map(|(model, acc)| {
+            let share_pct = reasoning_share_pct(acc.reasoning, acc.output);
+            otelite_core::api::ReasoningShareByModel {
+                model,
+                reasoning_tokens: acc.reasoning,
+                output_tokens: acc.output,
+                share_pct,
+                cost_usd: None, // enriched by the API layer
+            }
+        })
+        .collect();
+    model_entries.sort_by(|a, b| {
+        b.reasoning_tokens
+            .cmp(&a.reasoning_tokens)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+
+    Ok(otelite_core::api::ReasoningShareResponse {
+        models: model_entries,
+        effort,
+    })
+}
+
 /// Cache hit rate: `cache_read / (cache_read + input)`, `None` when the
 /// denominator is 0 (no prompt tokens at all in the window).
 fn cache_hit_rate(cache_read: u64, input: u64) -> Option<f64> {
@@ -3141,6 +3391,16 @@ fn cache_hit_rate(cache_read: u64, input: u64) -> Option<f64> {
         None
     } else {
         Some(cache_read as f64 / denom as f64)
+    }
+}
+
+/// Reasoning share of output tokens, in percent: `reasoning / output × 100`,
+/// `None` when there were no output tokens (the share is undefined, not 0).
+fn reasoning_share_pct(reasoning: u64, output: u64) -> Option<f64> {
+    if output == 0 {
+        None
+    } else {
+        Some(reasoning as f64 / output as f64 * 100.0)
     }
 }
 
@@ -6172,5 +6432,27 @@ mod tests {
     #[test]
     fn cache_read_write_ratio_no_writes_is_none() {
         assert_eq!(cache_read_write_ratio(100, 0), None);
+    }
+
+    #[test]
+    fn reasoning_share_pct_definition() {
+        // 1000 of 4000 output tokens were thinking
+        assert_eq!(reasoning_share_pct(1000, 4000), Some(25.0));
+    }
+
+    #[test]
+    fn reasoning_share_pct_no_output_is_none() {
+        assert_eq!(reasoning_share_pct(1000, 0), None);
+        assert_eq!(reasoning_share_pct(0, 0), None);
+    }
+
+    #[test]
+    fn reasoning_share_pct_all_reasoning() {
+        assert_eq!(reasoning_share_pct(500, 500), Some(100.0));
+    }
+
+    #[test]
+    fn reasoning_share_pct_no_reasoning_is_zero() {
+        assert_eq!(reasoning_share_pct(0, 500), Some(0.0));
     }
 }

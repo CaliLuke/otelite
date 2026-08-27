@@ -108,6 +108,22 @@ pub const VENDOR_SPAN_NAME_PREFIXES: &[&str] = &[LLM_REQUEST_SPAN_NAME];
 pub const CODEX_LLM_REQUEST_SPAN_NAME: &str = "run_sampling_request";
 pub const CODEX_OTEL_SCOPE_NAME: &str = "codex_cli_rs";
 
+/// Codex CLI's span for one sampling-request response handling pass.
+///
+/// Carries `codex.request.reasoning_effort` and (on a subset of spans)
+/// `codex.usage.reasoning_output_tokens`, but **no model attribute** — codex
+/// does not attach the model to its spans (verified on the live DB 2026-08-27:
+/// 0 of ~1M spans carry a model), so effort cannot be attributed per model.
+pub const CODEX_HANDLE_RESPONSES_SPAN_NAME: &str = "handle_responses";
+
+/// Codex attribute carrying the reasoning effort of a sampling request
+/// (values observed: low, medium, high, xhigh).
+pub const CODEX_REASONING_EFFORT_KEY: &str = "codex.request.reasoning_effort";
+
+/// Codex attribute carrying reasoning-output tokens for one sampling request
+/// (string-valued, present on a subset of spans).
+pub const CODEX_REASONING_OUTPUT_TOKENS_KEY: &str = "codex.usage.reasoning_output_tokens";
+
 /// Attribute carrying the agent session identifier (Claude Code `session.id`).
 pub const SESSION_ID_KEY: &str = "session.id";
 

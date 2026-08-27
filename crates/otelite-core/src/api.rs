@@ -883,6 +883,53 @@ pub struct CacheEconomicsResponse {
     pub models: Vec<CacheEconModelEntry>,
 }
 
+/// Reasoning ("thinking") token share for one model.
+///
+/// `share_pct` is `reasoning_tokens / output_tokens × 100` — `None` when the
+/// model produced no output tokens in the window. Reasoning tokens are a
+/// separate token category from output in both opencode and codex telemetry,
+/// so the share is "how much of what the model answered was thinking".
+/// `cost_usd` (enriched by the API layer) prices the reasoning tokens at the
+/// model's output rate — that is what thinking actually costs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReasoningShareByModel {
+    pub model: String,
+    pub reasoning_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// Reasoning tokens per codex reasoning-effort level.
+///
+/// Codex's `handle_responses` spans carry the effort but no model, so this
+/// breakdown is global, not per model (see `ReasoningShareResponse`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReasoningEffortEntry {
+    pub effort: String,
+    pub reasoning_tokens: u64,
+    pub calls: u64,
+}
+
+/// Response for `GET /api/genai/reasoning_share` — "how much am I paying for
+/// thinking", by model plus a global per-effort breakdown.
+///
+/// Sources: opencode `token.usage` counters (types `reasoning`/`output`) and
+/// codex `turn.token_usage` histograms (`reasoning_output`/`output`). Claude
+/// Code is deliberately absent: its `llm_request` spans carry no
+/// thinking-token attributes (verified on the live DB), so nothing would be
+/// real to report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReasoningShareResponse {
+    pub models: Vec<ReasoningShareByModel>,
+    pub effort: Vec<ReasoningEffortEntry>,
+}
+
 /// Token usage split for one sub-agent role.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

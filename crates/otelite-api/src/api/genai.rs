@@ -10,9 +10,10 @@ use otelite_core::api::{
     AgentRolesResponse, CallsSeriesPoint, ContextTypeSplit, ConversationCostRow,
     ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown,
     FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket, LatencyByContextBin,
-    LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse, RequestParamProfile,
-    RetrievalStats, RetryStats, SessionCostRow, StopReasonCount, TokenUsageResponse,
-    ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse, ReasoningShareResponse,
+    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, StopReasonCount,
+    TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -893,6 +894,53 @@ pub async fn get_cache_hit_rate(
             ))),
         )
     })?))
+}
+
+/// Reasoning ("thinking") token share per model, plus a global
+/// per-effort breakdown. Reasoning tokens are priced at the model's output
+/// rate — that is what thinking costs.
+#[utoipa::path(
+    get,
+    path = "/api/genai/reasoning_share",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Reasoning token share by model and effort", body = ReasoningShareResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_reasoning_share(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<ReasoningShareResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut response = state
+        .storage
+        .query_reasoning_share(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query reasoning share: {e}"
+                ))),
+            )
+        })?;
+
+    // Enrich per-model cost: reasoning tokens billed at the output rate.
+    let pricing = state.pricing.snapshot().await;
+    for m in &mut response.models {
+        let usage = TokenUsage {
+            input: 0,
+            output: m.reasoning_tokens,
+            cache_creation: 0,
+            cache_read: 0,
+        };
+        m.cost_usd = pricing
+            .db
+            .compute_cost(Some(m.model.as_str()), usage, None)
+            .cost;
+    }
+    Ok(Json(response))
 }
 
 /// Sub-agent role attribution: cost and tokens per opencode `agent` label.

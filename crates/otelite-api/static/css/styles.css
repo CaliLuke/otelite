@@ -3281,3 +3281,25 @@ body {
 .ce-swatch.ce-read { background: var(--accent-color, #3b82d4); }
 .ce-swatch.ce-write { background: var(--warning-color, #f59e0b); }
 .pm-savings-unknown { color: var(--muted-color, #8b8b9e); cursor: help; }
+
+/* Reasoning share by model */
+.rs-bar {
+    display: inline-block;
+    width: 90px;
+    height: 8px;
+    background: var(--border-color, #2a2a35);
+    border-radius: 4px;
+    overflow: hidden;
+    vertical-align: middle;
+    margin-right: 8px;
+}
+.rs-bar-fill {
+    height: 100%;
+    background: var(--success-color, #10b981);
+    border-radius: 4px;
+}
+.rs-share {
+    font-size: 0.85rem;
+    color: var(--muted-color, #8b8b9e);
+}
+.rs-effort { margin-top: 10px; max-width: 420px; }

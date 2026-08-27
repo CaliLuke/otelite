@@ -499,12 +499,13 @@ class AnalyticsView {
         try {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
-            const [costSeries, topSpans, cacheHitRate, cacheEconomics,
+            const [costSeries, topSpans, cacheHitRate, cacheEconomics, reasoningShare,
                    retryStats, errorRate, contextTypeSplit] = await Promise.all([
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
                 this.api.getCacheHitRate(params).catch(() => null),
                 this.api.getCacheEconomics({ ...params, bucket_secs: bucket }).catch(() => null),
+                this.api.getReasoningShare(params).catch(() => null),
                 this.api.getRetryStats(params).catch(() => null),
                 this.api.getErrorRate(params).catch(() => []),
                 this.api.getContextTypeSplit(params).catch(() => null),
@@ -534,6 +535,7 @@ class AnalyticsView {
                 this._buildCostChart(costSeries || [], bucket),
                 this._buildTopNSection(topSpans || [], errorRate || []),
                 this._buildCacheEconomics(cacheEconomics, cacheHitRate || [], bucket),
+                this._buildReasoningShare(reasoningShare),
                 this._buildByModelByProvider(summary),
                 this._buildContextTypeSplit(contextTypeSplit || []),
             ].filter(Boolean).join('');
@@ -1726,6 +1728,62 @@ class AnalyticsView {
                 </tr></thead>
                 <tbody>${modelRows}</tbody>
             </table>`;
+    }
+
+    _buildReasoningShare(data) {
+        if (!data) return '';
+        const models = Array.isArray(data.models) ? data.models : [];
+        const effort = Array.isArray(data.effort) ? data.effort : [];
+        if (!models.length) return '';
+        const fmt = n => Number(n).toLocaleString();
+        const fmtUsd = v => v == null ? '—' : `$${Number(v).toFixed(2)}`;
+        const totalReasoning = models.reduce((s, m) => s + (m.reasoning_tokens || 0), 0);
+        const totalOutput = models.reduce((s, m) => s + (m.output_tokens || 0), 0);
+        const totalCost = models.reduce((s, m) => s + (m.cost_usd || 0), 0);
+
+        const modelRows = models.map(m => {
+            const share = m.share_pct == null ? 0 : m.share_pct;
+            return `
+                <tr>
+                    <td>${this._esc(m.model)}</td>
+                    <td>
+                        <div class="rs-bar" title="${fmt(m.reasoning_tokens)} / ${fmt(m.output_tokens)} tokens">
+                            <div class="rs-bar-fill" style="width:${Math.min(100, share).toFixed(2)}%"></div>
+                        </div>
+                        ${m.share_pct == null ? '<span class="rs-share">—</span>' : `<span class="rs-share">${m.share_pct.toFixed(1)}%</span>`}
+                    </td>
+                    <td>${fmt(m.reasoning_tokens || 0)}</td>
+                    <td>${fmt(m.output_tokens || 0)}</td>
+                    <td>${fmtUsd(m.cost_usd)}</td>
+                </tr>`;
+        }).join('');
+
+        let effortHtml = '';
+        if (effort.length) {
+            const rows = effort.map(e => `
+                <tr>
+                    <td>${this._esc(e.effort)}</td>
+                    <td>${fmt(e.calls || 0)}</td>
+                    <td>${fmt(e.reasoning_tokens || 0)}</td>
+                </tr>`).join('');
+            effortHtml = `
+                <h4>By reasoning effort (codex)</h4>
+                <table class="data-table rs-effort">
+                    <thead><tr><th>Effort</th><th>Calls</th><th>Reasoning tokens</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>`;
+        }
+
+        return `
+            <h3>Reasoning share by model</h3>
+            <p class="section-hint">${fmt(totalReasoning)} thinking tokens out of ${fmt(totalOutput)} output — estimated thinking cost ${fmtUsd(totalCost)} (reasoning tokens billed at the output rate)</p>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Model</th><th>Share of output</th><th>Reasoning</th><th>Output</th><th>Thinking cost</th>
+                </tr></thead>
+                <tbody>${modelRows}</tbody>
+            </table>
+            ${effortHtml}`;
     }
 
     _buildRequestParamProfile(profile) {

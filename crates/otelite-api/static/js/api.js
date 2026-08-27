@@ -199,6 +199,7 @@ class ApiClient {
     async getCacheEconomics(params = {}) {
         return this.get('/genai/cache_hit_rate', { by_model: 1, ...params });
     }
+    async getReasoningShare(params = {}) { return this.get('/genai/reasoning_share', params); }
     async getRequestParamProfile(params = {}) { return this.get('/genai/request_param_profile', params); }
     async getConversationDepth(params = {}) { return this.get('/genai/conversation_depth', params); }
     async getCallsSeries(params = {}) { return this.get('/genai/calls_series', { bucket_secs: 3600, ...params }); }

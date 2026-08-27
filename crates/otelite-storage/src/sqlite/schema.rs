@@ -162,8 +162,16 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         conn.execute(
             &format!(
                 "CREATE INDEX IF NOT EXISTS idx_spans_llm_request_name \
-                 ON spans(start_time) WHERE name = '{name}'",
+                  ON spans(start_time) WHERE name = '{name}'",
                 name = semconv::LLM_REQUEST_SPAN_NAME
+            ),
+            [],
+        )?;
+        conn.execute(
+            &format!(
+                "CREATE INDEX IF NOT EXISTS idx_spans_codex_handle_responses \
+                  ON spans(start_time) WHERE name = '{name}'",
+                name = semconv::CODEX_HANDLE_RESPONSES_SPAN_NAME
             ),
             [],
         )?;
