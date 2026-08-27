@@ -197,6 +197,13 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_distinct_metric_names(&self) -> Result<Vec<String>> {
+        self.read_query(|conn| {
+            reader::query_distinct_metric_names(conn).map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn stats(&self) -> Result<StorageStats> {
         self.read_query(|conn| reader::get_stats(conn).map_err(StorageError::from))
             .await

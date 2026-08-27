@@ -124,7 +124,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(name);
          CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp);
          CREATE INDEX IF NOT EXISTS idx_metrics_type ON metrics(metric_type);
-         CREATE INDEX IF NOT EXISTS idx_metrics_created_at ON metrics(created_at);",
+         CREATE INDEX IF NOT EXISTS idx_metrics_created_at ON metrics(created_at);
+         CREATE INDEX IF NOT EXISTS idx_metrics_name_ts ON metrics(name, timestamp);",
     )?;
 
     // Create purge_history table

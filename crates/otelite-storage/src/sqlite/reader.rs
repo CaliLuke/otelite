@@ -126,34 +126,112 @@ pub fn query_spans_for_trace_list(
     params: &QueryParams,
     trace_limit: usize,
 ) -> Result<Vec<Span>> {
-    let mut sql_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    // Phase 1: find the trace IDs of the N most-recent traces.
+    //
+    // Scanning spans by start_time DESC, a trace_id's FIRST encounter is
+    // exactly its MAX(start_time) — any span with a later start_time would
+    // have been seen earlier in the scan. So the first N distinct trace IDs
+    // encountered are precisely the N traces with the largest MAX(start_time)
+    // (the old GROUP BY + ORDER BY MAX result), but the scan can stop at the
+    // Nth distinct value instead of reading the whole time window: on a
+    // one-day window that is a few hundred rows instead of 2M+ (90s -> ms).
+    let (trace_ids, mut outer_params): (Vec<String>, Vec<Box<dyn rusqlite::ToSql>>) =
+        if let Some(ref trace_id) = params.trace_id {
+            // A specific trace may be old; seeking it directly via the
+            // trace_id index beats scanning backwards from the newest. The
+            // window still has to match the old semantics: the trace only
+            // qualifies if it has at least one span inside it.
+            let mut check_sql = String::from("SELECT 1 FROM spans WHERE trace_id = ?");
+            let mut check_params: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(trace_id.clone()) as Box<dyn rusqlite::ToSql>];
+            if let Some(start) = params.start_time {
+                check_sql.push_str(" AND start_time >= ?");
+                check_params.push(Box::new(start));
+            }
+            if let Some(end) = params.end_time {
+                check_sql.push_str(" AND end_time <= ?");
+                check_params.push(Box::new(end));
+            }
+            check_sql.push_str(" LIMIT 1");
+            let mut stmt = conn
+                .prepare(&check_sql)
+                .map_err(|e| StorageError::QueryError(format!("Failed to prepare query: {}", e)))?;
+            let refs: Vec<&dyn rusqlite::ToSql> = check_params.iter().map(|p| p.as_ref()).collect();
+            match stmt.query_row(refs.as_slice(), |row| row.get::<_, i64>(0)) {
+                Ok(_) => {},
+                // No span of this trace inside the window: the old query
+                // returned an empty list in that case.
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Vec::new()),
+                Err(e) => {
+                    return Err(StorageError::QueryError(format!(
+                        "Failed to check trace window: {}",
+                        e
+                    )))
+                },
+            }
+            (vec![trace_id.clone()], Vec::new())
+        } else if trace_limit == 0 {
+            (Vec::new(), Vec::new())
+        } else {
+            let mut sql = String::from("SELECT trace_id FROM spans WHERE 1=1");
+            let mut scan_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(start) = params.start_time {
+                sql.push_str(" AND start_time >= ?");
+                scan_params.push(Box::new(start));
+            }
+            if let Some(end) = params.end_time {
+                sql.push_str(" AND end_time <= ?");
+                scan_params.push(Box::new(end));
+            }
+            sql.push_str(" ORDER BY start_time DESC");
 
-    let mut subquery = String::from("SELECT trace_id FROM spans WHERE 1=1");
-    if let Some(start) = params.start_time {
-        subquery.push_str(" AND start_time >= ?");
-        sql_params.push(Box::new(start));
-    }
-    if let Some(end) = params.end_time {
-        subquery.push_str(" AND end_time <= ?");
-        sql_params.push(Box::new(end));
-    }
-    if let Some(ref trace_id) = params.trace_id {
-        subquery.push_str(" AND trace_id = ?");
-        sql_params.push(Box::new(trace_id.clone()));
-    }
-    subquery.push_str(" GROUP BY trace_id ORDER BY MAX(start_time) DESC LIMIT ?");
-    sql_params.push(Box::new(trace_limit as i64));
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| StorageError::QueryError(format!("Failed to prepare query: {}", e)))?;
+            let refs: Vec<&dyn rusqlite::ToSql> = scan_params.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt
+                .query_map(refs.as_slice(), |row| row.get::<_, String>(0))
+                .map_err(|e| StorageError::QueryError(format!("Failed to execute query: {}", e)))?;
 
+            let mut seen: Vec<String> = Vec::new();
+            let mut seen_set: std::collections::HashSet<String> =
+                std::collections::HashSet::with_capacity(trace_limit);
+            for row in rows {
+                let tid = row.map_err(|e| {
+                    StorageError::QueryError(format!("Failed to parse results: {}", e))
+                })?;
+                if seen_set.insert(tid.clone()) {
+                    seen.push(tid);
+                    if seen.len() >= trace_limit {
+                        break;
+                    }
+                }
+            }
+            (seen, Vec::new())
+        };
+
+    if trace_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Phase 2: fetch all spans of those traces (the old query also returned
+    // spans outside the window for selected traces, so no window here).
+    let placeholders = vec!["?"; trace_ids.len()].join(", ");
     let query = format!(
         "SELECT * FROM spans WHERE trace_id IN ({}) ORDER BY start_time DESC",
-        subquery
+        placeholders
+    );
+    outer_params.extend(
+        trace_ids
+            .iter()
+            .map(|t| Box::new(t.clone()) as Box<dyn rusqlite::ToSql>),
     );
 
     let mut stmt = conn
         .prepare(&query)
         .map_err(|e| StorageError::QueryError(format!("Failed to prepare query: {}", e)))?;
 
-    let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::ToSql> = outer_params.iter().map(|p| p.as_ref()).collect();
 
     let spans = stmt
         .query_map(param_refs.as_slice(), parse_span_row)
@@ -207,14 +285,22 @@ pub fn query_metrics(conn: &Connection, params: &QueryParams) -> Result<Vec<Metr
 ///
 /// Prevents high-frequency counters from crowding out less-frequent gauges and
 /// histograms when the caller only needs the current value for each metric (e.g.,
-/// the metrics list sidebar). The inner subquery selects the rowid of the row
-/// with the maximum timestamp for each name before any time-range filtering.
+/// the metrics list sidebar). The inner subquery computes MAX(timestamp) per name
+/// before any time-range filtering; the outer query then applies the window and
+/// predicate filters. Ties at the maximum timestamp all come back (the same
+/// rows the previous `HAVING timestamp = MAX(timestamp)` form returned).
+///
+/// The inner aggregation is a covering scan of `idx_metrics_name_ts` and the
+/// join is an index seek per name, so this is O(index size) instead of a
+/// full-table GROUP BY. Subquery columns are aliased (`g_name`, `g_ts`) so
+/// unqualified predicate columns (`name`, `timestamp`, …) stay unambiguous.
 pub fn query_latest_metrics(conn: &Connection, params: &QueryParams) -> Result<Vec<Metric>> {
     // Outer query adds optional time/predicate filters on top of the dedup subquery.
     let mut query = String::from(
-        "SELECT * FROM metrics WHERE rowid IN (\
-           SELECT rowid FROM metrics GROUP BY name HAVING timestamp = MAX(timestamp)\
-         ) AND 1=1",
+        "SELECT m.* FROM metrics m \
+         JOIN (SELECT name AS g_name, MAX(timestamp) AS g_ts FROM metrics GROUP BY name) g \
+               ON g.g_name = m.name AND g.g_ts = m.timestamp \
+         WHERE 1=1",
     );
     let mut sql_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -248,6 +334,26 @@ pub fn query_latest_metrics(conn: &Connection, params: &QueryParams) -> Result<V
         .map_err(|e| StorageError::QueryError(format!("Failed to parse results: {}", e)))?;
 
     Ok(metrics)
+}
+
+/// Distinct metric names, sorted ascending.
+///
+/// Uses the name prefix of `idx_metrics_name_ts` (a covering index scan that
+/// emits only on key change), so this never touches the table rows — the
+/// previous implementation loaded the entire metrics table into memory and
+/// deduplicated in Rust.
+pub fn query_distinct_metric_names(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT name FROM metrics ORDER BY name")
+        .map_err(|e| StorageError::QueryError(format!("Failed to prepare query: {}", e)))?;
+
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| StorageError::QueryError(format!("Failed to execute query: {}", e)))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| StorageError::QueryError(format!("Failed to parse results: {}", e)))?;
+
+    Ok(names)
 }
 
 /// Get storage statistics
@@ -2211,10 +2317,11 @@ pub fn query_retrieval_stats(
 /// Return up to 50 distinct resource attribute keys for the given signal table.
 /// `signal` must be one of "logs", "spans", or "metrics".
 pub fn distinct_resource_keys(conn: &Connection, signal: &str) -> Result<Vec<String>> {
-    let table = match signal {
-        "logs" => "logs",
-        "spans" => "spans",
-        "metrics" => "metrics",
+    // (table, recency column used to pick the most recent sample rows)
+    let (table, ts) = match signal {
+        "logs" => ("logs", "timestamp"),
+        "spans" => ("spans", "start_time"),
+        "metrics" => ("metrics", "timestamp"),
         other => {
             return Err(StorageError::QueryError(format!(
                 "Unknown signal type: {}",
@@ -2223,11 +2330,19 @@ pub fn distinct_resource_keys(conn: &Connection, signal: &str) -> Result<Vec<Str
         },
     };
 
+    // The key space of resource attributes is stable per service, and this
+    // feeds a typeahead datalist — so sample the most recent rows instead of
+    // scanning and JSON-parsing the whole table (65s on an 18M-span DB for a
+    // list of a few dozen keys). `json_valid` makes the parse total: a
+    // malformed resource JSON contributes no keys instead of failing the query.
+    const SAMPLE_ROWS: i64 = 50_000;
     let sql = format!(
-        "SELECT DISTINCT je.key \
-         FROM {table}, json_each(json_extract({table}.resource, '$.attributes')) je \
-         WHERE {table}.resource IS NOT NULL \
-         AND json_extract({table}.resource, '$.attributes') IS NOT NULL \
+        "SELECT je.key FROM ( \
+           SELECT {table}.resource AS resource FROM {table} \
+           ORDER BY {ts} DESC LIMIT {SAMPLE_ROWS} \
+         ) r, json_each(CASE WHEN json_valid(r.resource) \
+                              THEN json_extract(r.resource, '$.attributes') END) je \
+         GROUP BY je.key \
          LIMIT 50"
     );
 
@@ -3647,6 +3762,259 @@ mod tests {
         // Newest overall is the span's END time (9000), not its start (1000)
         // and not the metric (7000) — proves MAX uses end_time.
         assert_eq!(stats.newest_timestamp, Some(9000));
+    }
+
+    #[test]
+    fn test_query_latest_metrics_per_name() {
+        let conn = setup_test_db();
+        for (name, ts) in [
+            ("alpha", 100i64),
+            ("alpha", 200),
+            ("beta", 150),
+            ("beta", 50),
+        ] {
+            conn.execute(
+                "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource)
+                 VALUES (?1, 1, ?2, 1, '{}', '{}')",
+                rusqlite::params![name, ts],
+            )
+            .unwrap();
+        }
+
+        let metrics = query_latest_metrics(&conn, &QueryParams::default()).unwrap();
+        let got: Vec<(&str, i64)> = metrics
+            .iter()
+            .map(|m| (m.name.as_str(), m.timestamp))
+            .collect();
+        // One row per name (its most recent), sorted by name.
+        assert_eq!(got, vec![("alpha", 200), ("beta", 150)]);
+    }
+
+    #[test]
+    fn test_query_latest_metrics_ties_all_returned() {
+        let conn = setup_test_db();
+        // Two rows for the same name at the same maximum timestamp: the
+        // previous HAVING form returned both, and the JOIN form must too.
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource)
+                 VALUES ('a', 1, 100, 1, '{}', '{}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let metrics = query_latest_metrics(&conn, &QueryParams::default()).unwrap();
+        assert_eq!(metrics.len(), 2);
+        assert!(metrics.iter().all(|m| m.name == "a" && m.timestamp == 100));
+    }
+
+    #[test]
+    fn test_query_latest_metrics_window_applied_after_dedup() {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource) VALUES ('a', 1, 1000, 1, '{}', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource) VALUES ('a', 1, 2000, 1, '{}', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource) VALUES ('b', 1, 500, 1, '{}', '{}')",
+            [],
+        )
+        .unwrap();
+
+        // Window that excludes 'a's latest point (2000) but includes an older
+        // one (1000): dedup happens first, so 'a' is absent entirely and 'b'
+        // (whose only point is outside the window) is too.
+        let params = QueryParams {
+            start_time: Some(1500),
+            end_time: Some(1500),
+            ..Default::default()
+        };
+        let metrics = query_latest_metrics(&conn, &params).unwrap();
+        assert!(metrics.is_empty());
+
+        // Window that includes 'a's latest point returns it.
+        let params = QueryParams {
+            start_time: Some(1999),
+            end_time: Some(2001),
+            ..Default::default()
+        };
+        let metrics = query_latest_metrics(&conn, &params).unwrap();
+        let got: Vec<(&str, i64)> = metrics
+            .iter()
+            .map(|m| (m.name.as_str(), m.timestamp))
+            .collect();
+        assert_eq!(got, vec![("a", 2000)]);
+    }
+
+    #[test]
+    fn test_query_latest_metrics_name_predicate_not_ambiguous() {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource)
+             VALUES ('a', 1, 100, 1, '{}', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource) VALUES ('b', 1, 200, 1, '{}', '{}')",
+            [],
+        )
+        .unwrap();
+
+        // A `name = ?` predicate must resolve against the table in the
+        // JOIN form (the dedup subquery aliases its columns).
+        let mut params = QueryParams::default();
+        params.predicates.push(QueryPredicate {
+            field: "name".to_string(),
+            operator: Operator::Equal,
+            value: QueryValue::String("b".to_string()),
+        });
+        let metrics = query_latest_metrics(&conn, &params).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].name, "b");
+    }
+
+    #[test]
+    fn test_query_distinct_metric_names_sorted() {
+        let conn = setup_test_db();
+        for name in ["zeta", "alpha", "zeta", "mid"] {
+            conn.execute(
+                "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes, resource)
+                 VALUES (?1, 1, 1, 1, '{}', '{}')",
+                [name],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            query_distinct_metric_names(&conn).unwrap(),
+            vec!["alpha".to_string(), "mid".to_string(), "zeta".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_distinct_resource_keys_dedups_and_tolerates_corrupt_json() {
+        let conn = setup_test_db();
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO logs (timestamp, severity_number, body, resource)
+                 VALUES (?1, 9, 'b', '{\"attributes\":{\"service.name\":\"svc\",\"k\":\"v\"}}')",
+                [i as i64],
+            )
+            .unwrap();
+        }
+        // A corrupt resource JSON must not fail the query (json_valid gate).
+        conn.execute(
+            "INSERT INTO logs (timestamp, severity_number, body, resource)
+             VALUES (99, 9, 'b', '{not json')",
+            [],
+        )
+        .unwrap();
+
+        let keys = distinct_resource_keys(&conn, "logs").unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"service.name".to_string()));
+        assert!(keys.contains(&"k".to_string()));
+    }
+
+    #[test]
+    fn test_distinct_resource_keys_unknown_signal() {
+        let conn = setup_test_db();
+        assert!(distinct_resource_keys(&conn, "traces").is_err());
+    }
+
+    #[test]
+    fn test_trace_list_ordering_matches_group_by_max() {
+        let conn = setup_test_db();
+        // Interleaved multi-span traces. Max start per trace:
+        // t1 = 100, t2 = 95, t3 = 99, t4 = 80. Expected top-3: t1, t3, t2.
+        // t1 also has a span OUTSIDE the window (start 10, end 15) which the
+        // old outer query returned too — keep that behaviour.
+        let spans: &[(i64, i64, &str)] = &[
+            (100, 110, "t1"),
+            (90, 95, "t1"),
+            (10, 15, "t1"),
+            (95, 96, "t2"),
+            (99, 105, "t3"),
+            (80, 81, "t4"),
+        ];
+        for (start, end, trace) in spans {
+            conn.execute(
+                "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time,
+                                    attributes, events, resource, status_code)
+                 VALUES (?1, ?1 || '-s', 'n', 0, ?2, ?3, '{}', '[]', '{}', 0)",
+                rusqlite::params![trace, start, end],
+            )
+            .unwrap();
+        }
+
+        let params = QueryParams {
+            start_time: Some(0),
+            end_time: Some(1_000_000),
+            ..Default::default()
+        };
+        let got = query_spans_for_trace_list(&conn, &params, 3).unwrap();
+        // All spans of the three selected traces (t1's 3, t3's 1, t2's 1),
+        // t4 excluded, ordered by start_time DESC overall.
+        let trace_ids: Vec<&str> = got.iter().map(|s| s.trace_id.as_str()).collect();
+        assert_eq!(trace_ids.len(), 5);
+        assert!(!trace_ids.contains(&"t4"));
+        let starts: Vec<i64> = got.iter().map(|s| s.start_time).collect();
+        assert_eq!(starts, vec![100, 99, 95, 90, 10]);
+    }
+
+    #[test]
+    fn test_trace_list_stops_at_limit() {
+        let conn = setup_test_db();
+        for i in 0..10 {
+            conn.execute(
+                "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time,
+                                    attributes, events, resource, status_code)
+                 VALUES (?1, ?1 || '-s', 'n', 0, ?2, ?2 + 1, '{}', '[]', '{}', 0)",
+                rusqlite::params![format!("t{}", i), 1000 - i],
+            )
+            .unwrap();
+        }
+        let got = query_spans_for_trace_list(&conn, &QueryParams::default(), 4).unwrap();
+        let trace_ids: Vec<&str> = got.iter().map(|s| s.trace_id.as_str()).collect();
+        assert_eq!(trace_ids, vec!["t0", "t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn test_trace_list_specific_trace_window_mismatch_empty() {
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time,
+                                attributes, events, resource, status_code)
+             VALUES ('t1', 's1', 'n', 0, 100, 110, '{}', '[]', '{}', 0)",
+            [],
+        )
+        .unwrap();
+
+        // Window that does not contain the trace's only span → empty, as the
+        // old subquery-window semantics required.
+        let mut params = QueryParams {
+            trace_id: Some("t1".to_string()),
+            start_time: Some(200),
+            end_time: Some(300),
+            ..Default::default()
+        };
+        assert!(query_spans_for_trace_list(&conn, &params, 10)
+            .unwrap()
+            .is_empty());
+
+        // Window that contains it → the full trace comes back.
+        params.start_time = Some(0);
+        params.end_time = Some(1_000);
+        let got = query_spans_for_trace_list(&conn, &params, 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].trace_id, "t1");
     }
 
     #[test]

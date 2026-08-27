@@ -47,12 +47,17 @@ struct InFlight {
 /// Which response cache a whitelisted path belongs to. Each bucket has its
 /// own size/TTL: GenAI analytics are the expensive ones (20s), the stats
 /// totals tolerate 60s staleness (a recompute is a full-table index scan),
-/// and the sessions list is cheap enough for a 10s TTL.
+/// the sessions list is cheap enough for a 10s TTL, and the metrics list /
+/// metric names / resource-key typeahead are near-static (a few hundred rows
+/// that only grow) so they get longer TTLs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Bucket {
     Genai,
     Stats,
     Sessions,
+    Metrics,
+    Names,
+    Keys,
 }
 
 impl Bucket {
@@ -61,6 +66,9 @@ impl Bucket {
             Bucket::Genai => Duration::from_secs(20),
             Bucket::Stats => Duration::from_secs(60),
             Bucket::Sessions => Duration::from_secs(10),
+            Bucket::Metrics => Duration::from_secs(60),
+            Bucket::Names => Duration::from_secs(600),
+            Bucket::Keys => Duration::from_secs(300),
         }
     }
 }
@@ -70,6 +78,9 @@ pub struct CacheState {
     genai: LruCache<String, String>,
     stats: LruCache<String, String>,
     sessions: LruCache<String, String>,
+    metrics: LruCache<String, String>,
+    names: LruCache<String, String>,
+    keys: LruCache<String, String>,
     in_flight: Mutex<HashMap<String, Arc<InFlight>>>,
 }
 
@@ -79,6 +90,9 @@ impl CacheState {
             genai: LruCache::new(500, Bucket::Genai.ttl()),
             stats: LruCache::new(50, Bucket::Stats.ttl()),
             sessions: LruCache::new(200, Bucket::Sessions.ttl()),
+            metrics: LruCache::new(200, Bucket::Metrics.ttl()),
+            names: LruCache::new(50, Bucket::Names.ttl()),
+            keys: LruCache::new(30, Bucket::Keys.ttl()),
             in_flight: Mutex::new(HashMap::new()),
         })
     }
@@ -89,6 +103,12 @@ impl CacheState {
             Some(Bucket::Stats)
         } else if path == "/api/sessions" {
             Some(Bucket::Sessions)
+        } else if path == "/api/metrics/names" {
+            Some(Bucket::Names)
+        } else if path == "/api/metrics" || path.starts_with("/api/metrics/") {
+            Some(Bucket::Metrics)
+        } else if path == "/api/resource-keys" {
+            Some(Bucket::Keys)
         } else if path.starts_with("/api/genai/") {
             Some(Bucket::Genai)
         } else {
@@ -97,10 +117,14 @@ impl CacheState {
     }
 
     fn get(&self, key: &str, bucket: Bucket) -> Option<String> {
+        let k = key.to_string();
         match bucket {
-            Bucket::Genai => self.genai.get(&key.to_string()),
-            Bucket::Stats => self.stats.get(&key.to_string()),
-            Bucket::Sessions => self.sessions.get(&key.to_string()),
+            Bucket::Genai => self.genai.get(&k),
+            Bucket::Stats => self.stats.get(&k),
+            Bucket::Sessions => self.sessions.get(&k),
+            Bucket::Metrics => self.metrics.get(&k),
+            Bucket::Names => self.names.get(&k),
+            Bucket::Keys => self.keys.get(&k),
         }
     }
 
@@ -109,6 +133,9 @@ impl CacheState {
             Bucket::Genai => self.genai.insert(key.to_string(), value),
             Bucket::Stats => self.stats.insert(key.to_string(), value),
             Bucket::Sessions => self.sessions.insert(key.to_string(), value),
+            Bucket::Metrics => self.metrics.insert(key.to_string(), value),
+            Bucket::Names => self.names.insert(key.to_string(), value),
+            Bucket::Keys => self.keys.insert(key.to_string(), value),
         }
     }
 
@@ -117,6 +144,9 @@ impl CacheState {
         self.genai.clear();
         self.stats.clear();
         self.sessions.clear();
+        self.metrics.clear();
+        self.names.clear();
+        self.keys.clear();
     }
 }
 
@@ -277,6 +307,16 @@ mod tests {
         assert_eq!(CacheState::policy("/api/genai/usage"), Some(Bucket::Genai));
         assert_eq!(CacheState::policy("/api/stats"), Some(Bucket::Stats));
         assert_eq!(CacheState::policy("/api/sessions"), Some(Bucket::Sessions));
+        assert_eq!(CacheState::policy("/api/metrics"), Some(Bucket::Metrics));
+        assert_eq!(
+            CacheState::policy("/api/metrics/names"),
+            Some(Bucket::Names)
+        );
+        assert_eq!(
+            CacheState::policy("/api/metrics/timeseries/whatever"),
+            Some(Bucket::Metrics)
+        );
+        assert_eq!(CacheState::policy("/api/resource-keys"), Some(Bucket::Keys));
         assert_eq!(CacheState::policy("/api/traces"), None);
         assert_eq!(CacheState::policy("/api/health"), None);
         assert_eq!(CacheState::policy("/api/admin/purge"), None);
@@ -286,6 +326,7 @@ mod tests {
             Some(Bucket::Genai)
         );
         assert_eq!(CacheState::policy("/api/genai2/usage"), None);
+        assert_eq!(CacheState::policy("/api/metricstore"), None);
     }
 
     #[test]
@@ -293,6 +334,9 @@ mod tests {
         assert_eq!(Bucket::Genai.ttl(), Duration::from_secs(20));
         assert_eq!(Bucket::Stats.ttl(), Duration::from_secs(60));
         assert_eq!(Bucket::Sessions.ttl(), Duration::from_secs(10));
+        assert_eq!(Bucket::Metrics.ttl(), Duration::from_secs(60));
+        assert_eq!(Bucket::Names.ttl(), Duration::from_secs(600));
+        assert_eq!(Bucket::Keys.ttl(), Duration::from_secs(300));
     }
 
     #[test]
@@ -301,13 +345,22 @@ mod tests {
         state.insert("k1", "v1".to_string(), Bucket::Genai);
         state.insert("k2", "v2".to_string(), Bucket::Stats);
         state.insert("k3", "v3".to_string(), Bucket::Sessions);
+        state.insert("k4", "v4".to_string(), Bucket::Metrics);
+        state.insert("k5", "v5".to_string(), Bucket::Names);
+        state.insert("k6", "v6".to_string(), Bucket::Keys);
         assert!(state.get("k1", Bucket::Genai).is_some());
         assert!(state.get("k2", Bucket::Stats).is_some());
         assert!(state.get("k3", Bucket::Sessions).is_some());
+        assert!(state.get("k4", Bucket::Metrics).is_some());
+        assert!(state.get("k5", Bucket::Names).is_some());
+        assert!(state.get("k6", Bucket::Keys).is_some());
         state.clear_all();
         assert!(state.get("k1", Bucket::Genai).is_none());
         assert!(state.get("k2", Bucket::Stats).is_none());
         assert!(state.get("k3", Bucket::Sessions).is_none());
+        assert!(state.get("k4", Bucket::Metrics).is_none());
+        assert!(state.get("k5", Bucket::Names).is_none());
+        assert!(state.get("k6", Bucket::Keys).is_none());
     }
 
     // ── Middleware integration tests ────────────────────────────────────────

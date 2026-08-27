@@ -164,6 +164,8 @@ pub trait StorageBackend: Send + Sync {
     async fn query_metrics(&self, params: &QueryParams) -> Result<Vec<Metric>>;
     /// Query metrics returning the single most-recent data point per unique name.
     async fn query_latest_metrics(&self, params: &QueryParams) -> Result<Vec<Metric>>;
+    /// Distinct metric names, sorted ascending.
+    async fn query_distinct_metric_names(&self) -> Result<Vec<String>>;
     async fn stats(&self) -> Result<StorageStats>;
     async fn purge(&self, options: &PurgeOptions) -> Result<u64>;
     async fn purge_all(&self) -> Result<PurgeAllStats>;

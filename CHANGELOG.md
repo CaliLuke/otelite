@@ -11,6 +11,17 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Metrics, Traces and Logs views load instantly instead of taking minutes.**
+  The metrics sidebar no longer waits 15–110 seconds on first open (the name
+  list and the latest-value-per-metric list now use a covering index instead
+  of scanning the whole metrics table), the trace list in the Traces view no
+  longer scans every span in the time window to find the most recent traces,
+  and the resource-attribute typeahead in the left nav no longer JSON-parses
+  every row in the database. Corrupt resource JSON is skipped instead of
+  failing the typeahead query.
+
 ## [0.1.65] - 2026-08-27
 
 ### Added

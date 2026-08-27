@@ -293,27 +293,20 @@ pub async fn list_metrics(
 pub async fn list_metric_names(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<String>>, (StatusCode, Json<ErrorResponse>)> {
-    // Query all metrics
-    let params = QueryParams::default();
-    let metrics = state.storage.query_metrics(&params).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::storage_error(format!(
-                "list metric names: {}",
-                e
-            ))),
-        )
-    })?;
+    let names = state
+        .storage
+        .query_distinct_metric_names()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "list metric names: {}",
+                    e
+                ))),
+            )
+        })?;
 
-    // Extract unique names
-    let mut names: Vec<String> = metrics
-        .into_iter()
-        .map(|m| m.name)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    names.sort();
     Ok(Json(names))
 }
 
