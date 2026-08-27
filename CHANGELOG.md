@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.83] - 2026-08-27
+
 ### Added
 
 - **Daily output-throughput views in the web dashboard and TUI.** When the
