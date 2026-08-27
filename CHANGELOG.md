@@ -11,6 +11,11 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Internal
+
+- Share one canonical agent instruction file and skills directory across
+  Claude Code and agent systems that follow the `AGENTS.md` convention.
+
 ## [0.1.83] - 2026-08-27
 
 ### Added

@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This file provides workflow guidance for AI agents working on Otelite. For technical context (architecture, crate structure, gotchas), see **CLAUDE.md**.
+This file is the canonical workflow and technical context for AI agents working on Otelite.
 
 ## Issue Tracking
 
@@ -67,6 +67,42 @@ rustup run stable cargo llvm-cov --workspace --all-features --summary-only
 ```
 
 **Why `rustup run stable`?** The repo pins `channel = "stable"` in `rust-toolchain.toml`. On macOS with Homebrew Rust, the system `cargo` may lack `llvm-tools`. `rustup run stable` uses the rustup-managed toolchain which has them.
+
+## Architecture Overview
+
+Otelite is an OpenTelemetry receiver and local observability server for LLM
+developers. See `docs/architecture.md` for full detail.
+
+**Crate structure:**
+
+- `crates/otelite-core` — telemetry domain types (`LogRecord`, `Span`, `Metric`,
+  `Resource`, `GenAiSpanInfo`); no HTTP or storage dependencies
+- `crates/otelite-receiver` — OTLP ingest over gRPC and HTTP; converts protobuf
+  into `otelite-core` types
+- `crates/otelite-storage` — SQLite backend in WAL mode with FTS5;
+  `SqliteBackend` implements the `StorageBackend` async trait
+- `crates/otelite-api` — REST API and embedded static web dashboard
+- `crates/otelite-client` — HTTP client for the REST API
+- `crates/otelite` — clap CLI binary; `serve` wires receiver, storage, and API
+  together
+- `crates/otelite-tui` — ratatui terminal UI that polls the REST API
+
+**Data flow:** OTLP source → receiver → SQLite storage → REST API → CLI, TUI,
+or web dashboard.
+
+**Known gotchas:**
+
+- `Span` has no `links` field
+- `LogRecord` has `observed_timestamp: Option<i64>`
+- There is no `MockStorage`; tests use a real `SqliteBackend` with
+  `tempfile::TempDir`
+
+## Conventions and Patterns
+
+- Rust 1.77+ stable
+- Async via tokio, HTTP via axum, gRPC via tonic
+- `thiserror` for error types
+- No agent attribution in commits (`Co-Authored-By`, `Assisted-by`, or similar)
 
 ## Code Standards
 
