@@ -166,6 +166,11 @@ enum Commands {
         after_help = "Examples:\n  otelite reasoning --since 24h\n  otelite reasoning --since 7d --format json"
     )]
     Reasoning(commands::reasoning::ReasoningCommand),
+    /// Show per-harness rollup: sessions, cost, tokens, tool calls, retries
+    #[command(
+        after_help = "Examples:\n  otelite agents --since 24h\n  otelite agents --since 7d --format json"
+    )]
+    Agents(commands::agents::AgentsCommand),
     /// Launch the Terminal User Interface
     #[command(
         after_help = "Examples:\n  otelite tui\n  otelite tui --api-url http://localhost:3000\n  otelite tui --view traces --refresh-interval 5"
@@ -553,6 +558,11 @@ async fn run_cli() -> Result<()> {
             Ok(())
         },
         Some(Commands::Reasoning(cmd)) => {
+            let storage = create_storage(&config).await?;
+            cmd.execute(storage, config.format).await?;
+            Ok(())
+        },
+        Some(Commands::Agents(cmd)) => {
             let storage = create_storage(&config).await?;
             cmd.execute(storage, config.format).await?;
             Ok(())

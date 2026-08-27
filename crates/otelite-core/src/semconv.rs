@@ -328,9 +328,34 @@ pub mod metric_names {
     pub const OPENCODE_TOKEN_USAGE: &str = "opencode.token.usage";
     /// Per-(session, model, provider, agent, project) usage marker.
     pub const OPENCODE_MODEL_USAGE: &str = "opencode.model.usage";
+    /// Per-session start marker (`value_int = 1`); the distinct
+    /// `session.id` values in a window are that window's sessions.
+    pub const OPENCODE_SESSION_COUNT: &str = "opencode.session.count";
+    /// Cumulative per-session cost histogram; `value_histogram[1]` is the
+    /// session's total cost (USD) so far.
+    pub const OPENCODE_SESSION_COST_TOTAL: &str = "opencode.session.cost.total";
+    /// Cumulative per-(session, tool_name) tool-duration histogram;
+    /// `value_histogram[0]` is the session's total tool calls so far.
+    pub const OPENCODE_TOOL_DURATION: &str = "opencode.tool.duration";
+    /// Cumulative per-session retry counter.
+    pub const OPENCODE_RETRY_COUNT: &str = "opencode.retry.count";
     /// Per-turn token histogram from the codex CLI; `value_histogram[1]` is
     /// the turn's token count for the `token_type` label.
     pub const CODEX_TURN_TOKEN_USAGE: &str = "codex.turn.token_usage";
+    /// Per-event thread-start marker; `value_int` is the number of threads
+    /// started. `session_source = 'cli'` rows are user-initiated codex
+    /// sessions (sub-agent threads carry their own `session_source`).
+    pub const CODEX_THREAD_STARTED: &str = "codex.thread.started";
+    /// Per-event tool call (`value_int` calls per row).
+    pub const CODEX_TOOL_CALL: &str = "codex.tool.call";
+    /// Per-event API request (`value_int` requests per row).
+    pub const CODEX_API_REQUEST: &str = "codex.api_request";
+    /// Per-event token usage from Claude Code (`value_int` tokens per row),
+    /// keyed by `session.id`, `model`, `type`.
+    pub const CLAUDE_CODE_TOKEN_USAGE: &str = "claude_code.token.usage";
+    /// Per-session start marker (`value_int = 1`); the distinct
+    /// `session.id` values in a window are that window's sessions.
+    pub const CLAUDE_CODE_SESSION_COUNT: &str = "claude_code.session.count";
 }
 
 /// Attribute label paths for agent metrics.
@@ -343,6 +368,15 @@ pub mod metric_labels {
     pub const SESSION_ID: &str = "$.\"session.id\"";
     /// Per-turn token category (see [`codex_token_types`]).
     pub const TOKEN_TYPE: &str = "$.token_type";
+    /// Tool name on `opencode.tool.duration`.
+    pub const TOOL_NAME: &str = "$.tool_name";
+    /// "true"/"false" on `opencode.session.count`; top-level sessions are
+    /// everything that is not "true".
+    pub const IS_SUBAGENT: &str = "$.is_subagent";
+    /// "cli" for user-initiated codex runs, "subagent_*" otherwise.
+    pub const SESSION_SOURCE: &str = "$.session_source";
+    /// "true"/"false" on `codex.api_request`.
+    pub const SUCCESS: &str = "$.success";
 }
 
 /// `type` label values on `opencode.token.usage`.
@@ -362,6 +396,14 @@ pub mod codex_token_types {
     pub const REASONING: &str = "reasoning_output";
     pub const CACHE_READ: &str = "cached_input";
     pub const CACHE_WRITE: &str = "cache_write_input";
+}
+
+/// Canonical harness names used in per-agent rollup responses (the "agent"
+/// field identifies the harness, not a sub-agent role).
+pub mod agent_names {
+    pub const OPENCODE: &str = "opencode";
+    pub const CODEX: &str = "codex";
+    pub const CLAUDE: &str = "claude";
 }
 
 #[cfg(test)]

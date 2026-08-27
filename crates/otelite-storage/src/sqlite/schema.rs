@@ -229,7 +229,29 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
              CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.type') END,
              CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END,
              timestamp, value_int)
-         WHERE name = 'opencode.token.usage';",
+          WHERE name = 'opencode.token.usage';",
+    )?;
+
+    // Covering indexes for the agent-rollup cumulative histogram counters
+    // (reader::counter_window_deltas with a value expression): same
+    // planner contract as idx_metrics_opencode_token_usage — the reader's
+    // baseline seeks use these expressions verbatim. The histogram value
+    // columns make the baseline seek index-only (no table fetch per
+    // candidate row).
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_metrics_opencode_tool_duration ON metrics(
+             CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END,
+             CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.tool_name') END,
+             timestamp,
+             CASE WHEN json_valid(value_histogram) THEN json_extract(value_histogram, '$[0]') END)
+          WHERE name = 'opencode.tool.duration';",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_metrics_opencode_session_cost ON metrics(
+             CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END,
+             timestamp,
+             CASE WHEN json_valid(value_histogram) THEN json_extract(value_histogram, '$[1]') END)
+          WHERE name = 'opencode.session.cost.total';",
     )?;
 
     // Create purge_history table

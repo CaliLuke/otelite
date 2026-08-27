@@ -11,6 +11,19 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-agent rollup: who did what, and what it cost.** One table for
+  opencode, codex and claude — sessions, spend, tokens (input/output/cache/
+  reasoning), tool calls and failed requests — with a cost-over-time chart
+  per agent. `otelite agents --since 7d` (or `--format json`), the new
+  `GET /api/genai/agents` endpoint, and an "Agents" section on the web UI's
+  GenAI tab. opencode's spend comes from its own cost counter; codex and
+  claude are estimated from tokens × pricing (their cost counters
+  under-report), and the distinction is shown as "actual" vs "estimated".
+  Sub-agent sessions and codex sub-agent threads are excluded from session
+  counts.
+
 ## [0.1.73] - 2026-08-27
 
 ### Added

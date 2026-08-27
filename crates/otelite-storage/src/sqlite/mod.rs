@@ -536,6 +536,19 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_agent_rollup(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+    ) -> Result<Vec<otelite_core::api::AgentRollupStorage>> {
+        self.read_query(move |conn| {
+            reader::query_agent_rollup(conn, start_time, end_time, bucket_secs)
+                .map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_request_param_profile(
         &self,
         start_time: Option<i64>,

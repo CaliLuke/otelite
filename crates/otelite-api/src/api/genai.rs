@@ -7,13 +7,13 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    AgentRolesResponse, CallsSeriesPoint, ContextTypeSplit, ConversationCostRow,
-    ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown,
-    FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket, LatencyByContextBin,
-    LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse, ReasoningShareResponse,
-    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, StopReasonCount,
-    TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    AgentRolesResponse, AgentRollup, AgentRollupResponse, CallsSeriesPoint, ContextTypeSplit,
+    ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse,
+    ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket,
+    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse,
+    ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
+    StopReasonCount, TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan,
+    TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -941,6 +941,61 @@ pub async fn get_reasoning_share(
             .cost;
     }
     Ok(Json(response))
+}
+
+/// Per-harness rollup: sessions, cost, tokens, tool calls and retries for
+/// opencode/codex/claude, sorted by cost descending. opencode's cost is its
+/// own spend counter ("actual"); codex and claude are estimated from tokens
+/// x pricing (their cost counters under-report on the live data).
+#[utoipa::path(
+    get,
+    path = "/api/genai/agents",
+    params(TimeSeriesQuery),
+    responses(
+        (status = 200, description = "Per-harness sessions, cost, tokens, tool calls and retries", body = AgentRollupResponse),
+        (status = 400, description = "Invalid bucket_secs", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_agents(
+    State(state): State<AppState>,
+    Query(query): Query<TimeSeriesQuery>,
+) -> Result<Json<AgentRollupResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let bucket_secs = query.bucket_secs.unwrap_or(3600);
+    if bucket_secs == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "bucket_secs must be a positive number of seconds",
+            )),
+        ));
+    }
+
+    let rollups = state
+        .storage
+        .query_agent_rollup(query.start_time, query.end_time, bucket_secs)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query agent rollup: {e}"
+                ))),
+            )
+        })?;
+
+    let pricing = state.pricing.snapshot().await;
+    let mut agents: Vec<AgentRollup> = rollups.into_iter().map(|r| r.enrich(&pricing.db)).collect();
+    agents.sort_by(|a, b| {
+        b.cost_usd
+            .unwrap_or(0.0)
+            .partial_cmp(&a.cost_usd.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.agent.cmp(&b.agent))
+    });
+
+    Ok(Json(AgentRollupResponse { agents }))
 }
 
 /// Sub-agent role attribution: cost and tokens per opencode `agent` label.

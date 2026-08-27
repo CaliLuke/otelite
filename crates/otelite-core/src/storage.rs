@@ -8,12 +8,13 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::api::{
-    AgentRolesResponse, CacheEconomicsResponse, CacheHitRateByModel, CallsSeriesPoint,
-    ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel,
-    ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, LatencyByContextBin,
-    LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage, ProviderMixResponse,
-    ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
-    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    AgentRolesResponse, AgentRollupStorage, CacheEconomicsResponse, CacheHitRateByModel,
+    CallsSeriesPoint, ConversationCostRow, ConversationDepthStats, CostSeriesPoint,
+    ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse,
+    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage,
+    ProviderMixResponse, ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats,
+    SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -320,6 +321,19 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<ReasoningShareResponse>;
+
+    /// Per-harness rollup (opencode/codex/claude): sessions, per-model
+    /// tokens, tool calls and retries over the window, with per-bucket
+    /// series data. Harnesses with no activity in the window are omitted.
+    /// Cost is unenriched (the API layer prices codex/claude from the
+    /// per-model totals; opencode's own counter is in
+    /// [`AgentRollupStorage::counter_cost_usd`]).
+    async fn query_agent_rollup(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+    ) -> Result<Vec<AgentRollupStorage>>;
 
     /// Sub-agent role attribution (cost and tokens per opencode `agent`
     /// label) over the time window.

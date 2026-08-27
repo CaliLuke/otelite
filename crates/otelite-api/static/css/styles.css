@@ -2457,6 +2457,24 @@ body {
 .cost-chart-svg { width: 100%; height: 140px; display: block; }
 .cost-chart-bar { fill: var(--accent-color); }
 .cost-chart-bar:hover { fill: #8b5cf6; }
+.agent-chart-bar { opacity: 0.9; }
+.agent-chart-bar:hover { opacity: 1; }
+.agent-dot {
+    display: inline-block;
+    width: 0.6em;
+    height: 0.6em;
+    border-radius: 50%;
+    margin-right: 0.4em;
+    vertical-align: baseline;
+}
+.agent-legend {
+    display: flex;
+    gap: 1rem;
+    margin-top: 0.4rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+.agent-legend-item { display: inline-flex; align-items: center; }
 .cost-chart-axis-labels {
     display: flex;
     justify-content: space-between;

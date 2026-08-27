@@ -500,7 +500,7 @@ class AnalyticsView {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
             const [costSeries, topSpans, cacheHitRate, cacheEconomics, reasoningShare,
-                   retryStats, errorRate, contextTypeSplit] = await Promise.all([
+                   retryStats, errorRate, contextTypeSplit, agentsRollup] = await Promise.all([
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
                 this.api.getCacheHitRate(params).catch(() => null),
@@ -509,6 +509,7 @@ class AnalyticsView {
                 this.api.getRetryStats(params).catch(() => null),
                 this.api.getErrorRate(params).catch(() => []),
                 this.api.getContextTypeSplit(params).catch(() => null),
+                this.api.getAgents({ ...params, bucket_secs: bucket }).catch(() => null),
             ]);
 
             const summary = this.lastSummary || { summary: {} };
@@ -536,6 +537,7 @@ class AnalyticsView {
                 this._buildTopNSection(topSpans || [], errorRate || []),
                 this._buildCacheEconomics(cacheEconomics, cacheHitRate || [], bucket),
                 this._buildReasoningShare(reasoningShare),
+                this._buildAgents(agentsRollup, bucket),
                 this._buildByModelByProvider(summary),
                 this._buildContextTypeSplit(contextTypeSplit || []),
             ].filter(Boolean).join('');
@@ -1784,6 +1786,97 @@ class AnalyticsView {
                 <tbody>${modelRows}</tbody>
             </table>
             ${effortHtml}`;
+    }
+
+    _buildAgents(data, bucketSecs) {
+        if (!data) return '';
+        const agents = Array.isArray(data.agents) ? data.agents : [];
+        if (!agents.length) return '';
+        const fmt = n => Number(n || 0).toLocaleString();
+        const fmtUsd = v => v == null ? '—' : `$${Number(v).toFixed(2)}`;
+
+        const agentColors = { opencode: 'var(--accent-color, #4c9aff)', codex: '#f5a623', claude: '#c084fc' };
+        const colorFor = a => agentColors[a] || '#888';
+
+        const rows = agents.map(a => {
+            const t = a.tokens || {};
+            const total = (t.input || 0) + (t.output || 0) + (t.cache_read || 0)
+                + (t.cache_write || 0) + (t.reasoning || 0);
+            const costNote = a.cost_source === 'estimated' ? ' (est.)' : '';
+            return `
+                <tr>
+                    <td><span class="agent-dot" style="background:${colorFor(a.agent)}"></span>${this._esc(a.agent)}</td>
+                    <td class="num">${fmt(a.sessions)}</td>
+                    <td class="num" title="${a.cost_source === 'actual' ? 'harness cost counter' : 'tokens × pricing table'}">${fmtUsd(a.cost_usd)}${costNote}</td>
+                    <td class="num" title="in ${fmt(t.input || 0)} · out ${fmt(t.output || 0)} · cache-r ${fmt(t.cache_read || 0)} · cache-w ${fmt(t.cache_write || 0)} · reasoning ${fmt(t.reasoning || 0)}">${fmt(total)}</td>
+                    <td class="num">${fmt(a.tool_calls)}</td>
+                    <td class="num">${a.retries == null ? '—' : fmt(a.retries)}</td>
+                </tr>`;
+        }).join('');
+
+        // Stacked cost chart: one bucket column, one segment per agent.
+        const bucketMap = new Map();
+        for (const a of agents) {
+            for (const p of a.series || []) {
+                if (p.cost_usd == null) continue;
+                const b = bucketMap.get(p.ts) || { ts: p.ts, costs: {} };
+                b.costs[a.agent] = (b.costs[a.agent] || 0) + p.cost_usd;
+                bucketMap.set(p.ts, b);
+            }
+        }
+        let chartHtml = '';
+        const buckets = Array.from(bucketMap.values()).sort((x, y) => x.ts - y.ts);
+        if (buckets.length) {
+            const total = buckets.reduce((s, b) => s + Object.values(b.costs).reduce((x, y) => x + y, 0), 0);
+            const maxCost = buckets.reduce((m, b) => Math.max(m, Object.values(b.costs).reduce((x, y) => x + y, 0)), 0);
+            const width = 100, chartHeight = 100;
+            const barGap = 0.5;
+            const barWidth = Math.max((width - barGap * (buckets.length - 1)) / buckets.length, 0.1);
+            const bars = buckets.map((b, i) => {
+                let y = chartHeight;
+                const segs = Object.entries(b.costs)
+                    .filter(([, v]) => v > 0)
+                    .map(([agent, v]) => {
+                        const h = maxCost > 0 ? (v / maxCost) * chartHeight : 0;
+                        y -= h;
+                        const tsDate = new Date(b.ts / 1_000_000_000);
+                        const title = `${formatTs(tsDate)}\n${agent}: $${v.toFixed(2)}`;
+                        return `<rect class="agent-chart-bar" x="${(i * (barWidth + barGap)).toFixed(3)}" y="${y.toFixed(3)}" width="${barWidth.toFixed(3)}" height="${h.toFixed(3)}" fill="${colorFor(agent)}"><title>${this._esc(title)}</title></rect>`;
+                    });
+                return segs.join('');
+            }).join('');
+            const multiDay = buckets.length > 1 &&
+                new Date(buckets[0].ts / 1_000_000_000).toDateString() !==
+                new Date(buckets[buckets.length - 1].ts / 1_000_000_000).toDateString();
+            const labelFor = i => chartAxisLabel(buckets[i].ts, multiDay);
+            const legend = agents
+                .map(a => `<span class="agent-legend-item"><span class="agent-dot" style="background:${colorFor(a.agent)}"></span>${this._esc(a.agent)}</span>`)
+                .join('');
+            chartHtml = `
+                <h4>Cost over time by agent — total ${fmtUsd(total)}</h4>
+                <div class="cost-chart">
+                    <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                        ${bars}
+                    </svg>
+                    <div class="cost-chart-axis-labels">
+                        <span class="cost-chart-axis-left">${this._esc(labelFor(0))}</span>
+                        <span class="cost-chart-axis-mid">${buckets.length > 2 ? this._esc(labelFor(Math.floor(buckets.length / 2))) : ''}</span>
+                        <span class="cost-chart-axis-right">${buckets.length > 1 ? this._esc(labelFor(buckets.length - 1)) : ''}</span>
+                    </div>
+                    <div class="agent-legend">${legend}</div>
+                </div>`;
+        }
+
+        return `
+            <h3>Agents</h3>
+            <p class="section-hint">Per-harness sessions, spend, tokens and tool activity. opencode cost is its own counter; codex/claude cost is estimated from tokens × pricing (their cost counters under-report).</p>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Agent</th><th>Sessions</th><th>Cost</th><th>Tokens</th><th>Tool calls</th><th>Retries</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+            ${chartHtml}`;
     }
 
     _buildRequestParamProfile(profile) {

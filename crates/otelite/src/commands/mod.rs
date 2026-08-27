@@ -1,5 +1,6 @@
 //! Command handlers for otelite CLI
 
+pub mod agents;
 pub mod cache;
 pub mod diagnose;
 pub mod import;

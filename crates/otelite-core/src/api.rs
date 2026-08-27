@@ -930,6 +930,165 @@ pub struct ReasoningShareResponse {
     pub effort: Vec<ReasoningEffortEntry>,
 }
 
+/// Token usage for one agent harness, all five categories.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AgentTokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub reasoning: u64,
+}
+
+impl AgentTokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write + self.reasoning
+    }
+}
+
+/// One time bucket of an agent's `series` array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AgentSeriesPoint {
+    /// Bucket start (ns), aligned to `bucket_secs`.
+    pub ts: i64,
+    /// Total tokens (all categories) in the bucket.
+    pub tokens: u64,
+    /// Cost in the bucket; `None` when no model in the bucket has known
+    /// pricing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// Per-harness rollup: which agent, how many sessions, what it spent, what
+/// it did. `agent` is the harness name ("opencode", "codex", "claude"), not
+/// a sub-agent role.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AgentRollup {
+    pub agent: String,
+    /// Sessions started in the window.
+    pub sessions: u64,
+    /// Spend in USD. `None` when no model has known pricing (estimated
+    /// agents) — never a fabricated zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// "actual" (the harness's own cost counter) or "estimated"
+    /// (tokens x pricing table).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+    pub tokens: AgentTokenUsage,
+    pub tool_calls: u64,
+    /// Failed/retried API requests where the harness reports them; `None`
+    /// when the harness emits no retry telemetry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u64>,
+    /// Per-bucket cost/tokens for the chart, ascending by `ts`.
+    pub series: Vec<AgentSeriesPoint>,
+}
+
+/// Per-harness rollup response. `agents` is sorted by total cost (estimated
+/// or actual) descending, ties by agent name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AgentRollupResponse {
+    pub agents: Vec<AgentRollup>,
+}
+
+/// Storage-layer per-agent rollup: token detail per model (the API layer
+/// prices it) plus the harness cost counter where one exists. Not a wire
+/// type — see [`AgentRollupResponse`].
+#[derive(Debug, Clone)]
+pub struct AgentRollupStorage {
+    pub agent: String,
+    pub sessions: u64,
+    pub tool_calls: u64,
+    pub retries: Option<u64>,
+    /// The harness's own cost counter delta in the window (opencode only;
+    /// `None` for harnesses without a cost metric — [`enrich`] falls back
+    /// to tokens x pricing).
+    pub counter_cost_usd: Option<f64>,
+    /// Per-model token totals, for API-layer pricing.
+    pub models: Vec<(String, AgentTokenUsage)>,
+    /// Per-bucket per-model tokens; `ts` is the aligned bucket start.
+    pub series: Vec<(i64, Vec<(String, AgentTokenUsage)>)>,
+}
+
+impl AgentRollupStorage {
+    /// Price this rollup into a wire [`AgentRollup`]. opencode's cost is its
+    /// own spend counter ("actual"); other harnesses are estimated from
+    /// tokens x pricing (their cost counters under-report on the live data).
+    /// Reasoning is billed at the output rate, same convention as the
+    /// reasoning-share endpoint.
+    pub fn enrich(self, pricing_db: &crate::pricing::PricingDatabase) -> AgentRollup {
+        use crate::pricing::TokenUsage;
+
+        let pricing_usage = |tokens: &AgentTokenUsage| TokenUsage {
+            input: tokens.input,
+            output: tokens.output + tokens.reasoning,
+            cache_creation: tokens.cache_write,
+            cache_read: tokens.cache_read,
+        };
+
+        let mut tokens = AgentTokenUsage::default();
+        let mut estimated: Option<f64> = None;
+        for (model, model_tokens) in &self.models {
+            tokens.input += model_tokens.input;
+            tokens.output += model_tokens.output;
+            tokens.cache_read += model_tokens.cache_read;
+            tokens.cache_write += model_tokens.cache_write;
+            tokens.reasoning += model_tokens.reasoning;
+            if let Some(cost) = pricing_db
+                .compute_cost(Some(model.as_str()), pricing_usage(model_tokens), None)
+                .cost
+            {
+                estimated = Some(estimated.unwrap_or(0.0) + cost);
+            }
+        }
+
+        let mut series: Vec<AgentSeriesPoint> = self
+            .series
+            .into_iter()
+            .map(|(ts, per_model)| {
+                let mut bucket_tokens = 0u64;
+                let mut bucket_cost: Option<f64> = None;
+                for (model, model_tokens) in per_model {
+                    bucket_tokens += model_tokens.total();
+                    if let Some(cost) = pricing_db
+                        .compute_cost(Some(&model), pricing_usage(&model_tokens), None)
+                        .cost
+                    {
+                        bucket_cost = Some(bucket_cost.unwrap_or(0.0) + cost);
+                    }
+                }
+                AgentSeriesPoint {
+                    ts,
+                    tokens: bucket_tokens,
+                    cost_usd: bucket_cost,
+                }
+            })
+            .collect();
+        series.sort_by_key(|p| p.ts);
+
+        let (cost_usd, cost_source) = match self.counter_cost_usd {
+            Some(actual) => (Some(actual), Some("actual".to_string())),
+            None => (estimated, Some("estimated".to_string())),
+        };
+
+        AgentRollup {
+            agent: self.agent,
+            sessions: self.sessions,
+            cost_usd,
+            cost_source,
+            tokens,
+            tool_calls: self.tool_calls,
+            retries: self.retries,
+            series,
+        }
+    }
+}
+
 /// Token usage split for one sub-agent role.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

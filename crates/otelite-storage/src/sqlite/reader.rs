@@ -2574,6 +2574,16 @@ pub(crate) struct CounterWindowDelta {
     /// (counter reset, e.g. app restart) is treated as restarting from zero.
     pub delta: f64,
 }
+/// Scalar counter value (value_int, falling back to value_double).
+pub(crate) const COUNTER_SCALAR_VALUE_SQL: &str =
+    "COALESCE(value_int, CAST(value_double AS INTEGER))";
+/// Cumulative-histogram observation count (`value_histogram[0]`).
+pub(crate) const HISTOGRAM_COUNT_VALUE_SQL: &str = "CASE WHEN json_valid(value_histogram) \
+                                                    THEN CAST(json_extract(value_histogram, '$[0]') AS REAL) END";
+/// Cumulative-histogram value sum (`value_histogram[1]`). Kept as REAL (no
+/// integer cast) so sub-cent cost counters do not round away.
+pub(crate) const HISTOGRAM_SUM_VALUE_SQL: &str = "CASE WHEN json_valid(value_histogram) \
+                                                  THEN CAST(json_extract(value_histogram, '$[1]') AS REAL) END";
 
 /// Compute windowed usage for a cumulative counter metric.
 ///
@@ -2592,6 +2602,33 @@ pub(crate) fn counter_window_deltas(
     conn: &Connection,
     metric_name: &str,
     label_paths: &[&str],
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<CounterWindowDelta>> {
+    counter_window_deltas_value(
+        conn,
+        metric_name,
+        label_paths,
+        COUNTER_SCALAR_VALUE_SQL,
+        start_time,
+        end_time,
+    )
+}
+
+/// [`counter_window_deltas`] for a counter whose value lives in an
+/// expression (e.g. a `value_histogram` field) rather than `value_int`.
+///
+/// `value_sql` must be total: it may return NULL (missing or malformed
+/// value) but must never raise, so a corrupt row degrades to a zero
+/// contribution instead of breaking the query. NULL values sort after all
+/// real values in the baseline's `DESC` order, so a baseline seek skips
+/// corrupt rows and settles on the newest valid one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn counter_window_deltas_value(
+    conn: &Connection,
+    metric_name: &str,
+    label_paths: &[&str],
+    value_sql: &str,
     start_time: Option<i64>,
     end_time: Option<i64>,
 ) -> Result<Vec<CounterWindowDelta>> {
@@ -2614,10 +2651,8 @@ pub(crate) fn counter_window_deltas(
     }
 
     let sql = format!(
-        "SELECT {}, timestamp, \
-         COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics {}",
-        label_exprs.join(", "),
-        where_clause
+        "SELECT {}, timestamp, {value_sql} FROM metrics {where_clause}",
+        label_exprs.join(", ")
     );
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql).map_err(|e| {
@@ -2632,8 +2667,8 @@ pub(crate) fn counter_window_deltas(
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let ts = row.get::<_, i64>(label_paths.len())?;
             let value = row
-                .get::<_, Option<i64>>(label_paths.len() + 1)?
-                .unwrap_or(0);
+                .get::<_, Option<f64>>(label_paths.len() + 1)?
+                .unwrap_or(0.0);
             Ok((labels, ts, value))
         })
         .map_err(|e| {
@@ -2649,7 +2684,7 @@ pub(crate) fn counter_window_deltas(
         })?;
 
     // Group by label tuple -> (last timestamp, max value at that timestamp).
-    let mut last_values: HashMap<Vec<Option<String>>, (i64, i64)> = HashMap::new();
+    let mut last_values: HashMap<Vec<Option<String>>, (i64, f64)> = HashMap::new();
     for (labels, ts, value) in rows {
         match last_values.get_mut(&labels) {
             Some(entry) => {
@@ -2666,17 +2701,17 @@ pub(crate) fn counter_window_deltas(
     }
 
     // Baseline per series: last value strictly before the window start.
-    let mut baselines: HashMap<Vec<Option<String>>, i64> = HashMap::new();
+    let mut baselines: HashMap<Vec<Option<String>>, f64> = HashMap::new();
     if let Some(start) = start_time {
         let mut predicate = String::new();
         for (i, expr) in label_exprs.iter().enumerate() {
             predicate.push_str(&format!(" AND {expr} IS ?{}", 3 + i));
         }
+
         let baseline_sql = format!(
-            "SELECT COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics \
+            "SELECT {value_sql} FROM metrics \
              WHERE name = ?1 AND timestamp < ?2{predicate} \
-             ORDER BY timestamp DESC, \
-               COALESCE(value_int, CAST(value_double AS INTEGER)) DESC \
+             ORDER BY timestamp DESC, {value_sql} DESC \
              LIMIT 1"
         );
         let mut baseline_stmt = conn.prepare(&baseline_sql).map_err(|e| {
@@ -2693,7 +2728,7 @@ pub(crate) fn counter_window_deltas(
                     .map(|l| Box::new(l.clone()) as Box<dyn rusqlite::ToSql>),
             );
             let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
-            match baseline_stmt.query_row(refs.as_slice(), |row| row.get::<_, Option<i64>>(0)) {
+            match baseline_stmt.query_row(refs.as_slice(), |row| row.get::<_, Option<f64>>(0)) {
                 Ok(Some(v)) => {
                     baselines.insert(labels.clone(), v);
                 },
@@ -2709,17 +2744,14 @@ pub(crate) fn counter_window_deltas(
 
     let mut out = Vec::with_capacity(last_values.len());
     for (labels, (_ts, last)) in last_values {
-        let baseline = baselines.get(&labels).copied().unwrap_or(0);
+        let baseline = baselines.get(&labels).copied().unwrap_or(0.0);
         let delta = if last < baseline {
             last
         } else {
             last - baseline
         };
-        if delta > 0 {
-            out.push(CounterWindowDelta {
-                labels,
-                delta: delta as f64,
-            });
+        if delta > 0.0 {
+            out.push(CounterWindowDelta { labels, delta });
         }
     }
     Ok(out)
@@ -3381,6 +3413,486 @@ pub fn query_reasoning_share(
         models: model_entries,
         effort,
     })
+}
+
+/// Per-harness rollup: sessions, tokens (per model), tool calls and retries
+/// for opencode, codex and claude, plus per-bucket series data for the
+/// chart. One source per harness, so nothing is double-counted:
+///
+/// - opencode: `token.usage` counter deltas (types input/output/reasoning/
+///   cacheRead/cacheCreation), `session.cost.total` histogram-sum deltas
+///   (actual USD spend), `tool.duration` histogram-count deltas,
+///   `retry.count` counter deltas, `session.count` distinct sessions
+///   (top-level only: `is_subagent != 'true'`).
+/// - codex: `turn.token_usage` per-turn histogram sums (input/output/
+///   reasoning_output/cached_input/cache_write_input; `total` never
+///   counted), `thread.started` cli thread starts as sessions, `tool.call`
+///   rows as tool calls, `api_request` success='false' rows as retries.
+/// - claude: `token.usage` per-event token sums, `session.count` distinct
+///   sessions, `claude_code.tool.execution` span count as tool calls, no
+///   retry telemetry (`retries: None`).
+///
+/// Cost is `None` here in every case: opencode's counter delta is carried
+/// in `counter_cost_usd` (actual spend), and codex/claude are priced by the
+/// API layer from the per-model token totals. Claude's own `cost.usage`
+/// counter is deliberately ignored — it under-reports against the token
+/// volumes by ~30x on the live DB (2026-08-27), so an estimate is more
+/// honest than a truncated actual.
+pub fn query_agent_rollup(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    bucket_secs: u64,
+) -> Result<Vec<otelite_core::api::AgentRollupStorage>> {
+    use otelite_core::api::AgentTokenUsage;
+    use otelite_core::semconv::agent_names as anames;
+    use otelite_core::semconv::metric_labels as lbl;
+    use otelite_core::semconv::metric_names as mnames;
+    use otelite_core::semconv::opencode_token_types as otypes;
+
+    if bucket_secs == 0 {
+        return Err(StorageError::QueryError(format!(
+            "bucket_secs must be positive, got {bucket_secs}"
+        )));
+    }
+    let bucket_ns = bucket_secs as i64 * 1_000_000_000;
+    let bucket_of = |ts: i64| (ts / bucket_ns) * bucket_ns;
+
+    const UNKNOWN_MODEL: &str = "(unknown)";
+    let mut out: Vec<otelite_core::api::AgentRollupStorage> = Vec::new();
+
+    // ── opencode ─────────────────────────────────────────────────────────
+    {
+        // token.usage: one fetch, one baseline pass, per-row clamped deltas.
+        let rows = opencode_usage_rows(conn, start_time, end_time)?;
+        let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
+        let mut models: HashMap<String, AgentTokenUsage> = HashMap::new();
+        let mut series: HashMap<i64, HashMap<String, AgentTokenUsage>> = HashMap::new();
+        for (labels, ts, delta) in opencode_counter_deltas(rows, &baselines) {
+            let model = labels
+                .get(1)
+                .and_then(|m| m.as_deref())
+                .unwrap_or(UNKNOWN_MODEL)
+                .to_string();
+            let kind = labels.get(2).and_then(|k| k.clone());
+            let tokens = delta as u64;
+            let add = |acc: &mut AgentTokenUsage| match kind.as_deref() {
+                Some(k) if k == otypes::INPUT => acc.input += tokens,
+                Some(k) if k == otypes::OUTPUT => acc.output += tokens,
+                Some(k) if k == otypes::REASONING => acc.reasoning += tokens,
+                Some(k) if k == otypes::CACHE_READ => acc.cache_read += tokens,
+                Some(k) if k == otypes::CACHE_WRITE => acc.cache_write += tokens,
+                _ => {},
+            };
+            add(models.entry(model.clone()).or_default());
+            let bkt = series.entry(bucket_of(ts)).or_default();
+            add(bkt.entry(model).or_default());
+        }
+
+        // Sessions: distinct top-level session ids in the window.
+        let sessions = distinct_session_ids(
+            conn,
+            mnames::OPENCODE_SESSION_COUNT,
+            start_time,
+            end_time,
+            Some(lbl::IS_SUBAGENT),
+        )?;
+
+        // Cost: per-session cumulative histogram sum, windowed delta.
+        let cost_deltas = counter_window_deltas_value(
+            conn,
+            mnames::OPENCODE_SESSION_COST_TOTAL,
+            &[lbl::SESSION_ID],
+            HISTOGRAM_SUM_VALUE_SQL,
+            start_time,
+            end_time,
+        )?;
+        let counter_cost: f64 = cost_deltas.iter().map(|d| d.delta).sum();
+
+        // Tool calls: per-(session, tool) cumulative histogram count.
+        let tool_deltas = counter_window_deltas_value(
+            conn,
+            mnames::OPENCODE_TOOL_DURATION,
+            &[lbl::SESSION_ID, lbl::TOOL_NAME],
+            HISTOGRAM_COUNT_VALUE_SQL,
+            start_time,
+            end_time,
+        )?;
+        let tool_calls = tool_deltas
+            .iter()
+            .map(|d| d.delta.round().max(0.0))
+            .sum::<f64>()
+            .round()
+            .max(0.0) as u64;
+
+        // Retries: per-session cumulative counter.
+        let retry_deltas = counter_window_deltas(
+            conn,
+            mnames::OPENCODE_RETRY_COUNT,
+            &[lbl::SESSION_ID],
+            start_time,
+            end_time,
+        )?;
+        let retries = retry_deltas
+            .iter()
+            .map(|d| d.delta.round().max(0.0))
+            .sum::<f64>()
+            .round()
+            .max(0.0) as u64;
+
+        push_agent(
+            &mut out,
+            anames::OPENCODE,
+            sessions,
+            Some(counter_cost),
+            models,
+            series,
+            tool_calls,
+            Some(retries),
+        );
+    }
+
+    // ── codex ────────────────────────────────────────────────────────────
+    {
+        // Per-turn histogram sums, bucketed in SQL (per-event metric: a
+        // plain windowed SUM is correct — no counter semantics).
+        let mut where_clause = String::from("WHERE name = ?1");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(mnames::CODEX_TURN_TOKEN_USAGE.to_string()),
+            Box::new(bucket_ns),
+        ];
+        if let Some(start) = start_time {
+            where_clause.push_str(&format!(" AND timestamp >= ?{}", params.len() + 1));
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+            params.push(Box::new(end));
+        }
+        let sql = format!(
+            "SELECT CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END AS model, \
+                    CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END AS token_type, \
+                    (timestamp / ?2) * ?2 AS bucket, \
+                    SUM(CASE WHEN json_valid(value_histogram) \
+                         THEN json_extract(value_histogram, '$[1]') ELSE 0 END) AS sum_tokens \
+             FROM metrics {where_clause} \
+             GROUP BY model, token_type, bucket",
+            lbl::MODEL, lbl::TOKEN_TYPE
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!("Failed to prepare codex turn token query: {e}"))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to execute codex turn token query: {e}"))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to parse codex turn tokens: {e}"))
+            })?;
+        let mut models: HashMap<String, AgentTokenUsage> = HashMap::new();
+        let mut series: HashMap<i64, HashMap<String, AgentTokenUsage>> = HashMap::new();
+        for (model, token_type, bucket, sum) in rows {
+            add_turn_tokens(
+                &mut models,
+                &mut series,
+                model,
+                token_type.as_deref(),
+                bucket,
+                sum,
+            );
+        }
+
+        let (sessions, tool_calls, retries) = codex_event_totals(conn, start_time, end_time)?;
+
+        push_agent(
+            &mut out,
+            anames::CODEX,
+            sessions,
+            None,
+            models,
+            series,
+            tool_calls,
+            Some(retries),
+        );
+    }
+
+    // ── claude ───────────────────────────────────────────────────────────
+    {
+        // Per-event token sums, bucketed in SQL.
+        let mut where_clause = String::from("WHERE name = ?1");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(mnames::CLAUDE_CODE_TOKEN_USAGE.to_string()),
+            Box::new(bucket_ns),
+        ];
+        if let Some(start) = start_time {
+            where_clause.push_str(&format!(" AND timestamp >= ?{}", params.len() + 1));
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+            params.push(Box::new(end));
+        }
+        let sql = format!(
+            "SELECT CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END AS model, \
+                    CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END AS token_type, \
+                    (timestamp / ?2) * ?2 AS bucket, \
+                    COALESCE(SUM(COALESCE(value_int, CAST(value_double AS INTEGER))), 0) AS total \
+             FROM metrics {where_clause} \
+             GROUP BY model, token_type, bucket",
+            lbl::MODEL, lbl::TYPE
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!("Failed to prepare claude token query: {e}"))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to execute claude token query: {e}"))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::QueryError(format!("Failed to parse claude tokens: {e}")))?;
+        let mut models: HashMap<String, AgentTokenUsage> = HashMap::new();
+        let mut series: HashMap<i64, HashMap<String, AgentTokenUsage>> = HashMap::new();
+        for (model, token_type, bucket, total) in rows {
+            add_turn_tokens(
+                &mut models,
+                &mut series,
+                model,
+                token_type.as_deref(),
+                bucket,
+                total as f64,
+            );
+        }
+
+        let sessions = distinct_session_ids(
+            conn,
+            mnames::CLAUDE_CODE_SESSION_COUNT,
+            start_time,
+            end_time,
+            None,
+        )?;
+
+        // Tool calls: claude_code.tool.execution span count (covered by
+        // idx_spans_tool_exec).
+        let tool_calls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spans \
+                 WHERE name = 'claude_code.tool.execution' \
+                 AND start_time >= ?1 AND start_time <= ?2",
+                rusqlite::params![start_time.unwrap_or(i64::MIN), end_time.unwrap_or(i64::MAX)],
+                |r| r.get(0),
+            )
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to count claude tool spans: {e}"))
+            })?;
+
+        push_agent(
+            &mut out,
+            anames::CLAUDE,
+            sessions,
+            None,
+            models,
+            series,
+            tool_calls.max(0) as u64,
+            None,
+        );
+    }
+
+    Ok(out)
+}
+
+/// Fold one bucketed (model, token_type) total into per-model and
+/// per-bucket-per-model token accumulators.
+#[allow(clippy::too_many_arguments)]
+fn add_turn_tokens(
+    models: &mut HashMap<String, otelite_core::api::AgentTokenUsage>,
+    series: &mut HashMap<i64, HashMap<String, otelite_core::api::AgentTokenUsage>>,
+    model: Option<String>,
+    token_type: Option<&str>,
+    bucket: i64,
+    sum: f64,
+) {
+    use otelite_core::api::AgentTokenUsage;
+    use otelite_core::semconv::codex_token_types as ctt;
+    use otelite_core::semconv::opencode_token_types as otypes;
+
+    let tokens = sum.round().max(0.0) as u64;
+    if tokens == 0 {
+        return;
+    }
+    // Codex and the opencode/claude harnesses use different vocabularies for
+    // the same five categories; match both. codex `total` matches neither
+    // set and is deliberately skipped (double-counting).
+    let apply = |acc: &mut AgentTokenUsage| match token_type {
+        Some(t) if t == otypes::INPUT || t == ctt::INPUT => acc.input += tokens,
+        Some(t) if t == otypes::OUTPUT || t == ctt::OUTPUT => acc.output += tokens,
+        Some(t) if t == otypes::REASONING || t == ctt::REASONING => acc.reasoning += tokens,
+        Some(t) if t == otypes::CACHE_READ || t == ctt::CACHE_READ => acc.cache_read += tokens,
+        Some(t) if t == otypes::CACHE_WRITE || t == ctt::CACHE_WRITE => acc.cache_write += tokens,
+        _ => {},
+    };
+    let model = model.unwrap_or_else(|| "(unknown)".to_string());
+    apply(models.entry(model.clone()).or_default());
+    apply(series.entry(bucket).or_default().entry(model).or_default());
+}
+
+/// Distinct `session.id` values in the window for one marker metric. When
+/// `subagent_label` is given, rows whose label is the string "true" are
+/// excluded (opencode sub-agent sessions have their own ids and are not
+/// user sessions).
+fn distinct_session_ids(
+    conn: &Connection,
+    metric_name: &str,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    subagent_label: Option<&str>,
+) -> Result<u64> {
+    let sid_expr =
+        "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END";
+    let mut where_clause = format!("WHERE name = ?1 AND {sid_expr} IS NOT NULL");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(metric_name.to_string())];
+    if let Some(sa) = subagent_label {
+        let sa_expr =
+            format!("CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{sa}') END");
+        where_clause.push_str(&format!(" AND (COALESCE({sa_expr}, 'false') != 'true')"));
+    }
+    if let Some(start) = start_time {
+        where_clause.push_str(&format!(" AND timestamp >= ?{}", params.len() + 1));
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+    let sql = format!("SELECT COUNT(DISTINCT {sid_expr}) FROM metrics {where_clause}");
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    conn.query_row(&sql, refs.as_slice(), |r| r.get::<_, i64>(0))
+        .map(|n| n.max(0) as u64)
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to count {metric_name} sessions: {e}"))
+        })
+}
+
+/// Codex per-event totals: cli thread starts (sessions), tool calls and
+/// failed API requests (retries), one windowed pass each.
+fn codex_event_totals(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<(u64, u64, u64)> {
+    use otelite_core::semconv::metric_labels as lbl;
+    use otelite_core::semconv::metric_names as mnames;
+
+    let (start, end) = match (start_time, end_time) {
+        (Some(s), Some(e)) => (s, e),
+        _ => {
+            return Err(StorageError::QueryError(
+                "codex rollup requires both start_time and end_time".to_string(),
+            ))
+        },
+    };
+
+    let ss_expr = format!(
+        "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END",
+        lbl::SESSION_SOURCE
+    );
+    let sessions: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(COALESCE(value_int, CAST(value_double AS INTEGER))), 0) \
+                 FROM metrics WHERE name = ?1 AND timestamp >= ?2 AND timestamp <= ?3 \
+                 AND {ss_expr} = 'cli'"
+            ),
+            rusqlite::params![mnames::CODEX_THREAD_STARTED.to_string(), start, end],
+            |r| r.get(0),
+        )
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to count codex thread starts: {e}"))
+        })?;
+
+    let tool_calls: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(COALESCE(value_int, CAST(value_double AS INTEGER))), 0) \
+             FROM metrics WHERE name = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
+            rusqlite::params![mnames::CODEX_TOOL_CALL.to_string(), start, end],
+            |r| r.get(0),
+        )
+        .map_err(|e| StorageError::QueryError(format!("Failed to count codex tool calls: {e}")))?;
+
+    let ok_expr = format!(
+        "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END",
+        lbl::SUCCESS
+    );
+    let retries: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(COALESCE(value_int, CAST(value_double AS INTEGER))), 0) \
+                 FROM metrics WHERE name = ?1 AND timestamp >= ?2 AND timestamp <= ?3 \
+                 AND {ok_expr} = 'false'"
+            ),
+            rusqlite::params![mnames::CODEX_API_REQUEST.to_string(), start, end],
+            |r| r.get(0),
+        )
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to count codex request failures: {e}"))
+        })?;
+
+    Ok((
+        sessions.max(0) as u64,
+        tool_calls.max(0) as u64,
+        retries.max(0) as u64,
+    ))
+}
+
+/// Append one agent's rollup when it has anything to report (an agent with
+/// zero sessions, tokens, calls and retries in the window is omitted rather
+/// than listed as a zero row).
+#[allow(clippy::too_many_arguments)]
+fn push_agent(
+    out: &mut Vec<otelite_core::api::AgentRollupStorage>,
+    agent: &str,
+    sessions: u64,
+    counter_cost_usd: Option<f64>,
+    models: HashMap<String, otelite_core::api::AgentTokenUsage>,
+    series: HashMap<i64, HashMap<String, otelite_core::api::AgentTokenUsage>>,
+    tool_calls: u64,
+    retries: Option<u64>,
+) {
+    let total_tokens: u64 = models.values().map(|t| t.total()).sum();
+    if sessions == 0 && total_tokens == 0 && tool_calls == 0 && retries.is_none_or(|r| r == 0) {
+        return;
+    }
+    let series: Vec<(i64, Vec<(String, otelite_core::api::AgentTokenUsage)>)> = series
+        .into_iter()
+        .map(|(ts, per_model)| (ts, per_model.into_iter().collect()))
+        .collect();
+    out.push(otelite_core::api::AgentRollupStorage {
+        agent: agent.to_string(),
+        sessions,
+        tool_calls,
+        retries,
+        counter_cost_usd,
+        models: models.into_iter().collect(),
+        series,
+    });
 }
 
 /// Cache hit rate: `cache_read / (cache_read + input)`, `None` when the
@@ -6317,6 +6829,150 @@ mod tests {
         // Both rows have NULL agent -> one (null) series; baseline 100, last 200.
         let by_label = deltas_by_label(deltas);
         assert_eq!(by_label.get("(null)"), Some(&100.0));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_histogram_row(
+        conn: &Connection,
+        name: &str,
+        timestamp: i64,
+        count: i64,
+        sum: f64,
+        attributes: &str,
+    ) {
+        let hist = format!("[{count}, {sum}, []]");
+        conn.execute(
+            "INSERT INTO metrics (
+                name, metric_type, timestamp, value_histogram, attributes
+            ) VALUES (?1, 2, ?2, ?3, ?4)",
+            rusqlite::params![name, timestamp, hist, attributes],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn counter_window_deltas_value_histogram_sum_field() {
+        let conn = setup_test_db();
+        let s = r#"{"session.id":"s1"}"#;
+        // Cost counter: [count, sum]. Window captures the 0.25 step.
+        insert_histogram_row(&conn, "opencode.session.cost.total", T0, 2, 0.5, s);
+        insert_histogram_row(&conn, "opencode.session.cost.total", T0 + 1, 3, 0.75, s);
+        insert_histogram_row(&conn, "opencode.session.cost.total", T0 + 2, 5, 1.25, s);
+
+        let deltas = counter_window_deltas_value(
+            &conn,
+            "opencode.session.cost.total",
+            &[r#"$."session.id""#],
+            HISTOGRAM_SUM_VALUE_SQL,
+            Some(T0 + 1),
+            Some(T0 + 2),
+        )
+        .unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(
+            by_label.get("s1"),
+            Some(&0.75),
+            "sum field: 1.25 - 0.5 = 0.75 (sub-cent precision preserved)"
+        );
+    }
+
+    #[test]
+    fn counter_window_deltas_value_histogram_count_field() {
+        let conn = setup_test_db();
+        let a = r#"{"session.id":"s1","tool_name":"Bash"}"#;
+        insert_histogram_row(&conn, "opencode.tool.duration", T0, 10, 999.0, a);
+        insert_histogram_row(&conn, "opencode.tool.duration", T0 + 1, 4, 1.0, a);
+        insert_histogram_row(&conn, "opencode.tool.duration", T0 + 2, 14, 1001.0, a);
+
+        // Count field: 14 - 10 = 4 (the sum field's 1001 - 999 = 2 must not leak in).
+        let deltas = counter_window_deltas_value(
+            &conn,
+            "opencode.tool.duration",
+            &[r#"$."session.id""#, "$.tool_name"],
+            HISTOGRAM_COUNT_VALUE_SQL,
+            Some(T0 + 1),
+            Some(T0 + 2),
+        )
+        .unwrap();
+        let by_label = deltas_by_label(deltas);
+        assert_eq!(by_label.get("s1|Bash"), Some(&4.0));
+    }
+
+    #[test]
+    fn counter_window_deltas_value_baseline_seeks_use_covering_indexes() {
+        // Planner contract: the per-series baseline seeks of the histogram
+        // counters must resolve via their covering partial indexes (see
+        // schema.rs), not the generic idx_metrics_name_ts. An edit to those
+        // index expressions that stops matching the reader's SQL verbatim
+        // degrades every baseline seek to a table scan.
+        let conn = setup_test_db();
+        let explain = |sql: &str| -> String {
+            let mut stmt = conn.prepare(sql).unwrap();
+            // EXPLAIN QUERY PLAN columns: id, parent, notused, detail.
+            stmt.query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+        };
+
+        let hist_count = "CASE WHEN json_valid(value_histogram) THEN CAST(json_extract(value_histogram, '$[0]') AS REAL) END";
+        let hist_sum = "CASE WHEN json_valid(value_histogram) THEN CAST(json_extract(value_histogram, '$[1]') AS REAL) END";
+        let sid = "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END";
+        let tool =
+            "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.tool_name') END";
+
+        let plan_tool = explain(&format!(
+            "EXPLAIN QUERY PLAN SELECT {hist_count} FROM metrics \
+             WHERE name = 'opencode.tool.duration' AND timestamp < 5 \
+               AND {sid} IS 's1' AND {tool} IS 'Bash' \
+             ORDER BY timestamp DESC, {hist_count} DESC LIMIT 1"
+        ));
+        assert!(
+            plan_tool.contains("idx_metrics_opencode_tool_duration"),
+            "tool.duration baseline must use its covering index:\n{plan_tool}"
+        );
+
+        let plan2 = explain(&format!(
+            "EXPLAIN QUERY PLAN SELECT {hist_sum} FROM metrics \
+             WHERE name = 'opencode.session.cost.total' AND timestamp < 5 \
+               AND {sid} IS 's1' \
+             ORDER BY timestamp DESC, {hist_sum} DESC LIMIT 1"
+        ));
+        assert!(
+            plan2.contains("idx_metrics_opencode_session_cost"),
+            "session.cost.total baseline must use its covering index:\n{plan2}"
+        );
+    }
+
+    #[test]
+    fn counter_window_deltas_value_histogram_malformed_value_is_inert() {
+        let conn = setup_test_db();
+        let s = r#"{"session.id":"s1"}"#;
+        insert_histogram_row(&conn, "opencode.session.cost.total", T0, 2, 0.5, s);
+        // Corrupt value_histogram at the latest timestamp: value must be
+        // treated as NULL (0), never an error, and must not mint a delta.
+        conn.execute(
+            "INSERT INTO metrics (
+                name, metric_type, timestamp, value_histogram, attributes
+            ) VALUES (?1, 2, ?2, ?3, ?4)",
+            rusqlite::params!["opencode.session.cost.total", T0 + 1, "{broken", s],
+        )
+        .unwrap();
+
+        let deltas = counter_window_deltas_value(
+            &conn,
+            "opencode.session.cost.total",
+            &[r#"$."session.id""#],
+            HISTOGRAM_SUM_VALUE_SQL,
+            Some(T0 + 1),
+            Some(T0 + 1),
+        )
+        .unwrap();
+        assert!(
+            deltas.is_empty(),
+            "corrupt latest value reads as 0 < baseline -> reset -> zero delta, dropped"
+        );
     }
 
     // ── provider attribution (issue #129) ────────────────────────────────────
