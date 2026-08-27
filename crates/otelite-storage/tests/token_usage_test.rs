@@ -67,12 +67,12 @@ fn test_query_token_usage_with_data() {
 
     // Check by_model (sorted by total tokens desc)
     assert_eq!(by_model.len(), 2);
-    assert_eq!(by_model[0].model, "gpt-4");
+    assert_eq!(by_model[0].model, "openai/gpt-4"); // provider-prefixed identity (#143)
     assert_eq!(by_model[0].input_tokens, 2500); // 1000 + 1500
     assert_eq!(by_model[0].output_tokens, 1100); // 500 + 600
     assert_eq!(by_model[0].requests, 2);
 
-    assert_eq!(by_model[1].model, "claude-sonnet-4");
+    assert_eq!(by_model[1].model, "anthropic/claude-sonnet-4"); // provider-prefixed identity (#143)
     assert_eq!(by_model[1].input_tokens, 2000);
     assert_eq!(by_model[1].output_tokens, 800);
     assert_eq!(by_model[1].requests, 1);
@@ -121,7 +121,7 @@ fn test_query_token_usage_with_time_filter() {
     assert_eq!(summary.total_output_tokens, 500);
     assert_eq!(summary.total_requests, 1);
     assert_eq!(by_model.len(), 1);
-    assert_eq!(by_model[0].model, "gpt-4");
+    assert_eq!(by_model[0].model, "openai/gpt-4"); // provider-prefixed identity (#143)
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn test_query_token_usage_handles_missing_token_fields() {
     assert_eq!(summary.total_output_tokens, 0);
     assert_eq!(summary.total_requests, 1);
     assert_eq!(by_model.len(), 1);
-    assert_eq!(by_model[0].model, "gpt-4");
+    assert_eq!(by_model[0].model, "openai/gpt-4"); // provider-prefixed identity (#143)
     assert_eq!(by_model[0].input_tokens, 0);
     assert_eq!(by_model[0].output_tokens, 0);
 }
@@ -283,7 +283,7 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
 
     let opencode = by_model
         .iter()
-        .find(|row| row.model == "opencode-test-model")
+        .find(|row| row.model == "opencode-go/opencode-test-model") // provider-prefixed identity (#143)
         .expect("OpenCode model should appear in analytics");
     assert_eq!(opencode.requests, 1);
     assert_eq!(opencode.input_tokens, 100);
@@ -335,7 +335,10 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     )
     .unwrap();
     assert_eq!(cost_series.len(), 1);
-    assert_eq!(cost_series[0].model.as_deref(), Some("opencode-test-model"));
+    assert_eq!(
+        cost_series[0].model.as_deref(),
+        Some("opencode-go/opencode-test-model")
+    ); // #143
 
     let top_spans = reader::query_top_spans(
         &conn,
@@ -348,7 +351,10 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     )
     .unwrap();
     assert_eq!(top_spans.len(), 1);
-    assert_eq!(top_spans[0].model.as_deref(), Some("opencode-test-model"));
+    assert_eq!(
+        top_spans[0].model.as_deref(),
+        Some("opencode-go/opencode-test-model")
+    ); // #143
 }
 
 #[test]
@@ -447,7 +453,7 @@ fn test_latency_stats_normalizes_ttft_and_flags_degenerate_groups() {
 
     let otel = stats
         .iter()
-        .find(|row| row.model.as_deref() == Some("otel-model"))
+        .find(|row| row.model.as_deref() == Some("openai/otel-model"))
         .unwrap();
     assert_eq!(otel.ttft_p50_ms, Some(500));
     assert!(!otel.ttft_degenerate);

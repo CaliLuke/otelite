@@ -170,7 +170,8 @@ fn test_query_error_types_filters_by_model() {
     )
     .unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].model.as_deref(), Some("gpt-4"));
+    // Identity is `provider/model` when a provider is recorded (#143).
+    assert_eq!(rows[0].model.as_deref(), Some("openai/gpt-4"));
 }
 
 // ── query_model_drift ────────────────────────────────────────────────────────

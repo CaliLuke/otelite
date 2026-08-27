@@ -727,7 +727,18 @@ struct TokenExprs {
     output: String,
     cache_creation: String,
     cache_read: String,
+    /// Model label across common spellings (request model preferred, response
+    /// model only as a fallback for spans that carry no request model at all).
     model: String,
+    /// Model identity for grouping: `provider/model` when a provider is
+    /// recorded, bare model otherwise. Never built from a response model when
+    /// a request model exists (#143: no silent rerouting merge).
+    identity: String,
+    /// Response model that actually served the call (aliases coalesced).
+    response_model: String,
+    /// Request model across aliases (no response-model fallback) — used to
+    /// detect rerouted responses.
+    request_model: String,
     system: String,
     /// Parenthesised OR-chain identifying LLM spans (also includes the
     /// OpenInference `openinference.span.kind` clause).
@@ -740,7 +751,7 @@ struct TokenExprs {
 
 fn token_exprs() -> TokenExprs {
     use otelite_core::semconv;
-    TokenExprs {
+    let mut exprs = TokenExprs {
         input: semconv::coalesce_extract_cast("attributes", semconv::INPUT_TOKEN_KEYS, "INTEGER"),
         output: semconv::coalesce_extract_cast("attributes", semconv::OUTPUT_TOKEN_KEYS, "INTEGER"),
         cache_creation: semconv::coalesce_extract_cast(
@@ -754,10 +765,21 @@ fn token_exprs() -> TokenExprs {
             "INTEGER",
         ),
         model: semconv::coalesce_extract("attributes", semconv::MODEL_KEYS),
+        // Filled below once `model` and `system` exist.
+        identity: String::new(),
         system: semconv::coalesce_extract("attributes", semconv::SYSTEM_KEYS),
+        response_model: semconv::coalesce_extract("attributes", semconv::RESPONSE_MODEL_KEYS),
+        request_model: semconv::coalesce_extract("attributes", semconv::REQUEST_MODEL_KEYS),
         llm_span_guard: semconv::llm_span_guard("attributes"),
         request_span_guard: semconv::request_span_guard("attributes"),
-    }
+    };
+    let model = exprs.model.clone();
+    let system = exprs.system.clone();
+    exprs.identity = format!(
+        "CASE WHEN {} IS NOT NULL AND {} IS NOT NULL THEN ({} || '/' || {}) ELSE {} END",
+        system, model, system, model, model
+    );
+    exprs
 }
 
 /// Append a GenAI filter scope (predicate fragment + bind params) to a
@@ -1152,14 +1174,22 @@ pub fn query_token_usage(
         })
         .map_err(|e| StorageError::QueryError(format!("Failed to query token summary: {}", e)))?;
 
-    // Query by model — fall back across common model-attribute spellings.
-    let model_expr = exprs.model;
+    // Query by model identity (`provider/model`, bare model when no provider
+    // is recorded). Rerouted calls stay in the request-model identity and are
+    // counted in `rerouted_count` (#143).
+    let model_expr = exprs.identity.clone();
+    let request_model_expr = exprs.request_model.clone();
+    let response_model_expr = exprs.response_model.clone();
     let model_query = format!(
         "SELECT
             {model_expr} as model,
             COALESCE(SUM({input_expr}), 0) as input_tokens,
             COALESCE(SUM({output_expr}), 0) as output_tokens,
-            COUNT(*) as requests
+            COUNT(*) as requests,
+            SUM(CASE WHEN {request_model_expr} IS NOT NULL
+                     AND {response_model_expr} IS NOT NULL
+                     AND {request_model_expr} != {response_model_expr}
+                THEN 1 ELSE 0 END) as rerouted
         FROM spans
         {where_clause}
         GROUP BY model
@@ -1173,18 +1203,57 @@ pub fn query_token_usage(
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
-    let by_model = stmt
+    let mut by_model = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok(otelite_core::api::ModelUsage {
                 model: row.get(0)?,
                 input_tokens: row.get::<_, i64>(1)? as u64,
                 output_tokens: row.get::<_, i64>(2)? as u64,
                 requests: row.get::<_, i64>(3)? as usize,
+                response_model: None,
+                rerouted_count: row.get::<_, i64>(4)? as usize,
             })
         })
         .map_err(|e| StorageError::QueryError(format!("Failed to execute model query: {}", e)))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| StorageError::QueryError(format!("Failed to parse model results: {}", e)))?;
+
+    // Dominant differing response model per identity (rerouting analysis).
+    // Ordered so the first row per identity is the mode (ties: lexicographic).
+    let response_query = format!(
+        "SELECT
+            {model_expr} as model,
+            {response_model_expr} as response_model,
+            COUNT(*) as n
+        FROM spans
+        {where_clause}
+        GROUP BY model, response_model
+        HAVING response_model IS NOT NULL AND response_model != {request_model_expr}
+        ORDER BY model, n DESC, response_model ASC"
+    );
+    let mut stmt = conn.prepare(&response_query).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare response-model query: {}", e))
+    })?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut dominant: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute response-model query: {}", e))
+        })?;
+    for row in rows {
+        let (m, rm) = row.map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse response-model row: {}", e))
+        })?;
+        dominant.entry(m).or_insert(rm);
+    }
+    for usage in by_model.iter_mut() {
+        if let Some(rm) = dominant.remove(&usage.model) {
+            usage.response_model = Some(rm);
+        }
+    }
 
     // Query by system/provider — accept the OTel-standard names plus llm.* variants.
     let system_expr = exprs.system;
@@ -1267,7 +1336,7 @@ pub fn query_cost_series(
         {where_clause}
         GROUP BY bucket, model
         ORDER BY bucket ASC",
-        model = exprs.model,
+        model = exprs.identity,
         input = exprs.input,
         output = exprs.output,
         cache_creation = exprs.cache_creation,
@@ -1386,7 +1455,7 @@ pub fn query_top_spans(
         {where_clause}
         ORDER BY {order_by}
         LIMIT ?",
-        model = exprs.model,
+        model = exprs.identity,
         system = exprs.system,
         input = exprs.input,
         output = exprs.output,
@@ -1838,7 +1907,7 @@ pub fn query_latency_stats(
             (end_time - start_time) AS duration_ns
         FROM spans
         {where_clause}",
-        model = exprs.model,
+        model = exprs.identity,
         output = exprs.output,
         input = exprs.input,
         cache_creation = exprs.cache_creation,
@@ -2110,7 +2179,7 @@ fn collect_llm_request_values(
             (end_time - start_time) AS duration_ns
          FROM spans
          {where_clause}",
-        model = exprs.model,
+        model = exprs.identity,
         output = exprs.output,
     );
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -2759,7 +2828,7 @@ pub fn query_error_rate(
         GROUP BY model
         HAVING model IS NOT NULL
         ORDER BY errors DESC, total DESC",
-        model = exprs.model,
+        model = exprs.identity,
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -3192,7 +3261,7 @@ pub fn query_truncation_rate(
         {where_clause}
         GROUP BY {model}
         ORDER BY total DESC",
-        model = exprs.model,
+        model = exprs.identity,
     );
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -3258,7 +3327,7 @@ pub fn query_cache_hit_rate(
         {where_clause}
         GROUP BY {model}
         ORDER BY cache_read_tokens DESC",
-        model = exprs.model,
+        model = exprs.identity,
         input = exprs.input,
         cache_read = exprs.cache_read,
         cache_creation = exprs.cache_creation,
@@ -3847,7 +3916,7 @@ pub fn query_cache_economics(
              COALESCE(SUM({cache_creation}), 0) AS cache_creation, \
              COALESCE(SUM({cache_read}), 0) AS cache_read \
              FROM spans {where_clause} GROUP BY bucket, model",
-            model = exprs.model,
+            model = exprs.identity,
             input = exprs.input,
             cache_creation = exprs.cache_creation,
             cache_read = exprs.cache_read,
@@ -5985,6 +6054,9 @@ pub fn query_provider_mix(
              FROM spans \
              {where_clause} \
              GROUP BY model, system, session_id",
+            // Inner label stays the raw model: the provider is the outer
+            // dimension of this view, so the composite identity would be
+            // redundant here.
             model = exprs.model,
             system = exprs.system,
             session_id = semconv::session_id_expr("attributes"),
@@ -6341,7 +6413,7 @@ pub fn query_latency_series(
     let group_col = if all_spans {
         "name".to_string()
     } else {
-        exprs.model.clone()
+        exprs.identity.clone()
     };
     let mut where_clause = if all_spans {
         "WHERE 1=1".to_string()
@@ -6542,7 +6614,7 @@ pub fn query_calls_series(
     let group_col = if all_spans {
         "name".to_string()
     } else {
-        exprs.model.clone()
+        exprs.identity.clone()
     };
     let mut where_clause = if all_spans {
         "WHERE 1=1".to_string()
@@ -6643,7 +6715,7 @@ pub fn query_latency_by_context(
             json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms
         FROM spans
         {where_clause}",
-        model = exprs.model,
+        model = exprs.identity,
         input = exprs.input,
     );
 
@@ -6838,7 +6910,7 @@ pub fn query_error_types(
         FROM error_spans
         GROUP BY model, error_type, bucket
         ORDER BY count DESC",
-        model = exprs.model,
+        model = exprs.identity,
         where_clause = where_clause,
     );
 
@@ -6891,10 +6963,14 @@ pub fn query_model_drift(
     }
     push_scope(&mut where_clause, &mut params, filters.span_scope());
 
+    // Alias-aware key sets (llm.* spellings included) so drift is detected
+    // the same way model identity is built elsewhere.
+    let request_model_expr = exprs.request_model.clone();
+    let response_model_expr = exprs.response_model.clone();
     let sql = format!(
         "SELECT
-            json_extract(attributes, '$.\"gen_ai.request.model\"') AS request_model,
-            json_extract(attributes, '$.\"gen_ai.response.model\"') AS response_model,
+            {request_model_expr} AS request_model,
+            {response_model_expr} AS response_model,
             COUNT(*) AS count
         FROM spans
         {where_clause}
@@ -7397,7 +7473,8 @@ mod tests {
         assert_eq!(summary.total_input_tokens, 50);
         assert_eq!(summary.total_output_tokens, 25);
         assert_eq!(by_model.len(), 1);
-        assert_eq!(by_model[0].model, "claude-opus-4-7");
+        // Identity is `provider/model` when a provider is recorded (#143).
+        assert_eq!(by_model[0].model, "anthropic/claude-opus-4-7");
         assert_eq!(by_model[0].input_tokens, 50);
         assert_eq!(by_model[0].output_tokens, 25);
         assert_eq!(by_system.len(), 1);

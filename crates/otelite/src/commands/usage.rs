@@ -177,6 +177,11 @@ struct ModelRow {
     requests: usize,
     cost: Option<f64>,
     cost_source: Option<String>,
+    /// Dominant differing response model (silent provider rerouting), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_model: Option<String>,
+    /// Calls whose response model differed from the request model.
+    rerouted_count: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -317,7 +322,9 @@ impl UsageCommand {
             "fallback (hardcoded Claude rates)".to_string()
         };
 
-        // Enrich model/system rows with cost
+        // Enrich model/system rows with cost. The pricing lookup walks
+        // provider-prefixed LiteLLM keys, so the composite identity
+        // (`provider/model`) resolves as precisely as the bare name did.
         let by_model: Vec<ModelRow> = by_model_raw
             .iter()
             .map(|m| {
@@ -335,6 +342,8 @@ impl UsageCommand {
                     requests: m.requests,
                     cost: cr.cost,
                     cost_source: Some(cr.source.as_str().to_string()),
+                    response_model: m.response_model.clone(),
+                    rerouted_count: m.rerouted_count,
                 }
             })
             .collect();
@@ -1090,28 +1099,52 @@ fn display_by_model(models: &[ModelRow]) {
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic);
 
-    table.set_header(vec![
+    // Rerouting columns are only meaningful when some identity shows them.
+    let show_rerouting = models
+        .iter()
+        .any(|m| m.response_model.is_some() || m.rerouted_count > 0);
+
+    let mut header: Vec<Cell> = vec![
         Cell::new("Model").fg(Color::Cyan),
         Cell::new("Input").fg(Color::Cyan),
         Cell::new("Output").fg(Color::Cyan),
         Cell::new("Total").fg(Color::Cyan),
         Cell::new("Requests").fg(Color::Cyan),
         Cell::new("Cost").fg(Color::Cyan),
-    ]);
+    ];
+    if show_rerouting {
+        header.push(Cell::new("Resp model").fg(Color::Cyan));
+        header.push(Cell::new("Rerouted").fg(Color::Cyan));
+    }
+    table.set_header(header);
 
     for m in models {
-        table.add_row(vec![
-            &m.model,
-            &format_number(m.input_tokens),
-            &format_number(m.output_tokens),
-            &format_number(m.total_tokens),
-            &m.requests.to_string(),
-            &format_cost(m.cost),
-        ]);
+        let mut row: Vec<String> = vec![
+            m.model.clone(),
+            format_number(m.input_tokens),
+            format_number(m.output_tokens),
+            format_number(m.total_tokens),
+            m.requests.to_string(),
+            format_cost(m.cost),
+        ];
+        if show_rerouting {
+            row.push(m.response_model.clone().unwrap_or_else(|| "—".into()));
+            row.push(if m.rerouted_count > 0 {
+                m.rerouted_count.to_string()
+            } else {
+                "—".into()
+            });
+        }
+        table.add_row(row.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     }
 
     println!("Breakdown by Model:");
     println!("{}", table);
+    if show_rerouting {
+        println!(
+            "* Resp model = dominant response model differing from the request model; Rerouted = calls the provider served with a different model."
+        );
+    }
 }
 
 fn display_by_system(systems: &[SystemRow]) {

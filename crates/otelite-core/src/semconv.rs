@@ -69,6 +69,13 @@ pub const REQUEST_MODEL_KEYS: &[&str] = &[
     "model",
 ];
 
+/// Response model identifier (the model that actually served the response).
+///
+/// Providers may route a request to a different serving model, so this is
+/// exposed separately for rerouting analysis and must never substitute for
+/// the request model in model identity.
+pub const RESPONSE_MODEL_KEYS: &[&str] = &["gen_ai.response.model", "llm.response.model"];
+
 /// Provider / system (openai, anthropic, bedrock, ...).
 pub const SYSTEM_KEYS: &[&str] = &[
     "gen_ai.provider.name",

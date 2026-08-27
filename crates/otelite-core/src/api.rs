@@ -494,7 +494,9 @@ pub struct TokenUsageSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ModelUsage {
-    /// Model name (e.g., "gpt-4", "claude-sonnet-4-20250514")
+    /// Model identity: `provider/model` when a provider is recorded, bare
+    /// model otherwise. Never built from a response model when a request
+    /// model exists (#143).
     pub model: String,
     /// Input tokens for this model
     pub input_tokens: u64,
@@ -502,6 +504,14 @@ pub struct ModelUsage {
     pub output_tokens: u64,
     /// Number of requests for this model
     pub requests: usize,
+    /// Dominant response model within this identity when it differs from the
+    /// request model (silent provider rerouting), else `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_model: Option<String>,
+    /// Calls where the recorded response model differs from the request
+    /// model (both known).
+    #[serde(default)]
+    pub rerouted_count: usize,
 }
 
 /// Token usage for a specific system (provider)

@@ -1751,7 +1751,8 @@ async fn test_cache_hit_rate_envelope_and_filters() {
     assert_eq!(status, StatusCode::OK, "{v}");
     let items = v["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "{v}");
-    assert_eq!(items[0]["model"], "modelA");
+    // Identity is `provider/model` when a provider is recorded (#143).
+    assert_eq!(items[0]["model"], "anthropic/modelA");
     assert_eq!(items[0]["total_input_tokens"], 100);
     assert_eq!(items[0]["total_cache_read_tokens"], 40);
     // hit_rate = 40 / (40 + 100)

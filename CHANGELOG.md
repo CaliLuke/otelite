@@ -11,6 +11,18 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Provider-aware model identity and rerouting visibility.** Model series
+  are now grouped by `provider/model` (bare model name when no provider is
+  recorded), so two providers serving the same model name no longer merge
+  into one series. A provider's silent rerouting (requesting one model,
+  served by another) stays in the requested model's series: the by-model
+  table gains `Resp model` (dominant differing response model) and
+  `Rerouted` (call count) columns when any rerouting is observed, and the
+  model-drift view now honours all known attribute spellings. No
+  canonicalisation or family grouping is applied — identifiers stay as
+  recorded.
 ## [0.1.81] - 2026-08-27
 
 ### Added
