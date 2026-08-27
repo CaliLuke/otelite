@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.74] - 2026-08-27
+
 ### Added
 
 - **Per-agent rollup: who did what, and what it cost.** One table for
