@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.66] - 2026-08-27
+
 ### Fixed
 
 - **Metrics, Traces and Logs views load instantly instead of taking minutes.**
