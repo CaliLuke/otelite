@@ -617,6 +617,7 @@ class AnalyticsView {
             ].filter(Boolean).join('');
 
             this._setSectionBody('latency', html);
+            this._bindLatencyCharts();
             this.loadedSections.add('latency');
         } catch (err) {
             this._setSectionError('latency', err);
@@ -1918,45 +1919,48 @@ class AnalyticsView {
         if (!charts) return '';
         return `
             <h3>Latency percentiles</h3>
-            ${charts}
-            <script>
-                document.querySelectorAll('.latency-percentile-chart').forEach(el => {
-                    const view = window.analyticsView;
-                    if (!view) return;
-                    const render = model => {
-                        const series = JSON.parse(el.dataset.analyticsPercentiles);
-                        const points = model === 'all' ? (series.all || []) : ((series.models || {})[model] || []);
-                        el.querySelector('.percentile-chart-body').innerHTML = view._renderPercentileLines(points);
-                        const title = el.querySelector('h4');
-                        const prefix = title.textContent.split(' — model:')[0];
-                        title.textContent = prefix + ' — model: ' + model;
-                    };
-                    el.querySelector('.latency-percentile-model').addEventListener('change', e => render(e.target.value));
-                    render('all');
-                });
-                document.querySelectorAll('.distribution-chart').forEach(el => {
-                    window.analyticsView && window.analyticsView._bindDistributionScale(el);
-                });
-            </script>`;
+            ${charts}`;
     }
 
-    /** Re-bind the scale-toggle listener on a freshly rendered distribution chart. */
+    /**
+     * Bind the latency section's interactive charts. Script tags inside
+     * innerHTML never execute, so all chart wiring happens here, after
+     * the DOM update (see _setSectionBody('latency', ...)).
+     */
+    _bindLatencyCharts() {
+        const body = document.getElementById('analytics-section-body-latency');
+        if (!body) return;
+        body.querySelectorAll('.latency-percentile-chart').forEach(el => {
+            const render = model => {
+                const series = JSON.parse(el.dataset.analyticsPercentiles);
+                const points = model === 'all' ? (series.all || []) : ((series.models || {})[model] || []);
+                el.querySelector('.percentile-chart-body').innerHTML = this._renderPercentileLines(points);
+                const title = el.querySelector('h4');
+                const prefix = title.textContent.split(' — model:')[0];
+                title.textContent = prefix + ' — model: ' + model;
+            };
+            el.querySelector('.latency-percentile-model').addEventListener('change', e => render(e.target.value));
+            render('all');
+        });
+        body.querySelectorAll('.distribution-chart').forEach(el => this._bindDistributionScale(el));
+    }
+
+    /** Bind (or re-bind after a scale-toggle re-render) the scale-toggle listener on a distribution chart. */
     _bindDistributionScale(el) {
-        const view = window.analyticsView;
         const sel = el && el.querySelector('.distribution-scale');
-        if (!view || !sel) return;
+        if (!sel) return;
         sel.addEventListener('change', async () => {
             try {
                 const params = Object.assign({}, JSON.parse(el.dataset.distributionParams || '{}'));
-                const resp = await view.api.getDistribution({
+                const resp = await this.api.getDistribution({
                     metric: el.dataset.distributionMetric,
                     scale: sel.value,
                     ...params,
                 });
-                const html = view._buildDistributionChart(el.dataset.distributionTitle || '', resp);
+                const html = this._buildDistributionChart(el.dataset.distributionTitle || '', resp);
                 if (html) {
                     el.outerHTML = html;
-                    view._bindDistributionScale(el.parentElement.querySelector('.distribution-chart'));
+                    this._bindDistributionScale(el.parentElement.querySelector('.distribution-chart'));
                 }
             } catch (e) { /* keep current chart on fetch error */ }
         });

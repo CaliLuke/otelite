@@ -48,7 +48,9 @@ have to work around), not implementation detail.
   `GET /api/sessions/{id}/context`. Coverage is reported honestly per agent:
   claude is full; opencode spans are partial (only llm/tool spans are
   session-labelled) and codex only exposes `mcp.tools.call` spans, its logs
-  via `conversation.id`, and no per-session metrics.
+  via `conversation.id`, and no per-session metrics. The report also fixes
+  the GenAI latency percentiles' model filter and the distribution
+  chart's scale toggle, which were never wired up.
 
 ## [0.1.75] - 2026-08-27
 
