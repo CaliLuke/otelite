@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.71] - 2026-08-27
+
 ### Fixed
 
 - **`otelite cache` and the cache-economics API flag.** The
