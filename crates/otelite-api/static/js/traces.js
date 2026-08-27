@@ -153,10 +153,9 @@ class TracesView {
      * Build the collapsible tips panel HTML for the traces view.
      */
     _renderTipsPanel() {
-        const dismissed = localStorage.getItem('otelite_tips_dismissed_traces') === 'true';
-        const openAttr = dismissed ? '' : ' open';
+        // Collapsed by default on every load; no persistence.
         return `
-            <details class="tips-panel" id="tips-panel-traces"${openAttr}>
+            <details class="tips-panel" id="tips-panel-traces">
                 <summary>Tips</summary>
                 <div class="tips-panel-body">
                     <ul>
@@ -170,23 +169,10 @@ class TracesView {
         `;
     }
 
-    _attachTipsPanelListener() {
-        const panel = document.getElementById('tips-panel-traces');
-        if (!panel) return;
-        panel.addEventListener('toggle', () => {
-            if (!panel.open) {
-                localStorage.setItem('otelite_tips_dismissed_traces', 'true');
-            } else {
-                localStorage.removeItem('otelite_tips_dismissed_traces');
-            }
-        });
-    }
-
     /**
      * Attach event listeners
      */
     attachEventListeners() {
-        this._attachTipsPanelListener();
         document.getElementById('refresh-traces').addEventListener('click', () => this.loadTraces());
         document.getElementById('export-traces').addEventListener('click', () => this.exportTraces());
         document.getElementById('auto-refresh-traces').addEventListener('change', (e) => this.toggleAutoRefresh(e.target.checked));

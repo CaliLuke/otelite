@@ -153,10 +153,9 @@ class LogsView {
      * Build the collapsible tips panel HTML for the logs view.
      */
     _renderTipsPanel() {
-        const dismissed = localStorage.getItem('otelite_tips_dismissed_logs') === 'true';
-        const openAttr = dismissed ? '' : ' open';
+        // Collapsed by default on every load; no persistence.
         return `
-            <details class="tips-panel" id="tips-panel-logs"${openAttr}>
+            <details class="tips-panel" id="tips-panel-logs">
                 <summary>Tips</summary>
                 <div class="tips-panel-body">
                     <ul>
@@ -170,23 +169,10 @@ class LogsView {
         `;
     }
 
-    _attachTipsPanelListener() {
-        const panel = document.getElementById('tips-panel-logs');
-        if (!panel) return;
-        panel.addEventListener('toggle', () => {
-            if (!panel.open) {
-                localStorage.setItem('otelite_tips_dismissed_logs', 'true');
-            } else {
-                localStorage.removeItem('otelite_tips_dismissed_logs');
-            }
-        });
-    }
-
     /**
      * Attach event listeners
      */
     attachEventListeners() {
-        this._attachTipsPanelListener();
         document.getElementById('refresh-logs').addEventListener('click', () => this.loadLogs());
         document.getElementById('export-logs-json').addEventListener('click', () => this.exportLogs('json'));
         document.getElementById('export-logs-csv').addEventListener('click', () => this.exportLogs('csv'));

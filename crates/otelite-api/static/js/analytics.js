@@ -43,6 +43,19 @@ class AnalyticsView {
         this.filters = parseHashQuery();
         this.appliedUnion = new Set();
         this._bar = null;
+        // Brush-to-focus zoom state (#136). A window in the URL hash
+        // (`#/analytics?start=…&end=…`) is a zoomed window shared from a
+        // link; the window it was zoomed from is unknown, so clearing it
+        // falls back to the default preset window.
+        this._zoomed = false;
+        this._zoomBase = null;
+        const hashWin = parseHashWindow();
+        if (hashWin) {
+            this.trStart = new Date(hashWin.startMs);
+            this.trEnd = new Date(hashWin.endMs);
+            this.trWindowHours = null;
+            this._zoomed = true;
+        }
         // Loader registry — keyed by section id ('cost', 'latency', ...)
         this.sectionLoaders = {};
         // Sections that have rendered their content for the current params.
@@ -76,6 +89,7 @@ class AnalyticsView {
                         <option value="24" selected>24 hr</option>
                         <option value="168">7 days</option>
                     </select>
+                <span id="analytics-zoom-chip" class="zoom-chip" hidden></span>
                 </div>
                 <div id="analytics-filter-bar"></div>
             </div>
@@ -93,10 +107,11 @@ class AnalyticsView {
         `;
 
         this._attachTimeRangeListeners();
-        this._attachTipsPanelListener();
         this._syncDateInputs();
         this._initFilterBar();
         this._hookFilterEcho();
+        this._attachZoomEscListener();
+        this._syncZoomChip();
 
         this._registerSectionLoaders();
         this._attachSectionToggleHandlers();
@@ -124,11 +139,9 @@ class AnalyticsView {
     }
 
     _renderTipsPanel() {
-        // Collapsed by default; user must explicitly open it
-        const shown = localStorage.getItem('otelite_tips_shown_analytics') === 'true';
-        const openAttr = shown ? ' open' : '';
+        // Collapsed by default on every load; no persistence.
         return `
-            <details class="tips-panel" id="tips-panel-analytics"${openAttr}>
+            <details class="tips-panel" id="tips-panel-analytics">
                 <summary>💡 Tips &amp; shortcuts</summary>
                 <div class="tips-panel-body">
                     <div class="tips-grid">
@@ -140,6 +153,7 @@ class AnalyticsView {
                             </ul>
                             <strong>Widgets</strong>
                             <ul>
+                                <li>Drag across a time-series chart to zoom every section; <kbd>Esc</kbd> or the chip's Clear restores the window</li>
                                 <li>Cost from LiteLLM pricing — unknown models show "—"</li>
                                 <li>Bucket auto-scales with time window</li>
                                 <li>Truncation gauge goes red on <code>finish_reason=max_tokens</code></li>
@@ -163,18 +177,6 @@ class AnalyticsView {
                 </div>
             </details>
         `;
-    }
-
-    _attachTipsPanelListener() {
-        const panel = document.getElementById('tips-panel-analytics');
-        if (!panel) return;
-        panel.addEventListener('toggle', () => {
-            if (panel.open) {
-                localStorage.setItem('otelite_tips_shown_analytics', 'true');
-            } else {
-                localStorage.removeItem('otelite_tips_shown_analytics');
-            }
-        });
     }
 
     _attachTimeRangeListeners() {
@@ -279,6 +281,7 @@ class AnalyticsView {
         }
         const presetEl = document.getElementById('tr-preset-analytics');
         if (presetEl) presetEl.value = '';
+        this._syncZoomChip();
         this._refresh();
     }
 
@@ -426,11 +429,21 @@ class AnalyticsView {
         this._bar = renderFilterBar(mount, this.filters, {
             onChange: (state) => {
                 this.filters = { ...state };
-                writeHashQuery(this.filters);
+                this._writeUrlState();
                 this._refresh();
             },
         });
         this._bar.grey([...this.appliedUnion]);
+    }
+
+    /**
+     * Persist filters + zoomed window into the URL hash (#135 / #136).
+     */
+    _writeUrlState() {
+        const win = this._zoomed
+            ? { startMs: this.trStart.getTime(), endMs: this.trEnd.getTime() }
+            : null;
+        writeHashQuery(this.filters, win);
     }
 
     /**
@@ -449,6 +462,170 @@ class AnalyticsView {
         };
     }
 
+    // ── Brush-to-focus zoom (#136) ───────────────────────────────────────────
+
+    /**
+     * SVG data attributes that make a time-series chart brushable. The x-axis
+     * spans [first bucket start, last bucket end]; the brush handler maps a
+     * pixel fraction onto that range.
+     */
+    _brushAttrs(timestampsNs, bucketSecs) {
+        if (!timestampsNs || timestampsNs.length === 0) return '';
+        const n = timestampsNs.length;
+        const first = timestampsNs[0];
+        const last = timestampsNs[n - 1];
+        const bucketNs = bucketSecs
+            ? bucketSecs * 1_000_000_000
+            : (n > 1 ? (last - first) / (n - 1) : 3_600_000_000_000);
+        const startMs = first / 1_000_000;
+        const endMs = last / 1_000_000 + bucketNs / 1_000_000;
+        return `data-brushable="1" data-ts-start="${startMs}" data-ts-end="${endMs}"`;
+    }
+
+    /**
+     * Mark a freshly rendered section body's time-series charts as brushable
+     * and make sure the delegated brush listeners exist (bound once per view
+     * — sections re-render on every refresh, so per-chart window listeners
+     * would leak).
+     */
+    _enableBrushing(root) {
+        if (!root) return;
+        root.querySelectorAll('svg[data-brushable]').forEach(svg => {
+            if (svg.dataset.brushBound) return;
+            svg.dataset.brushBound = '1';
+            svg.style.cursor = 'crosshair';
+        });
+        this._ensureBrushDelegation();
+    }
+
+    _ensureBrushDelegation() {
+        if (this._brushDelegate) return;
+        this._brushDelegate = true;
+        this._brush = null; // { svg, startPx, overlay, dragging }
+
+        const MIN_DRAG_PX = 8;    // below this a release is a plain click
+        const MIN_SPAN_MS = 60_000; // degenerate windows are rejected
+        const frac = (svg, px) => {
+            const rect = svg.getBoundingClientRect();
+            return Math.min(1, Math.max(0, (px - rect.left) / rect.width));
+        };
+        const fracToMs = (svg, f) => {
+            const t0 = Number(svg.dataset.tsStart);
+            const t1 = Number(svg.dataset.tsEnd);
+            return t0 + f * (t1 - t0);
+        };
+
+        document.addEventListener('mousedown', e => {
+            if (e.button !== 0) return;
+            const svg = e.target.closest ? e.target.closest('svg[data-brushable]') : null;
+            if (!svg) return;
+            const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            overlay.setAttribute('class', 'brush-overlay');
+            overlay.setAttribute('y', '0');
+            overlay.setAttribute('height', '100');
+            const f = frac(svg, e.clientX);
+            overlay.setAttribute('x', (f * 100).toFixed(3));
+            overlay.setAttribute('width', '0');
+            svg.appendChild(overlay);
+            this._brush = { svg, startPx: e.clientX, overlay, dragging: true };
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', e => {
+            const b = this._brush;
+            if (!b || !b.dragging) return;
+            const x0 = frac(b.svg, Math.min(b.startPx, e.clientX));
+            const x1 = frac(b.svg, Math.max(b.startPx, e.clientX));
+            b.overlay.setAttribute('x', (x0 * 100).toFixed(3));
+            b.overlay.setAttribute('width', ((x1 - x0) * 100).toFixed(3));
+        });
+
+        document.addEventListener('mouseup', e => {
+            const b = this._brush;
+            if (!b || !b.dragging) return;
+            b.dragging = false;
+            const { svg, startPx, overlay } = b;
+            this._brush = null;
+            if (overlay) overlay.remove();
+            if (Math.abs(e.clientX - startPx) < MIN_DRAG_PX) return; // click: no zoom
+            const f0 = frac(svg, Math.min(startPx, e.clientX));
+            const f1 = frac(svg, Math.max(startPx, e.clientX));
+            const a = fracToMs(svg, f0);
+            const c = fracToMs(svg, f1);
+            if (c - a < MIN_SPAN_MS) return; // too narrow: no zoom
+            this._applyZoom(a, c);
+        });
+    }
+
+    _attachZoomEscListener() {
+        this._escHandler = e => {
+            if (e.key !== 'Escape' || !this._zoomed) return;
+            const view = document.getElementById('analytics-view');
+            if (!view || !view.classList.contains('active')) return;
+            const t = e.target;
+            if (t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName)) return;
+            this._clearZoom();
+        };
+        window.addEventListener('keydown', this._escHandler);
+    }
+
+    _syncZoomChip() {
+        const chip = document.getElementById('analytics-zoom-chip');
+        if (!chip) return;
+        if (!this._zoomed) {
+            chip.hidden = true;
+            chip.innerHTML = '';
+            return;
+        }
+        chip.hidden = false;
+        chip.innerHTML =
+            `Zoomed ${this._esc(this._toDatetimeLocal(this.trStart))} – ${this._esc(this._toDatetimeLocal(this.trEnd))} ` +
+            '<button type="button" class="btn-icon zoom-chip-clear" title="Restore the previous window (Esc)">Clear</button>';
+        chip.querySelector('.zoom-chip-clear').addEventListener('click', () => this._clearZoom());
+    }
+
+    _applyZoom(startMs, endMs) {
+        this._zoomBase = {
+            start: this.trStart,
+            end: this.trEnd,
+            hours: this.trWindowHours,
+        };
+        this.trStart = new Date(startMs);
+        this.trEnd = new Date(endMs);
+        this.trWindowHours = null;
+        this._zoomed = true;
+        const preset = document.getElementById('tr-preset-analytics');
+        if (preset) preset.value = '';
+        this._syncDateInputs();
+        this._writeUrlState();
+        this._syncZoomChip();
+        this._refresh();
+    }
+
+    _clearZoom() {
+        if (!this._zoomed) return;
+        if (this._zoomBase) {
+            this.trStart = this._zoomBase.start;
+            this.trEnd = this._zoomBase.end;
+            this.trWindowHours = this._zoomBase.hours;
+        } else {
+            // Zoomed in from a shared link: the original window is unknown,
+            // fall back to the default 24-hour preset.
+            const now = new Date();
+            this.trWindowHours = 24;
+            this.trEnd = now;
+            this.trStart = new Date(now.getTime() - 24 * 3600000);
+        }
+        this._zoomed = false;
+        this._zoomBase = null;
+        const preset = document.getElementById('tr-preset-analytics');
+        if (preset) preset.value = this.trWindowHours ? String(this.trWindowHours) : '';
+        this._syncDateInputs();
+        this._writeUrlState();
+        this._syncZoomChip();
+        this._refresh();
+    }
+
     _populateModelDropdown(byModel) {
         // Rebuild the bar's model select now that we know the models in the
         // window; provider options come from the by_system breakdown.
@@ -462,7 +639,7 @@ class AnalyticsView {
             providerOptions: providers,
             onChange: (state) => {
                 this.filters = { ...state };
-                writeHashQuery(this.filters);
+                this._writeUrlState();
                 this._refresh();
             },
         });
@@ -504,6 +681,7 @@ class AnalyticsView {
         if (body) {
             body.classList.remove('updating');
             body.innerHTML = html;
+            this._enableBrushing(body);
         }
     }
 
@@ -1112,7 +1290,7 @@ class AnalyticsView {
             <h3>Latency over time — peak p95 ${peakP95.toLocaleString()} ms ${ttftLegend}</h3>
             <p class="table-hint">${hint}</p>
             <div class="cost-chart">
-                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none" ${brushAttrs}>
                     ${bars}
                     ${ttftPolyline}
                 </svg>
@@ -1335,7 +1513,7 @@ class AnalyticsView {
         return `
             <h3>Cost over time — total $${total.toFixed(4)} across ${buckets.length} bucket${buckets.length === 1 ? '' : 's'}</h3>
             <div class="cost-chart">
-                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none" ${brushAttrs}>
                     ${bars}
                 </svg>
                 ${axisHtml}
@@ -1974,6 +2152,7 @@ class AnalyticsView {
                 const series = JSON.parse(el.dataset.analyticsPercentiles);
                 const points = model === 'all' ? (series.all || []) : ((series.models || {})[model] || []);
                 el.querySelector('.percentile-chart-body').innerHTML = this._renderPercentileLines(points);
+                this._enableBrushing(el);
                 const title = el.querySelector('h4');
                 const prefix = title.textContent.split(' — model:')[0];
                 title.textContent = prefix + ' — model: ' + model;
@@ -2092,9 +2271,10 @@ class AnalyticsView {
             new Date(points[0].ts / 1_000_000_000).toDateString() !==
             new Date(points[n - 1].ts / 1_000_000_000).toDateString();
         const labelFor = i => chartAxisLabel(points[i].ts, multiDay);
+        const brushAttrs = this._brushAttrs(points.map(p => p.ts), null);
         return `
             <div class="cost-chart">
-                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none" ${brushAttrs}>
                     <polyline class="percentile-line-p50" points="${line('p50_ms')}" fill="none"/>
                     <polyline class="percentile-line-p90" points="${line('p90_ms')}" fill="none"/>
                     <polyline class="percentile-line-p95" points="${line('p95_ms')}" fill="none"/>
@@ -2264,11 +2444,15 @@ class AnalyticsView {
                     <span class="cost-chart-axis-right">${right}</span>
                 </div>`;
         }
+        const brushAttrs = this._brushAttrs(
+            buckets.map(b => b.timestamp),
+            null,
+        );
 
         return `
             <h3>Request volume over time — ${totalRequests.toLocaleString()} total across ${buckets.length} bucket${buckets.length === 1 ? '' : 's'}</h3>
             <div class="cost-chart">
-                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none" ${brushAttrs}>
                     ${bars}
                 </svg>
                 ${axisHtml}

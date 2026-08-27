@@ -3400,3 +3400,29 @@ body {
 .filter-bar .fb-inactive::placeholder {
     opacity: 0.8;
 }
+
+/* ── Brush-to-focus zoom (#136) ────────────────────────────────────────── */
+.zoom-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-left: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background-color: var(--bg-tertiary, var(--bg-secondary));
+    color: var(--text-secondary, var(--text-primary));
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+.zoom-chip-clear {
+    padding: 0 0.4rem;
+    font-size: 0.7rem;
+    line-height: 1.4;
+}
+svg .brush-overlay {
+    fill: rgba(88, 148, 255, 0.25);
+    stroke: rgba(88, 148, 255, 0.8);
+    stroke-width: 0.4;
+    pointer-events: none;
+}

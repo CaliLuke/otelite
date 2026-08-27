@@ -24,16 +24,39 @@ function parseHashQuery() {
 }
 
 /**
- * Write the filter dimensions into the current view's hash query.
- * The view path (`#/analytics`, `#/sessions`) is preserved.
+ * Read a time window (epoch ms) from the current view's hash query.
+ * Used by the analytics brush-to-focus zoom (#136): a shared link can
+ * point at a zoomed window, not just the default.
+ *
+ * @returns {{startMs: number, endMs: number}|null}
  */
-function writeHashQuery(filters) {
+function parseHashWindow() {
+    const hash = window.location.hash || '';
+    const qIndex = hash.indexOf('?');
+    if (qIndex < 0) return null;
+    const p = new URLSearchParams(hash.slice(qIndex + 1));
+    const start = Number(p.get('start'));
+    const end = Number(p.get('end'));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return null;
+    return { startMs: start, endMs: end };
+}
+
+/**
+ * Write the filter dimensions (and optionally a time window, epoch ms)
+ * into the current view's hash query. The view path (`#/analytics`,
+ * `#/sessions`) is preserved.
+ */
+function writeHashQuery(filters, win = null) {
     const hash = window.location.hash || '#/';
     const path = hash.split('?')[0];
     const params = new URLSearchParams();
     FILTER_DIMENSIONS.forEach(key => {
         if (filters[key]) params.set(key, filters[key]);
     });
+    if (win && win.startMs && win.endMs) {
+        params.set('start', String(win.startMs));
+        params.set('end', String(win.endMs));
+    }
     const qs = params.toString();
     const next = qs ? `${path}?${qs}` : path;
     const url = window.location.pathname + window.location.search + next;
@@ -139,6 +162,7 @@ function renderFilterBar(mount, state, opts = {}) {
 // Exposed via window like the other view modules (app.js reads window.*View).
 window.parseHashQuery = parseHashQuery;
 window.writeHashQuery = writeHashQuery;
+window.parseHashWindow = parseHashWindow;
 window.renderFilterBar = renderFilterBar;
 window.FILTER_DIMENSIONS = FILTER_DIMENSIONS;
 window.AGENT_FAMILIES = AGENT_FAMILIES;

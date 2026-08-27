@@ -15,6 +15,21 @@ have to work around), not implementation detail.
 
 ### Added
 
+- **Brush-to-focus time zoom in GenAI analytics.** Drag across any
+  time-series chart (cost, latency, percentiles, request volume) and every
+  section refetches for the selected window — Grafana-style
+  zoom-to-selection. A chip shows the zoomed range; its Clear button or
+  <kbd>Esc</kbd> restores the previous window, and the zoomed window is
+  written to the URL (`#/analytics?…&start=…&end=…`) so a zoomed view
+  round-trips as a link. Clicks and sub-minute drags do not zoom, and
+  auto-refresh keeps updating the zoomed window while you're in it.
+
+### Changed
+
+- The Tips &amp; shortcuts panels in the GenAI, Logs and Traces views are
+  collapsed by default on every load (previously the Logs and Traces tips
+  opened by default and the panel state was remembered between visits).
+
 - **Global filter bar for GenAI analytics.** The GenAI tab and the Sessions
   tab gain a shared filter bar — agent (claude / opencode / codex), model,
   provider, project and session — that scopes every analytics section at
