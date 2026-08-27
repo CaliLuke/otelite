@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod cache;
+pub mod cached;
 pub mod config;
 pub mod pricing_cache;
 pub mod server;

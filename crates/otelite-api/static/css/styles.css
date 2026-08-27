@@ -2311,6 +2311,13 @@ body {
     padding: 1rem;
 }
 
+/* Refresh in flight: keep the previous content visible, dimmed */
+.analytics-section-body.updating {
+    opacity: 0.55;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
+}
+
 .usage-summary-cards {
     display: flex;
     gap: 1rem;

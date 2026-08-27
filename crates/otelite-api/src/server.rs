@@ -1,6 +1,7 @@
 //! Dashboard HTTP server implementation
 
 use crate::cache::LruCache;
+use crate::cached::{cache_handler, CacheState};
 use crate::config::DashboardConfig;
 use crate::pricing_cache::PricingCache;
 use crate::static_files;
@@ -148,6 +149,8 @@ struct ApiDoc;
 pub struct AppState {
     pub storage: Arc<dyn StorageBackend>,
     pub cache: QueryCache,
+    /// Short-TTL response cache + in-flight dedup for read-only endpoints.
+    pub cache_state: Arc<CacheState>,
     /// LiteLLM pricing database, refreshed periodically in the background.
     pub pricing: PricingCache,
     /// Time at which the server started (for uptime calculation)
@@ -187,6 +190,14 @@ impl QueryCache {
         // Simple serialization-based key
         serde_json::to_string(params).unwrap_or_default()
     }
+
+    /// Clear every cached query result. Called after data-mutating
+    /// operations so stale data is never served.
+    pub fn clear_all(&self) {
+        self.logs.clear();
+        self.traces.clear();
+        self.metrics.clear();
+    }
 }
 
 impl Default for QueryCache {
@@ -208,6 +219,7 @@ impl DashboardServer {
         let state = AppState {
             storage,
             cache: QueryCache::new(),
+            cache_state: CacheState::new(),
             pricing,
             start_time: Arc::new(Instant::now()),
             otlp_grpc_port: config.otlp_grpc_port,
@@ -222,7 +234,7 @@ impl DashboardServer {
 
     /// Build the router with all routes
     pub fn build_router(&self) -> Router {
-        Router::new()
+        let api = Router::new()
             // API routes - Health
             .route("/api/health", get(crate::api::health_check))
             // API routes - Help
@@ -284,10 +296,19 @@ impl DashboardServer {
             .route("/api/openapi.json", get(|| async {
                 axum::Json(ApiDoc::openapi())
             }))
+            // Add shared state
+            .with_state(self.state.clone());
+
+        api
+            // Short-TTL response cache + in-flight dedup for read-only
+            // endpoints (applies only to the whitelisted API routes below;
+            // static files and mutating endpoints pass through untouched)
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&self.state.cache_state),
+                cache_handler,
+            ))
             // Static file serving (index.html, CSS, JS)
             .fallback(static_files::serve_static_file)
-            // Add shared state
-            .with_state(self.state.clone())
             // Add tracing middleware
             .layer(TraceLayer::new_for_http())
     }

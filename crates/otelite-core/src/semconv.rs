@@ -144,12 +144,21 @@ fn coalesce_inner(attributes_col: &str, keys: &[&str], cast: Option<&str>) -> St
 /// Includes the OpenInference `openinference.span.kind` IN (...) clause and
 /// vendor-specific span-name prefix patterns. This deliberately excludes Codex
 /// sampling spans because they lack token and request-outcome attributes.
+///
+/// Every `json_extract` clause is gated by `json_valid` so the guard is
+/// *total*: it returns false (instead of raising "malformed JSON") for rows
+/// whose `attributes` text is corrupt or NULL. This matters for two reasons:
+/// - the guard is used as a partial-index predicate, which SQLite evaluates
+///   on every INSERT; a raising predicate would reject valid telemetry
+///   batches that contain a single corrupt span;
+/// - without it, one corrupt row inside a time window would make every GenAI
+///   analytics query over that window fail.
 pub fn llm_span_guard(attributes_col: &str) -> String {
     let mut clauses: Vec<String> = LLM_SPAN_MARKER_KEYS
         .iter()
         .map(|k| {
             format!(
-                "json_extract({col}, '$.\"{k}\"') IS NOT NULL",
+                "(json_valid({col}) AND json_extract({col}, '$.\"{k}\"') IS NOT NULL)",
                 col = attributes_col,
                 k = k
             )
@@ -161,7 +170,7 @@ pub fn llm_span_guard(attributes_col: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     clauses.push(format!(
-        "json_extract({col}, '$.\"openinference.span.kind\"') IN ({kinds})",
+        "(json_valid({col}) AND json_extract({col}, '$.\"openinference.span.kind\"') IN ({kinds}))",
         col = attributes_col,
         kinds = kinds
     ));
@@ -179,6 +188,7 @@ pub fn request_span_guard(attributes_col: &str) -> String {
     let llm_guard = llm_span_guard(attributes_col);
     let codex_guard = format!(
         "(name = '{span_name}' \
+          AND json_valid({col}) \
           AND json_extract({col}, '$.\"model\"') IS NOT NULL \
           AND json_extract({col}, '$.\"otel.scope.name\"') = '{scope_name}')",
         span_name = CODEX_LLM_REQUEST_SPAN_NAME,

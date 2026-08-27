@@ -304,9 +304,12 @@ class AnalyticsView {
     /**
      * Re-fetch summary and any currently-expanded section. Called when the
      * time window or model filter changes, or on the 30s auto-refresh.
+     *
+     * Loaded sections are updated in place: their existing content stays
+     * visible (dimmed) until the new data arrives, so charts never blank
+     * out during a refresh.
      */
     async _refresh() {
-        this.loadedSections.clear();
         await this._loadSummary();
         // Re-fire loaders for any open sections
         for (const id of Object.keys(this.sectionLoaders)) {
@@ -365,6 +368,10 @@ class AnalyticsView {
             this._populateModelDropdown(summary.by_model || []);
             this._updateSectionStats(summary);
         } catch (err) {
+            if (this.lastSummary && this.lastSummary.summary) {
+                // Keep the previous cards; the data is merely stale.
+                return;
+            }
             summaryContainer.innerHTML = `<div class="empty-state"><p>Failed to load analytics summary</p><p class="empty-state-hint">${this._esc(err.message)}</p></div>`;
         }
     }
@@ -451,15 +458,36 @@ class AnalyticsView {
 
     _setSectionBody(id, html) {
         const body = document.getElementById(`analytics-section-body-${id}`);
-        if (body) body.innerHTML = html;
+        if (body) {
+            body.classList.remove('updating');
+            body.innerHTML = html;
+        }
     }
 
     _setSectionLoading(id) {
-        this._setSectionBody(id, `<div class="empty-state-hint">Loading…</div>`);
+        const body = document.getElementById(`analytics-section-body-${id}`);
+        if (!body) return;
+        if (!this.loadedSections.has(id)) {
+            // First load: nothing to show yet.
+            body.innerHTML = `<div class="empty-state-hint">Loading…</div>`;
+        } else {
+            // Refresh: keep the previous content on screen and dim it so
+            // the chart does not disappear while the refetch is in flight.
+            body.classList.add('updating');
+        }
     }
 
     _setSectionError(id, err) {
-        this._setSectionBody(id, `<div class="empty-state-hint">Failed to load: ${this._esc(err.message || String(err))}</div>`);
+        const msg = `<div class="empty-state-hint">Failed to load: ${this._esc(err.message || String(err))}</div>`;
+        const body = document.getElementById(`analytics-section-body-${id}`);
+        if (body && this.loadedSections.has(id) && body.innerHTML.trim()) {
+            // Refresh failed but we have previous data: keep it and flag
+            // the staleness above it instead of wiping the chart.
+            body.classList.remove('updating');
+            body.insertAdjacentHTML('afterbegin', msg);
+        } else {
+            this._setSectionBody(id, msg);
+        }
     }
 
     async _loadCostSection() {

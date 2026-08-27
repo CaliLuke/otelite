@@ -11,6 +11,26 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Overview and analytics pages load in seconds instead of 30+ seconds.**
+  GenAI analytics queries now run on dedicated read connections with a warm
+  page cache and a partial index over LLM spans, so dashboard widgets return
+  as soon as their data is ready instead of queueing behind one database
+  connection. Short-lived response caching also means the 30-second
+  auto-refresh almost always answers instantly.
+- **Auto-refresh no longer blanks the charts.** While the dashboard refreshes,
+  existing charts stay visible (dimmed) until the new data arrives; if a
+  refresh fails, the previous data is kept with a staleness notice instead of
+  being wiped.
+
+### Fixed
+
+- **Analytics no longer fails when a corrupt span sits inside the time
+  window.** Span records whose attributes JSON is malformed are now skipped
+  by GenAI analytics queries instead of failing the whole query with a
+  "malformed JSON" error.
+
 ## [0.1.64] - 2026-08-18
 
 ### Added

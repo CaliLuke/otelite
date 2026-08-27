@@ -265,30 +265,31 @@ pub fn get_stats(conn: &Connection) -> Result<StorageStats> {
         .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
         .map_err(|e| StorageError::QueryError(format!("Failed to count metrics: {}", e)))?;
 
-    // Get time ranges
-    let oldest_timestamp: Option<i64> = conn
-        .query_row(
-            "SELECT MIN(timestamp) FROM (
-            SELECT timestamp FROM logs
-            UNION ALL SELECT start_time as timestamp FROM spans
-            UNION ALL SELECT timestamp FROM metrics
-        )",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let newest_timestamp: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(timestamp) FROM (
-            SELECT timestamp FROM logs
-            UNION ALL SELECT end_time as timestamp FROM spans
-            UNION ALL SELECT timestamp FROM metrics
-        )",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    // Get time ranges. One MIN/MAX per table: each is a single index seek
+    // (idx_logs_timestamp, idx_spans_start_time, idx_metrics_timestamp,
+    // idx_spans_end_time). The equivalent MIN/MAX over a UNION ALL of all
+    // three tables forces full covering-index scans of every table.
+    let scalar_min = |sql: &str| -> Option<i64> {
+        conn.query_row(sql, [], |row| row.get::<_, Option<i64>>(0))
+            .ok()
+            .flatten()
+    };
+    let oldest_timestamp = [
+        "SELECT MIN(timestamp) FROM logs",
+        "SELECT MIN(start_time) FROM spans",
+        "SELECT MIN(timestamp) FROM metrics",
+    ]
+    .iter()
+    .filter_map(|sql| scalar_min(sql))
+    .min();
+    let newest_timestamp = [
+        "SELECT MAX(timestamp) FROM logs",
+        "SELECT MAX(end_time) FROM spans",
+        "SELECT MAX(timestamp) FROM metrics",
+    ]
+    .iter()
+    .filter_map(|sql| scalar_min(sql))
+    .max();
 
     // Get database size (page_count * page_size)
     let page_count: i64 = conn
@@ -3519,6 +3520,43 @@ mod tests {
     }
 
     #[test]
+    fn test_query_token_usage_tolerates_malformed_attributes() {
+        // Regression: the LLM guard is used as a partial-index predicate and
+        // is evaluated on every scanned row. Before the guard clauses were
+        // gated with json_valid, a single span with corrupt `attributes` in
+        // the time window made every GenAI query over that window fail with
+        // "malformed JSON" — and would have rejected the INSERT itself now
+        // that the index exists. Corrupt spans must be skipped instead.
+        let conn = setup_test_db();
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+             VALUES ('t1', 's1', 'llm.call', 0, 100, 200,
+                     '{\"gen_ai.system\":\"anthropic\",\"gen_ai.request.model\":\"claude-opus-4-7\",\"gen_ai.usage.input_tokens\":50,\"gen_ai.usage.output_tokens\":25}', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+             VALUES ('t2', 's2', 'corrupt', 0, 100, 200, '{', 1)",
+            [],
+        )
+        .unwrap();
+
+        let (summary, by_model, by_system) =
+            query_token_usage(&conn, Some(50), Some(300), None).unwrap();
+
+        assert_eq!(summary.total_requests, 1);
+        assert_eq!(summary.total_input_tokens, 50);
+        assert_eq!(summary.total_output_tokens, 25);
+        assert_eq!(by_model.len(), 1);
+        assert_eq!(by_model[0].model, "claude-opus-4-7");
+        assert_eq!(by_model[0].input_tokens, 50);
+        assert_eq!(by_model[0].output_tokens, 25);
+        assert_eq!(by_system.len(), 1);
+        assert_eq!(by_system[0].system, "anthropic");
+    }
+
+    #[test]
     fn test_parse_metric_row_tolerates_malformed_json() {
         let conn = setup_test_db();
         conn.execute(
@@ -3572,6 +3610,43 @@ mod tests {
         assert_eq!(stats.log_count, 0);
         assert_eq!(stats.span_count, 0);
         assert_eq!(stats.metric_count, 0);
+        assert_eq!(stats.oldest_timestamp, None);
+        assert_eq!(stats.newest_timestamp, None);
+    }
+
+    #[test]
+    fn test_get_stats_min_max_across_tables() {
+        let conn = setup_test_db();
+        // Oldest is a log, newest span is found via MAX(end_time) — a
+        // different column than MIN(start_time) uses — and the newest
+        // metric sits between them. This exercises the per-table scalar
+        // MIN/MAX aggregation (each an index seek, no full-table scan).
+        conn.execute(
+            "INSERT INTO logs (timestamp, severity_number, body) VALUES (500, 9, 'old')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time)
+             VALUES ('t1', 's1', 'n', 0, 1000, 9000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp) VALUES ('m', 1, 7000)",
+            [],
+        )
+        .unwrap();
+
+        let stats = get_stats(&conn).unwrap();
+        assert_eq!(stats.log_count, 1);
+        assert_eq!(stats.span_count, 1);
+        assert_eq!(stats.metric_count, 1);
+        // Oldest overall is the log at 500 (spans start at 1000).
+        assert_eq!(stats.oldest_timestamp, Some(500));
+        // Newest overall is the span's END time (9000), not its start (1000)
+        // and not the metric (7000) — proves MAX uses end_time.
+        assert_eq!(stats.newest_timestamp, Some(9000));
     }
 
     #[test]

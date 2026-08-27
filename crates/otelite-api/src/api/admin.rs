@@ -36,6 +36,10 @@ pub async fn purge_all(
         )
     })?;
 
+    // Purged data must not be served from any cache.
+    state.cache_state.clear_all();
+    state.cache.clear_all();
+
     Ok(Json(PurgeAllResponse {
         logs_deleted: stats.logs_deleted,
         spans_deleted: stats.spans_deleted,
