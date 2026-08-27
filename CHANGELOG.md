@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.80] - 2026-08-27
+
 ### Added
 
 - **Calendar-day latency buckets with timezones.** The latency percentiles
