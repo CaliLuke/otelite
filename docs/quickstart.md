@@ -73,6 +73,19 @@ otelite serve \
 the corresponding environment value. Use `0.0.0.0` explicitly for container
 or LAN access.
 
+For telemetry sent directly from browser JavaScript, the OTLP/HTTP router
+allows only loopback origins on ports `3000` and `5173` by default. Configure a
+different development origin explicitly:
+
+```bash
+otelite serve --cors-origin http://localhost:4200
+```
+
+Repeat `--cors-origin` for multiple origins, or set a comma-separated
+`OTELITE_CORS_ORIGINS` value. Preflight `OPTIONS` requests and `POST` requests
+are supported on `/v1/logs`, `/v1/traces`, and `/v1/metrics`. Otelite does not
+send unrestricted `Access-Control-Allow-Origin: *`.
+
 ## Sending Test Data
 
 ### Using otel-cli

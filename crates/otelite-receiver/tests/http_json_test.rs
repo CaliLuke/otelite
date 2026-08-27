@@ -9,7 +9,7 @@ use http_test_utils::{
 use otelite_receiver::config::ReceiverConfig;
 use otelite_receiver::http::HttpServer;
 use otelite_storage::{sqlite::SqliteBackend, StorageBackend, StorageConfig};
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::Arc;
@@ -22,10 +22,13 @@ use tokio::time::sleep;
 /// The returned directory must remain alive until the server has processed all
 /// requests because SQLite opens the database lazily.
 async fn start_test_server() -> (String, HttpServer, TempDir) {
-    let mut config = ReceiverConfig::new();
-    // Use port 0 to let OS assign a random available port
-    config.http_addr = "127.0.0.1:0".parse().expect("Failed to parse address");
+    start_test_server_with_config(ReceiverConfig::new()).await
+}
 
+async fn start_test_server_with_config(
+    mut config: ReceiverConfig,
+) -> (String, HttpServer, TempDir) {
+    config.http_addr = "127.0.0.1:0".parse().expect("Failed to parse address");
     let server = HttpServer::new(config);
 
     // Create storage backend
@@ -336,5 +339,86 @@ async fn repeated_read_only_queries_see_continued_ingestion() {
         assert_eq!(latest, body);
     }
 
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn loopback_origins_can_preflight_every_otlp_signal_route() {
+    let (base_url, server, _temp_dir) = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    for path in ["/v1/logs", "/v1/traces", "/v1/metrics"] {
+        let response = client
+            .request(Method::OPTIONS, format!("{base_url}{path}"))
+            .header("Origin", "http://localhost:5173")
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Headers", "content-type")
+            .send()
+            .await
+            .expect("browser preflight must receive a response");
+        assert!(response.status().is_success(), "path: {path}");
+        assert_eq!(
+            response
+                .headers()
+                .get("Access-Control-Allow-Origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173"),
+            "path: {path}"
+        );
+        assert!(
+            response
+                .headers()
+                .get("Access-Control-Allow-Methods")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.contains("POST")),
+            "path: {path}"
+        );
+    }
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn configured_origin_can_post_otlp_json() {
+    let config = ReceiverConfig::new()
+        .with_cors_allowed_origins(vec!["https://telemetry.example.com".to_string()]);
+    let (base_url, server, _temp_dir) = start_test_server_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/v1/logs"))
+        .header("Origin", "https://telemetry.example.com")
+        .header("Content-Type", "application/json")
+        .body(create_logs_json())
+        .send()
+        .await
+        .expect("allowed browser POST must receive a response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("Access-Control-Allow-Origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("https://telemetry.example.com")
+    );
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn remote_origin_is_not_allowed_by_default() {
+    let (base_url, server, _temp_dir) = start_test_server().await;
+
+    let response = reqwest::Client::new()
+        .request(Method::OPTIONS, format!("{base_url}/v1/logs"))
+        .header("Origin", "https://remote.example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .expect("disallowed browser preflight must receive a response");
+
+    assert!(response
+        .headers()
+        .get("Access-Control-Allow-Origin")
+        .is_none());
     server.shutdown();
 }

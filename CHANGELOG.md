@@ -29,6 +29,12 @@ have to work around), not implementation detail.
   now explicitly disables scheduled retention without replacing an existing
   database.
 
+### Fixed
+
+- Send origin-specific CORS headers and answer browser preflights on all
+  OTLP/HTTP signal endpoints, using configurable loopback-only development
+  origins instead of unrestricted remote browser access.
+
 ## [0.1.83] - 2026-08-27
 
 ### Added

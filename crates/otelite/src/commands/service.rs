@@ -320,6 +320,7 @@ pub async fn handle_start(
     addr: SocketAddr,
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
+    cors_allowed_origins: Vec<String>,
 ) -> Result<()> {
     if let Some(pid) = read_pid()? {
         if is_process_running(pid) {
@@ -356,6 +357,9 @@ pub async fn handle_start(
         .arg(http_addr.to_string())
         .arg("--storage-path")
         .arg(&storage_config.data_dir);
+    for origin in &cors_allowed_origins {
+        cmd.arg("--cors-origin").arg(origin);
+    }
     let child =
         cmd.stdin(Stdio::null())
             .stdout(log_file_handle.try_clone().map_err(|e| {
@@ -479,6 +483,7 @@ pub async fn handle_restart(
     addr: SocketAddr,
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
+    cors_allowed_origins: Vec<String>,
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
     if launchd_service_state()?.is_some() {
@@ -506,7 +511,14 @@ pub async fn handle_restart(
     handle_stop().await?;
 
     println!("Daemon stopped. Starting fresh...");
-    handle_start(storage_config, addr, grpc_addr, http_addr).await
+    handle_start(
+        storage_config,
+        addr,
+        grpc_addr,
+        http_addr,
+        cors_allowed_origins,
+    )
+    .await
 }
 
 fn display_running_status(pid: u32, supervisor: Option<&str>) -> Result<()> {

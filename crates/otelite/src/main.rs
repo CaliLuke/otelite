@@ -76,6 +76,14 @@ struct ServerArgs {
     #[arg(long, env = "OTELITE_HTTP_ADDR", default_value = "127.0.0.1:4318")]
     http_addr: SocketAddr,
 
+    /// Browser origins allowed to send OTLP/HTTP (repeatable or comma-separated)
+    #[arg(
+        long = "cors-origin",
+        env = "OTELITE_CORS_ORIGINS",
+        value_delimiter = ','
+    )]
+    cors_allowed_origins: Option<Vec<String>>,
+
     /// Directory for the SQLite database. Defaults to ~/.otelite/data
     #[arg(long)]
     storage_path: Option<PathBuf>,
@@ -87,6 +95,7 @@ impl Default for ServerArgs {
             addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
             grpc_addr: SocketAddr::from(([127, 0, 0, 1], 4317)),
             http_addr: SocketAddr::from(([127, 0, 0, 1], 4318)),
+            cors_allowed_origins: None,
             storage_path: None,
         }
     }
@@ -97,6 +106,12 @@ impl ServerArgs {
         StorageConfig::from_env_with_data_dir(self.storage_path.clone()).map_err(|e| {
             Error::ConfigError(format!("Failed to resolve storage configuration: {e}"))
         })
+    }
+
+    fn resolved_cors_allowed_origins(&self) -> Vec<String> {
+        self.cors_allowed_origins
+            .clone()
+            .unwrap_or_else(otelite_receiver::ReceiverConfig::default_cors_allowed_origins)
     }
 }
 
@@ -568,22 +583,26 @@ async fn run_cli() -> Result<()> {
         Some(Commands::Serve { server }) => run_dashboard(server).await,
         Some(Commands::Start { server }) => {
             let storage_config = server.storage_config()?;
+            let cors_allowed_origins = server.resolved_cors_allowed_origins();
             commands::service::handle_start(
                 storage_config,
                 server.addr,
                 server.grpc_addr,
                 server.http_addr,
+                cors_allowed_origins,
             )
             .await
         },
         Some(Commands::Stop) => commands::service::handle_stop().await,
         Some(Commands::Restart { server }) => {
             let storage_config = server.storage_config()?;
+            let cors_allowed_origins = server.resolved_cors_allowed_origins();
             commands::service::handle_restart(
                 storage_config,
                 server.addr,
                 server.grpc_addr,
                 server.http_addr,
+                cors_allowed_origins,
             )
             .await
         },
@@ -684,8 +703,11 @@ async fn run_dashboard(server: ServerArgs) -> Result<()> {
         addr,
         grpc_addr,
         http_addr,
+        cors_allowed_origins,
         storage_path: _,
     } = server;
+    let cors_allowed_origins = cors_allowed_origins
+        .unwrap_or_else(otelite_receiver::ReceiverConfig::default_cors_allowed_origins);
 
     let is_first_run = Config::is_first_run();
     if is_first_run {
@@ -739,7 +761,8 @@ async fn run_dashboard(server: ServerArgs) -> Result<()> {
 
     let receiver_config = otelite_receiver::ReceiverConfig::new()
         .with_grpc_addr(grpc_addr)
-        .with_http_addr(http_addr);
+        .with_http_addr(http_addr)
+        .with_cors_allowed_origins(cors_allowed_origins);
 
     let grpc_server =
         otelite_receiver::grpc::GrpcServer::new(receiver_config.clone(), storage.clone());
@@ -965,9 +988,10 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const SERVER_ENV: [&str; 6] = [
+    const SERVER_ENV: [&str; 7] = [
         "OTELITE_GRPC_ADDR",
         "OTELITE_HTTP_ADDR",
+        "OTELITE_CORS_ORIGINS",
         "OTELITE_DATA_DIR",
         "OTELITE_RETENTION_DAYS",
         "OTELITE_PURGE_SCHEDULE",
@@ -1051,6 +1075,35 @@ mod tests {
         let cli = server_args(cli.command.unwrap());
         assert_eq!(cli.grpc_addr, SocketAddr::from(([127, 0, 0, 1], 6317)));
         assert_eq!(cli.http_addr, SocketAddr::from(([127, 0, 0, 1], 6318)));
+    }
+
+    #[test]
+    fn cors_origin_precedence_is_cli_then_environment_then_loopback_defaults() {
+        let _guard = ENV_LOCK.lock();
+        let _environment = ServerEnv::cleared();
+
+        let defaults = Cli::try_parse_from(["otelite", "serve"]).unwrap();
+        let defaults = server_args(defaults.command.unwrap());
+        assert_eq!(
+            defaults.resolved_cors_allowed_origins(),
+            otelite_receiver::ReceiverConfig::default_cors_allowed_origins()
+        );
+
+        std::env::set_var(
+            "OTELITE_CORS_ORIGINS",
+            "https://one.example,https://two.example",
+        );
+        let environment = Cli::try_parse_from(["otelite", "serve"]).unwrap();
+        let environment = server_args(environment.command.unwrap());
+        assert_eq!(
+            environment.resolved_cors_allowed_origins(),
+            ["https://one.example", "https://two.example"]
+        );
+
+        let cli = Cli::try_parse_from(["otelite", "serve", "--cors-origin", "https://cli.example"])
+            .unwrap();
+        let cli = server_args(cli.command.unwrap());
+        assert_eq!(cli.resolved_cors_allowed_origins(), ["https://cli.example"]);
     }
 
     #[test]

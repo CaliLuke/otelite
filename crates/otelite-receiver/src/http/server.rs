@@ -70,7 +70,8 @@ impl HttpServer {
             logs_handler,
             traces_handler,
             self.health_checker.clone(),
-        );
+            &self.config.cors_allowed_origins,
+        )?;
 
         // Create TCP listener
         let listener = tokio::net::TcpListener::bind(addr)
