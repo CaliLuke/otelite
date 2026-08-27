@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.82] - 2026-08-27
+
 ### Added
 
 - **Provider-aware model identity and rerouting visibility.** Model series
