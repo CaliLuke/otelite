@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.78] - 2026-08-27
+
 ### Fixed
 
 - The GenAI view's Cost and Latency charts no longer fail to load with a
