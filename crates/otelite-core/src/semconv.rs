@@ -348,6 +348,12 @@ pub mod metric_names {
     /// Per-turn token histogram from the codex CLI; `value_histogram[1]` is
     /// the turn's token count for the `token_type` label.
     pub const CODEX_TURN_TOKEN_USAGE: &str = "codex.turn.token_usage";
+    /// Per-turn time-to-first-token histogram from the codex CLI
+    /// (`value_histogram` in ms); the only TTFT source for codex, whose
+    /// `run_sampling_request` spans carry no TTFT attribute.
+    pub const CODEX_TURN_TTFT: &str = "codex.turn.ttft.duration_ms";
+    /// Per-turn end-to-end duration histogram from the codex CLI (ms).
+    pub const CODEX_TURN_E2E_DURATION: &str = "codex.turn.e2e_duration_ms";
     /// Per-event thread-start marker; `value_int` is the number of threads
     /// started. `session_source = 'cli'` rows are user-initiated codex
     /// sessions (sub-agent threads carry their own `session_source`).

@@ -992,3 +992,148 @@ async fn test_get_projects_with_data() {
     // Sorted by cost desc: projA ($0.75) first, the rest alphabetical.
     assert_eq!(rollup.projects[0].project_id, "projA");
 }
+
+fn llm_request_span(
+    span_id: &str,
+    model: &str,
+    start_time: i64,
+    duration_ms: i64,
+    ttft_ms: Option<i64>,
+) -> Span {
+    let mut attributes: HashMap<String, String> = HashMap::new();
+    attributes.insert("session.id".to_string(), "s1".to_string());
+    attributes.insert("model".to_string(), model.to_string());
+    if let Some(ttft) = ttft_ms {
+        attributes.insert("ttft_ms".to_string(), ttft.to_string());
+    }
+    Span {
+        trace_id: "t".to_string(),
+        span_id: span_id.to_string(),
+        parent_span_id: None,
+        name: "claude_code.llm_request".to_string(),
+        kind: SpanKind::Internal,
+        start_time,
+        end_time: start_time + duration_ms * 1_000_000,
+        attributes,
+        status: SpanStatus {
+            code: SpanStatusCode::Ok,
+            message: None,
+        },
+        events: Vec::new(),
+        resource: None,
+    }
+}
+
+#[tokio::test]
+async fn test_get_latency_percentiles_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/genai/latency_percentiles?start_time={R0}&end_time={R1}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp: otelite_core::api::LatencyPercentilesResponse =
+        serde_json::from_slice(&body).unwrap();
+    assert!(
+        resp.metrics
+            .values()
+            .all(|s| s.all.is_empty() && s.models.is_empty()),
+        "empty DB -> no percentile points: {resp:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_latency_percentiles_with_data() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    storage
+        .write_span(&llm_request_span("sp1", "modelA", R0, 100, Some(20)))
+        .await
+        .unwrap();
+    storage
+        .write_span(&llm_request_span(
+            "sp2",
+            "modelA",
+            R0 + 500_000_000,
+            300,
+            Some(90),
+        ))
+        .await
+        .unwrap();
+    storage
+        .write_span(&llm_request_span(
+            "sp3",
+            "modelB",
+            R0 + 250_000_000,
+            400,
+            Some(150),
+        ))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/genai/latency_percentiles?start_time={R0}&end_time={R1}&bucket_secs=3600"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp: otelite_core::api::LatencyPercentilesResponse =
+        serde_json::from_slice(&body).unwrap();
+
+    // R0..R1 spans all fall into one hourly bucket (bucket start floored).
+    let dur = &resp.metrics["duration"];
+    assert_eq!(dur.all.len(), 1, "single bucket: {resp:?}");
+    assert_eq!(dur.all[0].count, 3);
+    // durations [100, 300, 400] sorted: p50=300, p90/p95/p99=400
+    assert_eq!(dur.all[0].p50_ms, 300.0);
+    assert_eq!(dur.all[0].p90_ms, 400.0);
+    assert_eq!(dur.all[0].p95_ms, 400.0);
+    assert_eq!(dur.all[0].p99_ms, 400.0);
+    assert_eq!(dur.models.len(), 2);
+    assert_eq!(dur.models["modelA"][0].count, 2);
+    assert_eq!(dur.models["modelB"][0].count, 1);
+
+    let tt = &resp.metrics["ttft"];
+    assert_eq!(tt.all[0].count, 3, "all three spans carried valid ttft");
+    assert_eq!(tt.all[0].p50_ms, 90.0);
+    assert_eq!(tt.all[0].p90_ms, 150.0);
+
+    // Unknown metric name → 400, not 500.
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/genai/latency_percentiles?start_time={R0}&end_time={R1}&metrics=bogus"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

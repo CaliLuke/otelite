@@ -593,11 +593,12 @@ class AnalyticsView {
         try {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
-            const [latencyStats, latencySeries, latencyByContext, conversationDepth] = await Promise.all([
+            const [latencyStats, latencySeries, latencyByContext, conversationDepth, latencyPercentiles] = await Promise.all([
                 this.api.getLatencyStats(params),
                 this.api.getLatencySeries(params).catch(() => null),
                 this.api.getLatencyByContext(params).catch(() => null),
                 this.api.getConversationDepth(params).catch(() => null),
+                this.api.getLatencyPercentiles(params).catch(() => null),
             ]);
 
             const convCard = this._buildConversationDepthCard(conversationDepth);
@@ -609,6 +610,7 @@ class AnalyticsView {
                 cards,
                 this._buildLatencyTable(latencyStats || []),
                 this._buildLatencySeriesChart(latencySeries || [], bucket),
+                this._buildLatencyPercentilesChart(latencyPercentiles),
                 this._buildLatencyByContext(latencyByContext || []),
             ].filter(Boolean).join('');
 
@@ -1880,6 +1882,107 @@ class AnalyticsView {
                 <tbody>${rows}</tbody>
             </table>
             ${chartHtml}`;
+    }
+
+    /**
+     * Bucketed latency percentiles (p50/p90/p95/p99) from
+     * /api/genai/latency_percentiles. Two charts (duration, ttft), each with
+     * a model dropdown that re-renders client-side from the fetched data.
+     * p50 is a solid line, p95/p99 dashed.
+     */
+    _buildLatencyPercentilesChart(resp) {
+        if (!resp || !resp.metrics) return '';
+        const metricTitles = { duration: 'Request duration percentiles', ttft: 'Time to first token percentiles' };
+        const charts = Object.keys(resp.metrics)
+            .sort((a, b) => (a === 'duration' ? -1 : b === 'duration' ? 1 : 0))
+            .map(metric => {
+                const series = resp.metrics[metric];
+                if (!series || (!series.all.length && !Object.keys(series.models || {}).length)) return '';
+                const models = Object.keys(series.models || {}).sort();
+                const options = models.map(m =>
+                    `<option value="${this._esc(m)}">${this._esc(m)}</option>`
+                ).join('');
+                return `
+                    <div class="latency-percentile-chart" data-metric="${metric}" data-analytics-percentiles="${this._esc(JSON.stringify(series))}">
+                        <h4>${metricTitles[metric] || metric} — model: all</h4>
+                        <p class="table-hint">Solid line = p50; dashed = p95, p99. Pick a model to filter the series.</p>
+                        <select class="latency-percentile-model" aria-label="Model filter">
+                            <option value="all">all</option>
+                            ${options}
+                        </select>
+                        <div class="percentile-chart-body"></div>
+                    </div>`;
+            }).filter(Boolean).join('');
+        if (!charts) return '';
+        return `
+            <h3>Latency percentiles</h3>
+            ${charts}
+            <script>
+                document.querySelectorAll('.latency-percentile-chart').forEach(el => {
+                    const view = window.analyticsView;
+                    if (!view) return;
+                    const render = model => {
+                        const series = JSON.parse(el.dataset.analyticsPercentiles);
+                        const points = model === 'all' ? (series.all || []) : ((series.models || {})[model] || []);
+                        el.querySelector('.percentile-chart-body').innerHTML = view._renderPercentileLines(points);
+                        const title = el.querySelector('h4');
+                        const prefix = title.textContent.split(' — model:')[0];
+                        title.textContent = prefix + ' — model: ' + model;
+                    };
+                    el.querySelector('.latency-percentile-model').addEventListener('change', e => render(e.target.value));
+                    render('all');
+                });
+            </script>`;
+    }
+
+    /**
+     * SVG line chart for one percentile series (p50 solid, p90/p95/p99 dashed).
+     * @param {Array} points - LatencyPercentilePoint[] ascending by ts
+     */
+    _renderPercentileLines(points) {
+        if (!points.length) return '<div class="empty-state-hint">No data for this model in this window.</div>';
+        const width = 100, chartHeight = 100, barGap = 0.5;
+        const n = points.length;
+        const x = i => n === 1 ? width / 2 : i * ((width - barGap) / (n - 1));
+        const max = Math.max(...points.flatMap(p => [p.p50_ms, p.p90_ms, p.p95_ms, p.p99_ms]), 1);
+        const y = v => chartHeight - (v / max) * chartHeight;
+        const line = key => points
+            .map((p, i) => `${x(i).toFixed(3)},${y(p[key]).toFixed(3)}`)
+            .join(' ');
+        const tip = p => {
+            const d = new Date(p.ts / 1_000_000_000);
+            return `${formatTs(d)}\np50 ${Math.round(p.p50_ms)}ms\np90 ${Math.round(p.p90_ms)}ms\np95 ${Math.round(p.p95_ms)}ms\np99 ${Math.round(p.p99_ms)}ms\n${p.count} requests`;
+        };
+        const dots = points.map((p, i) => {
+            const t = this._esc(tip(p));
+            return `<circle cx="${x(i).toFixed(3)}" cy="${y(p.p99_ms).toFixed(3)}" r="0.8" fill="var(--text-color, #ccc)" opacity="0"><title>${t}</title></circle>
+                    <circle cx="${x(i).toFixed(3)}" cy="${y(p.p99_ms).toFixed(3)}" r="1.2" fill="transparent" style="pointer-events:all"><title>${t}</title></circle>`;
+        }).join('');
+        const multiDay = n > 1 &&
+            new Date(points[0].ts / 1_000_000_000).toDateString() !==
+            new Date(points[n - 1].ts / 1_000_000_000).toDateString();
+        const labelFor = i => chartAxisLabel(points[i].ts, multiDay);
+        return `
+            <div class="cost-chart">
+                <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                    <polyline class="percentile-line-p50" points="${line('p50_ms')}" fill="none"/>
+                    <polyline class="percentile-line-p90" points="${line('p90_ms')}" fill="none"/>
+                    <polyline class="percentile-line-p95" points="${line('p95_ms')}" fill="none"/>
+                    <polyline class="percentile-line-p99" points="${line('p99_ms')}" fill="none"/>
+                    ${dots}
+                </svg>
+                <div class="cost-chart-axis-labels">
+                    <span class="cost-chart-axis-left">${this._esc(labelFor(0))}</span>
+                    <span class="cost-chart-axis-mid">${n > 2 ? this._esc(labelFor(Math.floor(n / 2))) : ''}</span>
+                    <span class="cost-chart-axis-right">${n > 1 ? this._esc(labelFor(n - 1)) : ''}</span>
+                </div>
+            </div>
+            <div class="agent-legend">
+                <span class="agent-legend-item"><span style="display:inline-block;width:14px;border-top:2px solid var(--accent-color, #4c9aff)"></span> p50</span>
+                <span class="agent-legend-item"><span style="display:inline-block;width:14px;border-top:2px dashed #f5a623"></span> p90</span>
+                <span class="agent-legend-item"><span style="display:inline-block;width:14px;border-top:2px dashed #e05d44"></span> p95</span>
+                <span class="agent-legend-item"><span style="display:inline-block;width:14px;border-top:2px dashed #a06cd5"></span> p99</span>
+            </div>`;
     }
 
     _buildProjects(data) {

@@ -10,10 +10,11 @@ use otelite_core::api::{
     AgentRolesResponse, AgentRollup, AgentRollupResponse, CallsSeriesPoint, ContextTypeSplit,
     ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse,
     ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket,
-    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ProjectRollupResponse,
-    ProviderMixResponse, ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats,
-    SessionCostRow, StopReasonCount, TokenUsageResponse, ToolApprovalStats, ToolErrorEntry,
-    ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    LatencyByContextBin, LatencyPercentilesResponse, LatencySeriesPoint, LatencyStats,
+    ModelDriftPair, ProjectRollupResponse, ProviderMixResponse, ReasoningShareResponse,
+    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, StopReasonCount,
+    TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -401,6 +402,19 @@ pub struct LatencyQuery {
     pub model: Option<String>,
 }
 
+/// Query parameters for the latency percentile endpoint.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct LatencyPercentileQuery {
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+    /// Bucket size in seconds (default 3600 = 1 hour).
+    pub bucket_secs: Option<u64>,
+    /// Comma-separated metrics: "duration,ttft" (default: both).
+    pub metrics: Option<String>,
+}
+
 /// Get latency / TTFT percentile statistics per model for LLM spans.
 #[utoipa::path(
     get,
@@ -425,6 +439,78 @@ pub async fn get_latency_stats(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::storage_error(format!(
                     "query latency stats: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    Ok(Json(rows))
+}
+
+/// Bucketed p50/p90/p95/p99 latency percentiles by model (issue #132).
+/// Duration comes from LLM request spans (all harnesses); TTFT from the
+/// spans' normalized TTFT attribute plus the codex turn TTFT histogram
+/// (disjoint cohort — codex request spans carry no TTFT attribute).
+#[utoipa::path(
+    get,
+    path = "/api/genai/latency_percentiles",
+    params(LatencyPercentileQuery),
+    responses(
+        (status = 200, description = "Percentile series per metric and model", body = LatencyPercentilesResponse),
+        (status = 400, description = "Invalid bucket_secs or metrics", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_latency_percentiles(
+    State(state): State<AppState>,
+    Query(query): Query<LatencyPercentileQuery>,
+) -> Result<Json<LatencyPercentilesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let bucket_secs = query.bucket_secs.unwrap_or(3600);
+    if bucket_secs == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "bucket_secs must be a positive number of seconds",
+            )),
+        ));
+    }
+    let metrics: Vec<&str> = query
+        .metrics
+        .as_deref()
+        .unwrap_or("duration,ttft")
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for m in &metrics {
+        if *m != "duration" && *m != "ttft" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "unknown metric '{m}' — expected \"duration\" and/or \"ttft\""
+                ))),
+            ));
+        }
+    }
+    if metrics.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "metrics must include \"duration\" and/or \"ttft\"",
+            )),
+        ));
+    }
+
+    let rows = state
+        .storage
+        .query_latency_percentiles(query.start_time, query.end_time, bucket_secs, &metrics)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query latency percentiles: {}",
                     e
                 ))),
             )

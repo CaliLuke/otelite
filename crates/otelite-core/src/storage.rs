@@ -11,10 +11,10 @@ use crate::api::{
     AgentRolesResponse, AgentRollupStorage, CacheEconomicsResponse, CacheHitRateByModel,
     CallsSeriesPoint, ConversationCostRow, ConversationDepthStats, CostSeriesPoint,
     ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse,
-    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage,
-    ProjectRollupStorage, ProviderMixResponse, ReasoningShareResponse, RequestParamProfile,
-    RetrievalStats, RetryStats, SessionCostRow, SessionCostStorage, SystemUsage, TokenUsageSummary,
-    ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    LatencyByContextBin, LatencyPercentilesResponse, LatencySeriesPoint, LatencyStats,
+    ModelDriftPair, ModelUsage, ProjectRollupStorage, ProviderMixResponse, ReasoningShareResponse,
+    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, SessionCostStorage,
+    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -238,6 +238,16 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<LatencyStats>>;
+
+    /// Bucketed p50/p90/p95/p99 latency percentiles by model for the
+    /// requested metrics ("duration", "ttft").
+    async fn query_latency_percentiles(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+        metrics: &[&str],
+    ) -> Result<LatencyPercentilesResponse>;
 
     /// Native GenAI telemetry capability coverage and quality.
     ///

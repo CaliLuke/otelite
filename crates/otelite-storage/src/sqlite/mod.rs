@@ -398,6 +398,22 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_latency_percentiles(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_secs: u64,
+        metrics: &[&str],
+    ) -> Result<otelite_core::api::LatencyPercentilesResponse> {
+        let metrics: Vec<String> = metrics.iter().map(|m| m.to_string()).collect();
+        self.read_query(move |conn| {
+            let refs: Vec<&str> = metrics.iter().map(String::as_str).collect();
+            reader::query_latency_percentiles(conn, start_time, end_time, bucket_secs, &refs)
+                .map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_genai_capabilities(
         &self,
         start_time: Option<i64>,

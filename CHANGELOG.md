@@ -23,6 +23,13 @@ have to work around), not implementation detail.
   `unattributed` row (opencode's own cost counter is `actual`; the rest is
   priced from tokens and marked `estimated`/`mixed`).
 
+- **Latency percentiles: see the tail, not just the average.** The GenAI tab
+  gains latency percentile charts (duration and time-to-first-token) with a
+  model filter, and the CLI gains
+  `otelite usage --latency-percentiles [--model <m>] [--bucket-secs <n>]` —
+  p50/p90/p95/p99 per time bucket, all models and per model. TTFT includes
+  the codex turn histogram, which is the only TTFT source for codex.
+
 ## [0.1.75] - 2026-08-27
 
 ### Added

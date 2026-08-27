@@ -101,6 +101,11 @@ pub struct UsageCommand {
     #[arg(long)]
     pub latency_context: bool,
 
+    /// Show bucketed latency percentiles p50/p90/p95/p99 over time
+    /// (duration and/or ttft; --model filters the cohort)
+    #[arg(long)]
+    pub latency_percentiles: bool,
+
     /// Show tool approval/rejection decision summary (Claude Code)
     #[arg(long)]
     pub tool_approvals: bool,
@@ -187,6 +192,8 @@ struct UsageOutput {
     latency_series: Option<Vec<otelite_core::api::LatencySeriesPoint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_context: Option<Vec<otelite_core::api::LatencyByContextBin>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_percentiles: Option<otelite_core::api::LatencyPercentilesResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_approvals: Option<otelite_core::api::ToolApprovalStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -495,6 +502,26 @@ impl UsageCommand {
                 None
             };
 
+        // --latency-percentiles
+        let latency_percentiles: Option<otelite_core::api::LatencyPercentilesResponse> =
+            if self.latency_percentiles {
+                Some(
+                    storage
+                        .query_latency_percentiles(
+                            Some(start_time),
+                            Some(end_time),
+                            self.bucket_secs,
+                            &["duration", "ttft"],
+                        )
+                        .await
+                        .map_err(|e| {
+                            Error::ApiError(format!("Failed to query latency percentiles: {}", e))
+                        })?,
+                )
+            } else {
+                None
+            };
+
         // --tool-approvals
         let tool_approvals: Option<otelite_core::api::ToolApprovalStats> = if self.tool_approvals {
             Some(
@@ -678,6 +705,7 @@ impl UsageCommand {
                     model_drift,
                     latency_series,
                     latency_context,
+                    latency_percentiles,
                     tool_approvals,
                     stop_reasons,
                     context_split,
@@ -773,6 +801,11 @@ impl UsageCommand {
 
                 if let Some(ref bins) = latency_context {
                     display_latency_context(bins);
+                    println!();
+                }
+
+                if let Some(ref resp) = latency_percentiles {
+                    display_latency_percentiles(resp, self.model.as_deref());
                     println!();
                 }
 
@@ -1266,6 +1299,74 @@ fn display_latency_context(bins: &[otelite_core::api::LatencyByContextBin]) {
 
     println!("Latency by Context Size (input tokens × model):");
     println!("{}", table);
+}
+
+fn display_latency_percentiles<'a>(
+    resp: &'a otelite_core::api::LatencyPercentilesResponse,
+    model_filter: Option<&str>,
+) {
+    use chrono::{DateTime, Local, Utc};
+
+    let pick = |series: &'a otelite_core::api::LatencyPercentileSeries| -> (
+        String,
+        Vec<&'a otelite_core::api::LatencyPercentilePoint>,
+    ) {
+        match model_filter {
+            Some(m) => (
+                m.to_string(),
+                series
+                    .models
+                    .get(m)
+                    .map(|v| v.iter().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            ),
+            None => ("all models".to_string(), series.all.iter().collect()),
+        }
+    };
+
+    let mut any = false;
+    for (metric, series) in &resp.metrics {
+        let (label, points) = pick(series);
+        if points.is_empty() {
+            if model_filter.is_some() {
+                println!("Latency Percentiles ({metric}, {label}): no data in range");
+            }
+            continue;
+        }
+        any = true;
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+        table.set_header(vec![
+            Cell::new("Bucket").fg(Color::Cyan),
+            Cell::new("Model").fg(Color::Cyan),
+            Cell::new("N").fg(Color::Cyan),
+            Cell::new("p50 ms").fg(Color::Green),
+            Cell::new("p90 ms").fg(Color::Yellow),
+            Cell::new("p95 ms").fg(Color::Yellow),
+            Cell::new("p99 ms").fg(Color::Red),
+        ]);
+        for p in points {
+            let dt = DateTime::<Utc>::from_timestamp_nanos(p.ts);
+            let bucket_str = dt.with_timezone(&Local).format("%m-%d %H:%M").to_string();
+            table.add_row(vec![
+                Cell::new(bucket_str),
+                Cell::new(&label),
+                Cell::new(p.count),
+                Cell::new(format!("{:.0}", p.p50_ms)),
+                Cell::new(format!("{:.0}", p.p90_ms)),
+                Cell::new(format!("{:.0}", p.p95_ms)),
+                Cell::new(format!("{:.0}", p.p99_ms)),
+            ]);
+        }
+        println!("Latency Percentiles ({metric}, {label}):");
+        println!("{table}");
+        println!();
+    }
+    if !any {
+        println!("Latency Percentiles: no data in range");
+    }
 }
 
 fn display_truncation_rate(rows: &[otelite_core::api::TruncationRateByModel]) {

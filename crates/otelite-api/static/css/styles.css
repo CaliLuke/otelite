@@ -2467,6 +2467,42 @@ body {
     margin-right: 0.4em;
     vertical-align: baseline;
 }
+/* Latency percentile charts (#132): p50 solid, p90/p95/p99 dashed */
+.latency-percentile-chart {
+    margin-bottom: 1.5rem;
+}
+
+.percentile-line-p50 {
+    stroke: var(--accent-color, #4c9aff);
+    stroke-width: 0.7;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.percentile-line-p90 {
+    stroke: #f5a623;
+    stroke-width: 0.45;
+    stroke-dasharray: 2 1.4;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.percentile-line-p95 {
+    stroke: #e05d44;
+    stroke-width: 0.45;
+    stroke-dasharray: 2 1.4;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.percentile-line-p99 {
+    stroke: #a06cd5;
+    stroke-width: 0.45;
+    stroke-dasharray: 1.2 1;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
 .agent-legend {
     display: flex;
     gap: 1rem;

@@ -1995,6 +1995,268 @@ fn percentile_f64(sorted: &[f64], p: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
+/// Bucketed latency percentiles (issue #132).
+///
+/// Cohorts, matching `query_latency_stats` so the two endpoints never
+/// disagree about what a "request" is:
+/// - duration: per-request span duration via `request_span_guard` (all
+///   harnesses), `(end_time - start_time)` in ms.
+/// - ttft: the same spans' normalized TTFT attribute (validated with the
+///   same `classify_ttft_value` rules), UNION the codex
+///   `codex.turn.ttft.duration_ms` histogram — codex request spans carry no
+///   TTFT attribute, so the cohorts are disjoint. Histogram rows with
+///   count > 1 expand each bucket's observations at the bucket midpoint;
+///   count == 1 rows contribute their exact `sum`.
+pub fn query_latency_percentiles(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    bucket_secs: u64,
+    metrics: &[&str],
+) -> Result<otelite_core::api::LatencyPercentilesResponse> {
+    use otelite_core::api::{
+        LatencyPercentilePoint, LatencyPercentileSeries, LatencyPercentilesResponse,
+    };
+    use otelite_core::semconv::metric_names as mnames;
+    use otelite_core::telemetry::{classify_ttft_value, TtftValueQuality};
+
+    if bucket_secs == 0 {
+        return Err(StorageError::QueryError(
+            "bucket_secs must be positive".to_string(),
+        ));
+    }
+    let want_duration = metrics.contains(&"duration");
+    let want_ttft = metrics.contains(&"ttft");
+    if !want_duration && !want_ttft {
+        return Err(StorageError::QueryError(
+            "metrics must include \"duration\" and/or \"ttft\"".to_string(),
+        ));
+    }
+    let bucket_ns = bucket_secs as i64 * 1_000_000_000;
+
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.request_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            (end_time - start_time) / 1000000 AS duration_ms,
+            {model} AS model,
+            start_time,
+            json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
+            json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
+            json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms
+         FROM spans
+         {where_clause}",
+        model = exprs.model,
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare latency_percentiles query: {e}"))
+    })?;
+    let span_rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute latency_percentiles query: {e}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse latency_percentiles rows: {e}"))
+        })?;
+
+    // (metric, model|None, bucket) -> values in ms
+    let mut groups: std::collections::BTreeMap<(&'static str, Option<String>, i64), Vec<f64>> =
+        std::collections::BTreeMap::new();
+    let push =
+        |g: &mut std::collections::BTreeMap<(&'static str, Option<String>, i64), Vec<f64>>,
+         metric: &'static str,
+         model: Option<String>,
+         ts: i64,
+         value_ms: f64| {
+            let bucket = (ts / bucket_ns) * bucket_ns;
+            match model {
+                Some(m) => {
+                    g.entry((metric, Some(m), bucket))
+                        .or_default()
+                        .push(value_ms);
+                    g.entry((metric, None, bucket)).or_default().push(value_ms);
+                },
+                None => {
+                    g.entry((metric, None, bucket)).or_default().push(value_ms);
+                },
+            }
+        };
+
+    for (duration_ms, model, start_ns, otel, llm, custom) in span_rows {
+        if duration_ms < 0 {
+            continue;
+        }
+        if want_duration {
+            push(
+                &mut groups,
+                "duration",
+                model.clone(),
+                start_ns,
+                duration_ms as f64,
+            );
+        }
+        if want_ttft {
+            let Some(quality) =
+                normalized_ttft_ms(otel.as_deref(), llm.as_deref(), custom.as_deref())
+            else {
+                continue;
+            };
+            let Ok(ttft_ms) = quality else {
+                continue;
+            };
+            if classify_ttft_value(Some(ttft_ms as f64 / 1000.0), duration_ms as f64 / 1000.0)
+                != TtftValueQuality::Valid
+            {
+                continue;
+            }
+            push(&mut groups, "ttft", model, start_ns, ttft_ms as f64);
+        }
+    }
+
+    // Codex TTFT histogram (disjoint cohort: codex request spans carry no
+    // TTFT attribute). count == 1 rows are exact; larger rows expand each
+    // bucket's observations at the bucket midpoint.
+    if want_ttft {
+        let mut hist_where = String::from(
+            "WHERE name = ?1 AND json_valid(attributes) AND json_valid(value_histogram)",
+        );
+        let mut hist_params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(mnames::CODEX_TURN_TTFT.to_string())];
+        if let Some(start) = start_time {
+            hist_where.push_str(" AND timestamp >= ?2");
+            hist_params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            hist_where.push_str(&format!(" AND timestamp <= ?{}", hist_params.len() + 1));
+            hist_params.push(Box::new(end));
+        }
+        let hist_sql = format!(
+            "SELECT json_extract(attributes, '$.model'), timestamp, value_histogram \
+             FROM metrics {hist_where}",
+        );
+        let hist_refs: Vec<&dyn rusqlite::ToSql> = hist_params.iter().map(|p| p.as_ref()).collect();
+        let mut hist_stmt = conn.prepare(&hist_sql).map_err(|e| {
+            StorageError::QueryError(format!("Failed to prepare codex ttft histogram query: {e}"))
+        })?;
+        let hist_rows = hist_stmt
+            .query_map(hist_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to execute codex ttft histogram query: {e}"
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to parse codex ttft histogram rows: {e}"))
+            })?;
+        for (model, ts, hist_json) in hist_rows {
+            let Some(values) = expand_histogram_midpoints(&hist_json) else {
+                continue;
+            };
+            for v in values {
+                push(&mut groups, "ttft", model.clone(), ts, v);
+            }
+        }
+    }
+
+    let mut out = LatencyPercentilesResponse::default();
+    for ((metric, model, bucket), values) in &groups {
+        let mut values = values.clone();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let point = LatencyPercentilePoint {
+            ts: *bucket,
+            p50_ms: percentile_f64(&values, 0.50),
+            p90_ms: percentile_f64(&values, 0.90),
+            p95_ms: percentile_f64(&values, 0.95),
+            p99_ms: percentile_f64(&values, 0.99),
+            count: values.len() as u64,
+        };
+        let series = out
+            .metrics
+            .entry(metric.to_string())
+            .or_insert_with(LatencyPercentileSeries::default);
+        match model {
+            Some(m) => series.models.entry(m.clone()).or_default().push(point),
+            None => series.all.push(point),
+        }
+    }
+    for series in out.metrics.values_mut() {
+        series.all.sort_by_key(|p| p.ts);
+        for v in series.models.values_mut() {
+            v.sort_by_key(|p| p.ts);
+        }
+    }
+    Ok(out)
+}
+
+/// Expand one OTel histogram data point into per-observation values in ms.
+/// `count == 1` rows contribute their exact `sum`; rows with multiple
+/// observations contribute each bucket's count at the bucket midpoint
+/// (the topmost bucket uses its upper bound as a lower bound).
+fn expand_histogram_midpoints(hist_json: &str) -> Option<Vec<f64>> {
+    let parsed: serde_json::Value = serde_json::from_str(hist_json).ok()?;
+    let arr = parsed.as_array()?;
+    let count = arr.first()?.as_u64()? as usize;
+    let sum = arr.get(1)?.as_f64()?;
+    let mut out: Vec<f64> = Vec::with_capacity(count);
+    if count == 1 {
+        out.push(sum);
+        return Some(out);
+    }
+    let buckets = arr.get(2)?.as_array()?;
+    let mut prev: f64 = 0.0;
+    let mut emitted = 0usize;
+    for b in buckets {
+        let bound = b.get("upper_bound")?.as_f64()?;
+        let k = b.get("count")?.as_u64()? as usize;
+        for _ in 0..k {
+            out.push((prev + bound) / 2.0);
+        }
+        emitted += k;
+        prev = bound;
+    }
+    // Observations beyond the final bounded bucket (open tail) fall back to
+    // the running mean of the remaining mass — never a fabricated zero.
+    if emitted < count {
+        let remaining_sum = sum - out.iter().sum::<f64>();
+        let v = if count > emitted {
+            remaining_sum / (count - emitted) as f64
+        } else {
+            prev
+        };
+        out.resize(count, v.max(0.0));
+    }
+    Some(out)
+}
+
 /// Error rate per model across LLM spans.
 ///
 /// The spans table stores status as `status_code INTEGER` (0 = Unset, 1 = Ok, 2 = Error);
@@ -8028,5 +8290,194 @@ mod tests {
         // No session.count rows outside the narrow window… they are all at W0,
         // so sessions are still counted.
         assert_eq!(a.sessions, 1);
+    }
+
+    use otelite_core::semconv::metric_names as plmnames;
+
+    /// claude-style LLM request span: duration from start/end, flat `model`
+    /// attribute, optional normalized `ttft_ms` attribute.
+    fn insert_llm_request_span(
+        conn: &Connection,
+        span_id: &str,
+        model: &str,
+        start_ns: i64,
+        values: (i64, Option<i64>),
+    ) {
+        let (duration_ms, ttft_ms) = values;
+        let mut attrs = format!("{{\"session.id\":\"s1\",\"model\":\"{model}\"");
+        if let Some(ttft) = ttft_ms {
+            attrs.push_str(&format!(",\"ttft_ms\":\"{ttft}\""));
+        }
+        attrs.push('}');
+        let end_ns = start_ns + duration_ms * 1_000_000;
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+             VALUES ('t', ?1, 'claude_code.llm_request', 0, ?2, ?3, ?4, 1)",
+            rusqlite::params![span_id, start_ns, end_ns, attrs],
+        )
+        .unwrap();
+    }
+
+    fn percentile_rows(resp: &otelite_core::api::LatencyPercentilesResponse) -> usize {
+        resp.metrics
+            .values()
+            .map(|s| s.all.len() + s.models.values().map(Vec::len).sum::<usize>())
+            .sum()
+    }
+
+    #[test]
+    fn latency_percentiles_empty_db() {
+        let conn = setup_test_db();
+        let resp =
+            query_latency_percentiles(&conn, None, None, 3600, &["duration", "ttft"]).unwrap();
+        assert!(percentile_rows(&resp) == 0, "expected no points");
+    }
+
+    #[test]
+    fn latency_percentiles_rejects_bad_inputs() {
+        let conn = setup_test_db();
+        assert!(query_latency_percentiles(&conn, None, None, 0, &["duration"]).is_err());
+        assert!(query_latency_percentiles(&conn, None, None, 3600, &["nope"]).is_err());
+    }
+
+    #[test]
+    fn expand_histogram_midpoints_cases() {
+        // count == 1 → exact sum
+        let v = expand_histogram_midpoints(r#"[1, 250.5, []]"#).unwrap();
+        assert_eq!(v, vec![250.5]);
+
+        // two observations across bounded buckets → bucket midpoints
+        let v = expand_histogram_midpoints(
+            r#"[2, 300.0, [
+            {"upper_bound":200.0,"count":1},
+            {"upper_bound":400.0,"count":1}
+        ]]"#,
+        )
+        .unwrap();
+        assert_eq!(v, vec![100.0, 300.0]);
+
+        // open tail: remaining mass falls back to the running mean
+        let v = expand_histogram_midpoints(
+            r#"[3, 300.0, [
+            {"upper_bound":200.0,"count":1}
+        ]]"#,
+        )
+        .unwrap();
+        assert_eq!(v.len(), 3);
+        assert!((v[0] - 100.0).abs() < 1e-9);
+        let tail = (300.0 - v[0]) / 2.0;
+        assert!((v[1] - tail).abs() < 1e-9 && (v[2] - tail).abs() < 1e-9);
+
+        assert!(expand_histogram_midpoints("not json").is_none());
+        assert!(expand_histogram_midpoints(r#"{"a":1}"#).is_none());
+    }
+
+    #[test]
+    fn latency_percentiles_span_cohorts() {
+        let conn = setup_test_db();
+        // bucket = 10s. Two buckets: T0..T0+10s and T0+10s..T0+20s.
+        // modelA: durations 100ms, 300ms (bucket 1) and 500ms (bucket 2)
+        insert_llm_request_span(&conn, "a1", "modelA", T0, (100, Some(20)));
+        insert_llm_request_span(&conn, "a2", "modelA", T0 + 5_000_000_000, (300, Some(90)));
+        insert_llm_request_span(&conn, "a3", "modelA", T0 + 12_000_000_000, (500, None));
+        // modelB: duration 400ms, ttft 150ms (bucket 1)
+        insert_llm_request_span(&conn, "b1", "modelB", T0 + 2_000_000_000, (400, Some(150)));
+
+        let resp = query_latency_percentiles(&conn, None, None, 10, &["duration", "ttft"]).unwrap();
+
+        let dur = &resp.metrics["duration"];
+        assert_eq!(dur.all.len(), 2, "two duration buckets for all");
+        let b0: Vec<_> = dur.all.iter().filter(|p| p.ts == T0).collect();
+        let b1: Vec<_> = dur
+            .all
+            .iter()
+            .filter(|p| p.ts == T0 + 10_000_000_000)
+            .collect();
+        assert!(b0.len() == 1 && b1.len() == 1);
+        assert_eq!(b0[0].count, 3, "bucket 0: 3 requests");
+        // sorted [100, 300, 400]: p50=300 (idx (3-1)*0.5=1), p90=400, p95=400, p99=400
+        assert_eq!(b0[0].p50_ms, 300.0);
+        assert_eq!(b0[0].p90_ms, 400.0);
+        assert_eq!(b0[0].p95_ms, 400.0);
+        assert_eq!(b0[0].p99_ms, 400.0);
+        assert_eq!(b1[0].count, 1);
+        assert_eq!(b1[0].p50_ms, 500.0);
+
+        // per-model
+        let a = &dur.models["modelA"];
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].count, 2);
+        assert_eq!(
+            a[0].p50_ms, 300.0,
+            "[100,300] → idx (2-1)*0.5=0.5.round()=1 → 300"
+        );
+        let b = &dur.models["modelB"];
+        assert_eq!(b[0].count, 1);
+        assert_eq!(b[0].p50_ms, 400.0);
+
+        // ttft: modelA [20, 90] bucket 0 + modelB [150] bucket 0 → all [20, 90, 150]
+        let tt = &resp.metrics["ttft"];
+        assert_eq!(tt.all.len(), 1);
+        assert_eq!(tt.all[0].count, 3);
+        assert_eq!(tt.all[0].p50_ms, 90.0);
+        assert_eq!(tt.all[0].p90_ms, 150.0);
+        assert_eq!(tt.models["modelA"][0].count, 2);
+        assert_eq!(tt.models["modelB"][0].count, 1);
+
+        // window filter excludes everything
+        let resp =
+            query_latency_percentiles(&conn, Some(T0 + 100_000_000_000), None, 10, &["duration"])
+                .unwrap();
+        assert!(percentile_rows(&resp) == 0);
+    }
+
+    fn insert_raw_histogram_row(
+        conn: &Connection,
+        name: &str,
+        timestamp: i64,
+        value_histogram: &str,
+        attributes: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_histogram, attributes)
+             VALUES (?1, 2, ?2, ?3, ?4)",
+            rusqlite::params![name, timestamp, value_histogram, attributes],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn latency_percentiles_codex_ttft_histogram() {
+        let conn = setup_test_db();
+        // No spans at all: codex TTFT must come from the histogram alone.
+        // count == 1 → exact; count == 2 → midpoints of [0,100) and [100,300).
+        insert_raw_histogram_row(
+            &conn,
+            plmnames::CODEX_TURN_TTFT,
+            T0,
+            r#"[1, 120.0, []]"#,
+            r#"{"model":"gpt-x"}"#,
+        );
+        insert_raw_histogram_row(
+            &conn,
+            plmnames::CODEX_TURN_TTFT,
+            T0 + 1_000_000_000,
+            r#"[2, 300.0, [{"upper_bound":100.0,"count":1},{"upper_bound":300.0,"count":1}]]"#,
+            r#"{"model":"gpt-x"}"#,
+        );
+
+        let resp = query_latency_percentiles(&conn, None, None, 3600, &["ttft"]).unwrap();
+        let tt = &resp.metrics["ttft"];
+        assert_eq!(tt.all.len(), 1, "single hourly bucket");
+        assert_eq!(tt.all[0].count, 3, "1 exact + 2 expanded");
+        // values: 120 (exact), 50 (midpoint 0-100), 200 (midpoint 100-300)
+        // sorted [50, 120, 200]: p50=120
+        assert_eq!(tt.all[0].p50_ms, 120.0);
+        assert_eq!(tt.all[0].p90_ms, 200.0);
+        assert_eq!(tt.models["gpt-x"][0].count, 3);
+        assert!(
+            !resp.metrics.contains_key("duration"),
+            "duration not requested"
+        );
     }
 }

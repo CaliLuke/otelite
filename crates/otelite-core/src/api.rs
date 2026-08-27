@@ -1518,6 +1518,46 @@ pub struct LatencySeriesPoint {
     pub ttft_degenerate: bool,
 }
 
+/// One time bucket of the latency percentile series (issue #132).
+/// Units are milliseconds, matching the other latency endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LatencyPercentilePoint {
+    /// Bucket start timestamp in nanoseconds since Unix epoch.
+    pub ts: i64,
+    /// 50th percentile in milliseconds.
+    pub p50_ms: f64,
+    /// 90th percentile in milliseconds.
+    pub p90_ms: f64,
+    /// 95th percentile in milliseconds.
+    pub p95_ms: f64,
+    /// 99th percentile in milliseconds.
+    pub p99_ms: f64,
+    /// Number of values in this bucket.
+    pub count: u64,
+}
+
+/// Percentile series for one metric ("duration" or "ttft"): the "all"
+/// cohort plus one series per model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LatencyPercentileSeries {
+    /// Percentiles across every model, ascending by `ts`.
+    pub all: Vec<LatencyPercentilePoint>,
+    /// Per-model percentiles, ascending by `ts`.
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<String, Vec<LatencyPercentilePoint>>,
+}
+
+/// `GET /api/genai/latency_percentiles` response. Keys of `metrics` are the
+/// requested metric names ("duration", "ttft").
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LatencyPercentilesResponse {
+    #[serde(default)]
+    pub metrics: std::collections::BTreeMap<String, LatencyPercentileSeries>,
+}
+
 /// LLM latency broken down by input-token context size bin.
 /// Useful for understanding whether larger prompts are slower.
 #[derive(Debug, Clone, Serialize, Deserialize)]
