@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.79] - 2026-08-27
+
 ### Added
 
 - **Lower-tail throughput percentiles.** Latency stats (CLI `usage --latency`,
