@@ -11,9 +11,9 @@ use crate::api::{
     AgentRolesResponse, CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow,
     ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown,
     FinishReasonCount, GenAiCapabilityResponse, LatencyByContextBin, LatencySeriesPoint,
-    LatencyStats, ModelDriftPair, ModelUsage, RequestParamProfile, RetrievalStats, RetryStats,
-    SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    LatencyStats, ModelDriftPair, ModelUsage, ProviderMixResponse, RequestParamProfile,
+    RetrievalStats, RetryStats, SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
+    TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -306,6 +306,14 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> Result<AgentRolesResponse>;
+
+    /// Provider × model mix (tokens, sessions, estimated cost share) over
+    /// the time window, across opencode, codex and claude_code.
+    async fn query_provider_mix(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<ProviderMixResponse>;
 
     /// Distribution of request parameter settings (temperature, max_tokens).
     async fn query_request_param_profile(

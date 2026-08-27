@@ -84,6 +84,7 @@ class AnalyticsView {
             <div id="analytics-sections">
                 ${this._renderSectionShell('cost', 'Cost', 'Tokens spent · pricing · most expensive calls')}
                 ${this._renderSectionShell('roles', 'Agent Roles', 'Sub-agent attribution · cost & tokens per role (opencode)')}
+                ${this._renderSectionShell('providers', 'Provider Mix', 'Tokens & estimated cost by provider × model (opencode · codex · claude)')}
                 ${this._renderSectionShell('latency', 'Latency', 'Response time · throughput · context size')}
                 ${this._renderSectionShell('reliability', 'Reliability', 'Errors · retries · truncation · drift')}
                 ${this._renderSectionShell('behavior', 'Behavior', 'Tool use · retrieval · request volume')}
@@ -435,6 +436,7 @@ class AnalyticsView {
         this.sectionLoaders = {
             cost: () => this._loadCostSection(),
             roles: () => this._loadRolesSection(),
+            providers: () => this._loadProvidersSection(),
             latency: () => this._loadLatencySection(),
             reliability: () => this._loadReliabilitySection(),
             behavior: () => this._loadBehaviorSection(),
@@ -795,6 +797,27 @@ class AnalyticsView {
             this.loadedSections.add('roles');
         } catch (err) {
             this._setSectionError('roles', err);
+        }
+    }
+
+    async _loadProvidersSection() {
+        this._setSectionLoading('providers');
+        try {
+            const params = this._baseParams();
+            const response = await this.api.getProviderMix(params);
+            const providers = (response && response.providers) || [];
+            const html = this._buildProviderMix(response);
+            this._setSectionBody('providers', html ||
+                '<div class="empty-state-hint">No provider × model data in this window.</div>');
+            const statEl = document.getElementById('analytics-section-stat-providers');
+            if (statEl) {
+                statEl.textContent = providers.length
+                    ? `${providers.length} provider${providers.length === 1 ? '' : 's'}`
+                    : '—';
+            }
+            this.loadedSections.add('providers');
+        } catch (err) {
+            this._setSectionError('providers', err);
         }
     }
 
@@ -1925,6 +1948,84 @@ class AnalyticsView {
                     <th>Top models</th>
                 </tr></thead>
                 <tbody>${tableRows}</tbody>
+            </table>`;
+    }
+
+    _buildProviderMix(response) {
+        const providers = (response && response.providers) || [];
+        if (!providers.length) return '';
+        const fmt = n => Number(n || 0).toLocaleString();
+        const tokenTotal = t => (t ? (t.input || 0) + (t.output || 0) + (t.cache_read || 0)
+            + (t.cache_write || 0) + (t.reasoning || 0) : 0);
+        const fmtCost = c => c != null ? `$${Number(c).toFixed(2)}` : '—';
+        const totalTokens = Number(response.total_tokens || 0);
+
+        // Stacked token-share bar by provider (colour per provider).
+        const palette = ['#4f8cff', '#34c98e', '#f5a623', '#c65ce0', '#e5534b',
+            '#5ac8c8', '#8a94a6', '#d0b34e'];
+        const barSegments = providers.map((p, i) => {
+            const pct = totalTokens > 0
+                ? (p.share_pct != null ? p.share_pct : 0)
+                : 0;
+            return `<div class="pm-bar-seg" title="${this._esc(p.provider)}: ${pct.toFixed(1)}%"
+                style="width:${pct}%;background:${palette[i % palette.length]}"></div>`;
+        }).join('');
+        const legend = providers.map((p, i) => `
+            <span class="pm-legend-item">
+                <span class="pm-legend-swatch" style="background:${palette[i % palette.length]}"></span>
+                ${this._esc(p.provider)}
+                <span class="num">${p.share_pct != null ? p.share_pct.toFixed(1) : '0.0'}%</span>
+                <span class="num small">${fmtCost(p.cost_usd)}</span>
+            </span>`).join('');
+
+        // Nested provider → model table.
+        const rows = providers.map(p => {
+            const modelRows = (p.models || []).map((m, i) => {
+                const t = m.tokens || {};
+                return `
+                    <tr>
+                        <td>${i === 0 ? this._esc(p.provider) : ''}</td>
+                        <td>${this._esc(m.model)}</td>
+                        <td class="num">${fmt(tokenTotal(t))}</td>
+                        <td class="num">${fmt(t.input)} / ${fmt(t.output)}</td>
+                        <td class="num">${fmt(t.cache_read)} / ${fmt(t.cache_write)}</td>
+                        <td class="num">${fmt(t.reasoning)}</td>
+                        <td class="num">${fmt(m.sessions)}</td>
+                        <td class="num">${fmtCost(m.cost_usd)}</td>
+                    </tr>`;
+            }).join('');
+            const pTokens = (p.models || []).reduce((s, m) => s + tokenTotal(m.tokens), 0);
+            return modelRows + `
+                <tr class="pm-provider-total">
+                    <td colspan="2"><strong>${this._esc(p.provider)} total</strong></td>
+                    <td class="num"><strong>${fmt(pTokens)}</strong></td>
+                    <td colspan="4"></td>
+                    <td class="num"></td>
+                    <td class="num"><strong>${fmtCost(p.cost_usd)}</strong></td>
+                </tr>`;
+        }).join('');
+
+        const methodNote = response.method === 'token-share-split'
+            ? `<p class="table-hint">⚠ At least one model was served by several providers; its
+               tokens and cost were split across them by each provider's share of that model's
+               usage rows (<code>method: token-share-split</code>).</p>` : '';
+
+        return `
+            <h3>Provider × model mix</h3>
+            <p class="table-hint">Which provider served which model, and the per-model cost share,
+            across opencode, codex and claude_code. Cost is estimated from tokens × pricing
+            (opencode's own cost counter arrives zero-valued); local/unpriced models show
+            <em>—</em>. Codex emits no provider attribute, so its models are grouped under
+            <code>(unknown)</code> rather than guessed.</p>
+            ${methodNote}
+            <div class="pm-bar">${barSegments}</div>
+            <div class="pm-legend">${legend}</div>
+            <table class="data-table">
+                <thead><tr>
+                    <th>Provider</th><th>Model</th><th>Tokens</th><th>In / Out</th>
+                    <th>Cache r / w</th><th>Reasoning</th><th>Sessions</th><th>Cost (est.)</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
             </table>`;
     }
 

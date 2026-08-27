@@ -10,9 +10,10 @@ use otelite_core::api::{
     AgentRolesResponse, CacheHitRateByModel, CallsSeriesPoint, ContextTypeSplit,
     ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse,
     ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket,
-    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, RequestParamProfile,
-    RetrievalStats, RetryStats, SessionCostRow, StopReasonCount, TokenUsageResponse,
-    ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse,
+    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, StopReasonCount,
+    TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -874,6 +875,64 @@ pub async fn get_agent_roles(
         } else {
             None
         };
+    }
+    Ok(Json(response))
+}
+
+/// Provider × model mix: tokens, sessions and estimated cost per provider
+/// and model, across opencode, codex and claude_code.
+#[utoipa::path(
+    get,
+    path = "/api/genai/provider_mix",
+    params(TimeRangeQuery),
+    responses(
+        (status = 200, description = "Provider x model token and cost mix", body = ProviderMixResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_provider_mix(
+    State(state): State<AppState>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<ProviderMixResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut response = state
+        .storage
+        .query_provider_mix(query.start_time, query.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query provider mix: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    // Enrich per-model cost from the pricing table (opencode's own cost
+    // counter is zero-valued in the wire data, so tokens x price is the
+    // source; reasoning tokens are not priced). Provider cost covers its
+    // priced models; None when none of them has known pricing.
+    let pricing = state.pricing.snapshot().await;
+    for provider in &mut response.providers {
+        let mut total: f64 = 0.0;
+        let mut any_priced = false;
+        for m in &mut provider.models {
+            let usage = TokenUsage {
+                input: m.tokens.input,
+                output: m.tokens.output,
+                cache_creation: m.tokens.cache_write,
+                cache_read: m.tokens.cache_read,
+            };
+            let result = pricing.db.compute_cost(Some(m.model.as_str()), usage, None);
+            if let Some(c) = result.cost {
+                total += c;
+                any_priced = true;
+            }
+            m.cost_usd = result.cost;
+            m.cost_source = Some(result.source.as_str().to_string());
+        }
+        provider.cost_usd = if any_priced { Some(total) } else { None };
     }
     Ok(Json(response))
 }

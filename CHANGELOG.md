@@ -11,6 +11,19 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **See your provider × model mix at a glance.** The new *Provider Mix*
+  section on the GenAI Analytics page (and `otelite providers`) shows a
+  stacked token-share bar plus a per-provider, per-model table across
+  opencode, codex and Claude Code — which provider served which model, with
+  token breakdown, session counts and estimated cost share. When a single
+  model is served by several providers its tokens are split across them by
+  each provider's share of that model's usage (the response reports
+  `method: token-share-split` when that happens). Codex emits no provider
+  attribute, so its models are grouped under `(unknown)` rather than
+  guessed; cost is estimated from tokens × the pricing table as before.
+
 ## [0.1.68] - 2026-08-27
 
 ### Added

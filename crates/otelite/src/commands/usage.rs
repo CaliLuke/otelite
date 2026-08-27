@@ -8,7 +8,7 @@ use otelite_storage::StorageBackend;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn validate_since(s: &str) -> std::result::Result<String, String> {
+pub(crate) fn validate_since(s: &str) -> std::result::Result<String, String> {
     let (digits, suffix) = s.split_at(s.len().saturating_sub(1));
     let valid_suffix = matches!(suffix, "h" | "d" | "m");
     let valid_digits = !digits.is_empty() && digits.parse::<u64>().is_ok();
@@ -205,7 +205,7 @@ struct UsageOutput {
 
 // ── pricing fetch ─────────────────────────────────────────────────────────────
 
-async fn fetch_pricing() -> PricingDatabase {
+pub(crate) async fn fetch_pricing() -> PricingDatabase {
     const URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -821,7 +821,7 @@ impl UsageCommand {
 
 // ── display helpers ───────────────────────────────────────────────────────────
 
-fn parse_time_range(range: &str) -> Result<(i64, i64)> {
+pub(crate) fn parse_time_range(range: &str) -> Result<(i64, i64)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| Error::ApiError(format!("Failed to get current time: {}", e)))?

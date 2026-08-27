@@ -3221,3 +3221,29 @@ body {
     font-variant-numeric: tabular-nums;
     min-width: 50px;
 }
+
+/* ── Provider Mix (analytics) ─────────────────────────────────────────────── */
+.pm-bar {
+    display: flex;
+    height: 18px;
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 8px 0 6px;
+    background: rgba(128, 128, 128, 0.12);
+}
+.pm-bar-seg { height: 100%; }
+.pm-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    margin-bottom: 10px;
+    font-size: 0.82rem;
+}
+.pm-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.pm-legend-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+}
+.pm-provider-total td { border-top: 1px solid rgba(128, 128, 128, 0.25); }

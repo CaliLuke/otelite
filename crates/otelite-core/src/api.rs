@@ -900,6 +900,59 @@ pub struct AgentRolesResponse {
     pub agents_covered: Vec<String>,
 }
 
+/// One model row inside a provider mix entry. `cost_usd` is estimated from
+/// tokens × the pricing table and enriched by the API layer; `None` for
+/// local or unpriced models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProviderModelEntry {
+    pub model: String,
+    pub tokens: RoleTokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+    /// Distinct sessions observed for this model in the window (0 when the
+    /// source does not carry a session id, e.g. codex turn metrics).
+    pub sessions: u64,
+}
+
+/// One provider row in the provider × model mix. `share_pct` is the
+/// provider's share of total tokens (cost-based shares would be misleading
+/// while local models carry no price). `cost_usd` covers the priced models
+/// only; `None` when none of the provider's models has known pricing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProviderMixEntry {
+    /// Provider as carried by the telemetry; "(unknown)" when the harness
+    /// does not emit a provider/system attribute (never guessed).
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_pct: Option<f64>,
+    /// Models under this provider, sorted by total tokens descending.
+    pub models: Vec<ProviderModelEntry>,
+}
+
+/// Response for `GET /api/genai/provider_mix`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProviderMixResponse {
+    /// How a model's tokens and cost were attributed to providers:
+    /// "direct" (every model maps to exactly one provider in the window) or
+    /// "token-share-split" (at least one model is served by several
+    /// providers; its totals were split proportionally to that provider's
+    /// share of the model's usage rows). Cost values are estimated from
+    /// tokens × pricing in all cases — opencode's own cost counter is
+    /// zero-valued in the wire data.
+    pub method: String,
+    /// Providers sorted by total tokens descending.
+    pub providers: Vec<ProviderMixEntry>,
+    /// Total tokens across all providers (the denominator of share_pct).
+    pub total_tokens: u64,
+}
+
 /// Distribution of `gen_ai.request.temperature` values across LLM calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

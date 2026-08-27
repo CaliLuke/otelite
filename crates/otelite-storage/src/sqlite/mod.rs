@@ -501,6 +501,17 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_provider_mix(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<otelite_core::api::ProviderMixResponse> {
+        self.read_query(move |conn| {
+            reader::query_provider_mix(conn, start_time, end_time).map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_request_param_profile(
         &self,
         start_time: Option<i64>,

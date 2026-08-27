@@ -306,12 +306,15 @@ pub fn retrieval_span_guard(attributes_col: &str) -> String {
 // otelite's own). Label paths are JSON paths into the metrics `attributes`
 // column.
 
-/// Metric names emitted by the opencode agent.
+/// Metric names emitted by agent harnesses.
 pub mod metric_names {
     /// Cumulative per-(session, model, type, project) token counter.
     pub const OPENCODE_TOKEN_USAGE: &str = "opencode.token.usage";
     /// Per-(session, model, provider, agent, project) usage marker.
     pub const OPENCODE_MODEL_USAGE: &str = "opencode.model.usage";
+    /// Per-turn token histogram from the codex CLI; `value_histogram[1]` is
+    /// the turn's token count for the `token_type` label.
+    pub const CODEX_TURN_TOKEN_USAGE: &str = "codex.turn.token_usage";
 }
 
 /// Attribute label paths for agent metrics.
@@ -322,6 +325,8 @@ pub mod metric_labels {
     /// Token category (see [`opencode_token_types`]).
     pub const TYPE: &str = "$.type";
     pub const SESSION_ID: &str = "$.\"session.id\"";
+    /// Per-turn token category (see [`codex_token_types`]).
+    pub const TOKEN_TYPE: &str = "$.token_type";
 }
 
 /// `type` label values on `opencode.token.usage`.
@@ -331,6 +336,16 @@ pub mod opencode_token_types {
     pub const REASONING: &str = "reasoning";
     pub const CACHE_READ: &str = "cacheRead";
     pub const CACHE_WRITE: &str = "cacheCreation";
+}
+
+/// `token_type` label values on `codex.turn.token_usage`. `total` is the sum
+/// of the other categories and must never be counted (double-counting).
+pub mod codex_token_types {
+    pub const INPUT: &str = "input";
+    pub const OUTPUT: &str = "output";
+    pub const REASONING: &str = "reasoning_output";
+    pub const CACHE_READ: &str = "cached_input";
+    pub const CACHE_WRITE: &str = "cache_write_input";
 }
 
 #[cfg(test)]

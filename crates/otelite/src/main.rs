@@ -151,6 +151,11 @@ enum Commands {
         after_help = "Examples:\n  otelite usage --since 24h\n  otelite usage --model gpt-4 --by-model\n  otelite usage --system openai --since 7d"
     )]
     Usage(commands::usage::UsageCommand),
+    /// Show the provider × model mix (tokens, sessions, estimated cost share)
+    #[command(
+        after_help = "Examples:\n  otelite providers --since 24h\n  otelite providers --since 7d --format json"
+    )]
+    Providers(commands::providers::ProvidersCommand),
     /// Launch the Terminal User Interface
     #[command(
         after_help = "Examples:\n  otelite tui\n  otelite tui --api-url http://localhost:3000\n  otelite tui --view traces --refresh-interval 5"
@@ -523,6 +528,11 @@ async fn run_cli() -> Result<()> {
         Some(Commands::Traces { command }) => handle_traces_command(command, &config).await,
         Some(Commands::Metrics { command }) => handle_metrics_command(command, &config).await,
         Some(Commands::Usage(cmd)) => {
+            let storage = create_storage(&config).await?;
+            cmd.execute(storage, config.format).await?;
+            Ok(())
+        },
+        Some(Commands::Providers(cmd)) => {
             let storage = create_storage(&config).await?;
             cmd.execute(storage, config.format).await?;
             Ok(())

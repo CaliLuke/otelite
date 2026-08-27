@@ -2725,6 +2725,101 @@ pub(crate) fn counter_window_deltas(
     Ok(out)
 }
 
+/// Add `v` tokens of category `kind` (an `opencode.token.usage` `type`
+/// label) to a token-usage accumulator. Unknown categories are ignored, not
+/// misfiled.
+fn add_opencode_tokens(t: &mut otelite_core::api::RoleTokenUsage, kind: Option<&str>, v: u64) {
+    use otelite_core::semconv::opencode_token_types as ttypes;
+    match kind {
+        Some(k) if k == ttypes::INPUT => t.input += v,
+        Some(k) if k == ttypes::OUTPUT => t.output += v,
+        Some(k) if k == ttypes::CACHE_READ => t.cache_read += v,
+        Some(k) if k == ttypes::CACHE_WRITE => t.cache_write += v,
+        Some(k) if k == ttypes::REASONING => t.reasoning += v,
+        _ => {}, // unknown token types are ignored, not misfiled
+    }
+}
+
+/// Split a `total` across weighted buckets using largest-remainder
+/// apportionment so the parts sum exactly to `total`. Buckets keep their
+/// input order; a zero total weight yields all-zero buckets.
+fn largest_remainder_split(total: u64, weights: &[(String, u64)]) -> Vec<(String, u64)> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    let total_weight: u64 = weights.iter().map(|(_, w)| *w).sum();
+    if total_weight == 0 {
+        return weights.iter().map(|(p, _)| (p.clone(), 0)).collect();
+    }
+    let exact: Vec<f64> = weights
+        .iter()
+        .map(|(_, w)| total as f64 * (*w as f64) / (total_weight as f64))
+        .collect();
+    let mut out: Vec<(String, u64)> = weights
+        .iter()
+        .zip(exact.iter())
+        .map(|((p, _), e)| (p.clone(), e.floor() as u64))
+        .collect();
+    let mut remainder = total - out.iter().map(|(_, v)| *v).sum::<u64>();
+    // Rank buckets by fractional part, largest first, for the leftover units.
+    let mut order: Vec<usize> = (0..exact.len()).collect();
+    order.sort_by(|&a, &b| {
+        let fa = exact[a] - exact[a].floor();
+        let fb = exact[b] - exact[b].floor();
+        fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut i = 0;
+    while remainder > 0 && !order.is_empty() {
+        out[order[i % order.len()]].1 += 1;
+        remainder -= 1;
+        i += 1;
+    }
+    out
+}
+
+/// Attribute one model's token usage and (optional) cost to its providers by
+/// weight (telemetry-row counts). A single provider keeps everything
+/// ("direct"); several providers split proportionally ("token-share-split").
+fn attribute_model_to_providers(
+    tokens: otelite_core::api::RoleTokenUsage,
+    cost: Option<f64>,
+    providers: &[(String, u64)],
+) -> Vec<(String, otelite_core::api::RoleTokenUsage, Option<f64>)> {
+    use otelite_core::api::RoleTokenUsage;
+    if providers.is_empty() {
+        return Vec::new();
+    }
+    let split_each =
+        |pick: fn(&RoleTokenUsage) -> u64| largest_remainder_split(pick(&tokens), providers);
+    let inputs = split_each(|t| t.input);
+    let outputs = split_each(|t| t.output);
+    let cache_reads = split_each(|t| t.cache_read);
+    let cache_writes = split_each(|t| t.cache_write);
+    let reasonings = split_each(|t| t.reasoning);
+    let total_weight: u64 = providers.iter().map(|(_, w)| *w).sum();
+    providers
+        .iter()
+        .enumerate()
+        .map(|(i, (provider, w))| {
+            let t = RoleTokenUsage {
+                input: inputs[i].1,
+                output: outputs[i].1,
+                cache_read: cache_reads[i].1,
+                cache_write: cache_writes[i].1,
+                reasoning: reasonings[i].1,
+            };
+            let c = cost.map(|c| {
+                if total_weight == 0 {
+                    0.0
+                } else {
+                    c * (*w as f64) / (total_weight as f64)
+                }
+            });
+            (provider.clone(), t, c)
+        })
+        .collect()
+}
+
 /// Sub-agent role attribution (opencode `agent` label).
 ///
 /// Tokens come from windowed deltas of `opencode.token.usage` (a cumulative
@@ -2741,22 +2836,9 @@ pub fn query_agent_roles(
     use otelite_core::api::{
         AgentRoleBreakdown, AgentRolesResponse, RoleModelBreakdown, RoleTokenUsage,
     };
-    use otelite_core::semconv::{
-        metric_labels as lbl, metric_names as mnames, opencode_token_types as ttypes,
-    };
+    use otelite_core::semconv::{metric_labels as lbl, metric_names as mnames};
 
     const ROLE_UNKNOWN: &str = "unknown";
-
-    fn add_tokens(t: &mut RoleTokenUsage, kind: Option<&str>, v: u64) {
-        match kind {
-            Some(k) if k == ttypes::INPUT => t.input += v,
-            Some(k) if k == ttypes::OUTPUT => t.output += v,
-            Some(k) if k == ttypes::CACHE_READ => t.cache_read += v,
-            Some(k) if k == ttypes::CACHE_WRITE => t.cache_write += v,
-            Some(k) if k == ttypes::REASONING => t.reasoning += v,
-            _ => {}, // unknown token types are ignored, not misfiled
-        }
-    }
 
     struct RoleAgg {
         tokens: RoleTokenUsage,
@@ -2790,8 +2872,8 @@ pub fn query_agent_roles(
             sessions: std::collections::HashSet::new(),
             models: std::collections::HashMap::new(),
         });
-        add_tokens(&mut agg.tokens, kind, d.delta as u64);
-        add_tokens(agg.models.entry(model).or_default(), kind, d.delta as u64);
+        add_opencode_tokens(&mut agg.tokens, kind, d.delta as u64);
+        add_opencode_tokens(agg.models.entry(model).or_default(), kind, d.delta as u64);
     }
 
     // Session and model presence from opencode.model.usage window rows.
@@ -2894,6 +2976,364 @@ pub fn query_agent_roles(
         roles: role_rows,
         unknown_share_pct,
         agents_covered: vec!["opencode".to_string()],
+    })
+}
+
+/// Provider × model mix (tokens, sessions, estimated cost) over the window,
+/// across the three agent harnesses:
+///
+/// - **opencode**: per-model windowed deltas of the cumulative
+///   `opencode.token.usage` counter (same series + covering index as
+///   [`query_agent_roles`]); provider and weight from `opencode.model.usage`
+///   rows (a `model → provider` mapping that is 1:1 in practice).
+/// - **codex**: per-turn sums of the `codex.turn.token_usage` histogram
+///   (`value_histogram[1]`); the `total` category is the sum of the parts
+///   and is never counted. Codex emits no provider attribute, so its models
+///   are reported under "(unknown)" — never guessed.
+/// - **claude_code**: `claude_code.llm_request` spans; provider is the
+///   `gen_ai.system` attribute (again, only where it says so).
+///
+/// Each harness contributes through exactly one source, so no model is
+/// counted twice. Cost is enriched by the API layer from the pricing table
+/// (opencode's own `cost.usage` counter is zero-valued in the wire data).
+/// A model's tokens/cost are attributed to each provider by that provider's
+/// share of the model's telemetry rows ("direct" when one provider,
+/// "token-share-split" when several).
+pub fn query_provider_mix(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<otelite_core::api::ProviderMixResponse> {
+    use otelite_core::api::{
+        ProviderMixEntry, ProviderMixResponse, ProviderModelEntry, RoleTokenUsage,
+    };
+    use otelite_core::semconv::{
+        codex_token_types as ctt, metric_labels as lbl, metric_names as mnames,
+    };
+
+    const PROVIDER_UNKNOWN: &str = "(unknown)";
+
+    let mut model_tokens: HashMap<String, RoleTokenUsage> = HashMap::new();
+    let mut model_sessions: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    // model -> [(provider, weight)] where weight = telemetry-row count.
+    let mut model_providers: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+
+    // ── opencode: counter deltas per (agent, model, type, session.id) ──────
+    let token_deltas = counter_window_deltas(
+        conn,
+        mnames::OPENCODE_TOKEN_USAGE,
+        &[lbl::AGENT, lbl::MODEL, lbl::TYPE, lbl::SESSION_ID],
+        start_time,
+        end_time,
+    )?;
+    for d in token_deltas {
+        let model = d
+            .labels
+            .get(1)
+            .and_then(|l| l.clone())
+            .unwrap_or_else(|| PROVIDER_UNKNOWN.to_string());
+        let kind = d.labels.get(2).and_then(|l| l.as_deref());
+        add_opencode_tokens(
+            model_tokens.entry(model.clone()).or_default(),
+            kind,
+            d.delta as u64,
+        );
+        if let Some(sid) = d.labels.get(3).and_then(|l| l.clone()) {
+            model_sessions.entry(model).or_default().insert(sid);
+        }
+    }
+
+    // opencode: provider + weight from model.usage window rows.
+    {
+        let mut where_clause = String::from("WHERE name = ?1");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(mnames::OPENCODE_MODEL_USAGE.to_string())];
+        if let Some(start) = start_time {
+            where_clause.push_str(" AND timestamp >= ?2");
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+            params.push(Box::new(end));
+        }
+        let sql = format!(
+            "SELECT CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.provider') END, \
+                     CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.model') END \
+             FROM metrics {where_clause}",
+            where_clause = where_clause
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to prepare provider_mix opencode query: {e}"
+            ))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to execute provider_mix opencode query: {e}"
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to parse provider_mix opencode rows: {e}"))
+            })?;
+        for (provider, model) in rows {
+            if let (Some(p), Some(m)) = (provider, model) {
+                let entry = model_providers.entry(m).or_default();
+                match entry.iter_mut().find(|(p2, _)| *p2 == p) {
+                    Some((_, w)) => *w += 1,
+                    None => entry.push((p, 1)),
+                }
+            }
+        }
+    }
+
+    // ── codex: per-turn histogram sums per (model, token_type) ──────────────
+    {
+        let mut where_clause = String::from("WHERE name = ?1");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(mnames::CODEX_TURN_TOKEN_USAGE.to_string())];
+        if let Some(start) = start_time {
+            where_clause.push_str(" AND timestamp >= ?2");
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+            params.push(Box::new(end));
+        }
+        // json_valid-gated on both columns so a corrupt row yields NULL,
+        // never an error.
+        let sql = format!(
+            "SELECT CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.model') END, \
+                     CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.token_type') END, \
+                     COALESCE(CASE WHEN json_valid(value_histogram) THEN json_extract(value_histogram, '$[1]') END, 0.0) \
+             FROM metrics {where_clause}",
+            where_clause = where_clause
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!("Failed to prepare provider_mix codex query: {e}"))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to execute provider_mix codex query: {e}"))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to parse provider_mix codex rows: {e}"))
+            })?;
+        for (model, ttype, sum) in rows {
+            let v = sum as u64;
+            let Some(model) = model else {
+                continue;
+            };
+            let acc = model_tokens.entry(model).or_default();
+            // "total" is the sum of the other categories: skip it.
+            match ttype.as_deref() {
+                Some(t) if t == ctt::INPUT => acc.input += v,
+                Some(t) if t == ctt::OUTPUT => acc.output += v,
+                Some(t) if t == ctt::REASONING => acc.reasoning += v,
+                Some(t) if t == ctt::CACHE_READ => acc.cache_read += v,
+                Some(t) if t == ctt::CACHE_WRITE => acc.cache_write += v,
+                _ => {},
+            }
+        }
+    }
+
+    // ── claude_code: llm_request spans per (model, system) ──────────────────
+    {
+        let exprs = token_exprs();
+        // json_valid conjunct: the token/model/system expressions below are
+        // plain json_extract (not total), so a corrupt attributes value must
+        // be excluded here rather than raise mid-query. Such rows carry no
+        // readable model/system/tokens anyway.
+        let mut where_clause = format!(
+            "WHERE name = '{}' AND json_valid(attributes)",
+            otelite_core::semconv::LLM_REQUEST_SPAN_NAME
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(s) = start_time {
+            where_clause.push_str(" AND start_time >= ?");
+            params.push(Box::new(s));
+        }
+        if let Some(e) = end_time {
+            where_clause.push_str(" AND end_time <= ?");
+            params.push(Box::new(e));
+        }
+        let sql = format!(
+            "SELECT {model} AS model, {system} AS system, \
+                     {session_id} AS session_id, \
+                     COALESCE(SUM({input}), 0)  AS input_tokens, \
+                     COALESCE(SUM({output}), 0) AS output_tokens, \
+                     COALESCE(SUM({cache_creation}), 0) AS cache_creation_tokens, \
+                     COALESCE(SUM({cache_read}), 0) AS cache_read_tokens, \
+                     COUNT(*) AS calls \
+             FROM spans \
+             {where_clause} \
+             GROUP BY model, system, session_id",
+            model = exprs.model,
+            system = exprs.system,
+            session_id = semconv::session_id_expr("attributes"),
+            input = exprs.input,
+            output = exprs.output,
+            cache_creation = exprs.cache_creation,
+            cache_read = exprs.cache_read,
+            where_clause = where_clause,
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!("Failed to prepare provider_mix claude query: {e}"))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, i64>(4)? as u64,
+                    row.get::<_, i64>(5)? as u64,
+                    row.get::<_, i64>(6)? as u64,
+                    row.get::<_, i64>(7)? as u64,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to execute provider_mix claude query: {e}"
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!("Failed to parse provider_mix claude rows: {e}"))
+            })?;
+        for (model, system, sid, input, output, cache_creation, cache_read, calls) in rows {
+            let Some(model) = model else {
+                continue;
+            };
+            let acc = model_tokens.entry(model.clone()).or_default();
+            acc.input += input;
+            acc.output += output;
+            acc.cache_write += cache_creation;
+            acc.cache_read += cache_read;
+            if let Some(system) = system {
+                let entry = model_providers.entry(model.clone()).or_default();
+                match entry.iter_mut().find(|(p, _)| *p == system) {
+                    Some((_, w)) => *w += calls,
+                    None => entry.push((system, calls)),
+                }
+            }
+            if let Some(sid) = sid {
+                model_sessions.entry(model).or_default().insert(sid);
+            }
+        }
+    }
+
+    // ── assemble provider × model rows ──────────────────────────────────────
+    // A model's tokens are attributed to its providers by weight. Cost is
+    // linear in tokens (tokens × pricing), so computing cost per attributed
+    // (provider, model) row in the API layer is exactly the cost split — no
+    // separate cost split step is needed here.
+    let mut any_split = false;
+    // (provider, model) -> accumulated tokens.
+    let mut provider_models: HashMap<(String, String), RoleTokenUsage> = HashMap::new();
+    let sessions_of: HashMap<String, u64> = model_sessions
+        .iter()
+        .map(|(m, s)| (m.clone(), s.len() as u64))
+        .collect();
+
+    for (model, tokens) in &model_tokens {
+        let providers = model_providers.get(model).cloned().unwrap_or_default();
+        let attributed: Vec<(String, RoleTokenUsage)> = if providers.is_empty() {
+            // No provider signal for this model (e.g. codex): attribute the
+            // whole thing to "(unknown)" — never guessed.
+            vec![(PROVIDER_UNKNOWN.to_string(), *tokens)]
+        } else {
+            if providers.len() > 1 {
+                any_split = true;
+            }
+            attribute_model_to_providers(*tokens, None, &providers)
+                .into_iter()
+                .map(|(p, t, _c)| (p, t))
+                .collect()
+        };
+        for (provider, attributed_tokens) in attributed {
+            let entry = provider_models
+                .entry((provider, model.clone()))
+                .or_default();
+            entry.input += attributed_tokens.input;
+            entry.output += attributed_tokens.output;
+            entry.cache_read += attributed_tokens.cache_read;
+            entry.cache_write += attributed_tokens.cache_write;
+            entry.reasoning += attributed_tokens.reasoning;
+        }
+    }
+
+    let total_tokens: u64 = model_tokens.values().map(|t| t.total()).sum();
+
+    // Group (provider, model) by provider.
+    let mut by_provider: HashMap<String, Vec<(String, RoleTokenUsage)>> = HashMap::new();
+    for ((provider, model), tokens) in provider_models {
+        by_provider
+            .entry(provider)
+            .or_default()
+            .push((model, tokens));
+    }
+
+    let mut providers: Vec<ProviderMixEntry> = by_provider
+        .into_iter()
+        .map(|(provider, mut models)| {
+            models.sort_by_key(|a| std::cmp::Reverse(a.1.total()));
+            let model_entries: Vec<ProviderModelEntry> = models
+                .into_iter()
+                .map(|(model, tokens)| ProviderModelEntry {
+                    sessions: sessions_of.get(&model).copied().unwrap_or(0),
+                    cost_usd: None,
+                    cost_source: None,
+                    model,
+                    tokens,
+                })
+                .collect();
+            let provider_tokens: u64 = model_entries.iter().map(|m| m.tokens.total()).sum();
+            let share_pct = if total_tokens > 0 {
+                Some(provider_tokens as f64 / total_tokens as f64 * 100.0)
+            } else {
+                None
+            };
+            ProviderMixEntry {
+                provider,
+                cost_usd: None,
+                share_pct,
+                models: model_entries,
+            }
+        })
+        .collect();
+    providers
+        .sort_by_key(|a| std::cmp::Reverse(a.models.iter().map(|m| m.tokens.total()).sum::<u64>()));
+
+    let method = if any_split {
+        "token-share-split".to_string()
+    } else {
+        "direct".to_string()
+    };
+
+    Ok(ProviderMixResponse {
+        method,
+        providers,
+        total_tokens,
     })
 }
 
@@ -5188,5 +5628,93 @@ mod tests {
         // Both rows have NULL agent -> one (null) series; baseline 100, last 200.
         let by_label = deltas_by_label(deltas);
         assert_eq!(by_label.get("(null)"), Some(&100.0));
+    }
+
+    // ── provider attribution (issue #129) ────────────────────────────────────
+
+    use otelite_core::api::RoleTokenUsage;
+
+    fn sample_tokens() -> RoleTokenUsage {
+        RoleTokenUsage {
+            input: 10,
+            output: 20,
+            cache_read: 30,
+            cache_write: 40,
+            reasoning: 50,
+        }
+    }
+
+    #[test]
+    fn largest_remainder_split_single_bucket_keeps_all() {
+        let out = largest_remainder_split(100, &[("p1".to_string(), 7)]);
+        assert_eq!(out, vec![("p1".to_string(), 100)]);
+    }
+
+    #[test]
+    fn largest_remainder_split_proportional_and_exact() {
+        // 1:2 weights on 100 -> 33 / 67 (largest remainder to the 2-weight).
+        let out = largest_remainder_split(100, &[("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert_eq!(out, vec![("a".to_string(), 33), ("b".to_string(), 67)]);
+        // Parts must sum exactly to the total.
+        assert_eq!(out.iter().map(|(_, v)| *v).sum::<u64>(), 100);
+
+        // Even split is exact.
+        let out = largest_remainder_split(100, &[("a".to_string(), 1), ("b".to_string(), 1)]);
+        assert_eq!(out, vec![("a".to_string(), 50), ("b".to_string(), 50)]);
+
+        // Zero total -> all zeros, no panic.
+        let out = largest_remainder_split(0, &[("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert_eq!(out, vec![("a".to_string(), 0), ("b".to_string(), 0)]);
+
+        // Zero total weight -> all zeros, no division by zero.
+        let out = largest_remainder_split(10, &[("a".to_string(), 0), ("b".to_string(), 0)]);
+        assert_eq!(out, vec![("a".to_string(), 0), ("b".to_string(), 0)]);
+
+        // Empty weights -> empty result.
+        assert!(largest_remainder_split(10, &[]).is_empty());
+    }
+
+    #[test]
+    fn attribute_model_direct_single_provider() {
+        let out =
+            attribute_model_to_providers(sample_tokens(), Some(10.0), &[("bv".to_string(), 12)]);
+        assert_eq!(out.len(), 1);
+        let (provider, tokens, cost) = &out[0];
+        assert_eq!(provider, "bv");
+        assert_eq!(*tokens, sample_tokens(), "single provider keeps everything");
+        assert_eq!(cost, &Some(10.0));
+    }
+
+    #[test]
+    fn attribute_model_split_across_providers() {
+        // 1:1 weights on the sample (total 150 tokens, $12): each provider
+        // gets half of every token field and half the cost.
+        let out = attribute_model_to_providers(
+            sample_tokens(),
+            Some(12.0),
+            &[("bv".to_string(), 3), ("omlx".to_string(), 3)],
+        );
+        assert_eq!(out.len(), 2);
+        let total: u64 = out.iter().map(|(_, t, _)| t.total()).sum();
+        assert_eq!(total, 150, "split must preserve the token total");
+        let cost_sum: f64 = out.iter().map(|(_, _, c)| c.unwrap_or(0.0)).sum();
+        assert!(
+            (cost_sum - 12.0).abs() < 1e-9,
+            "split must preserve the cost total"
+        );
+        for (_, t, c) in &out {
+            assert_eq!(t.input, 5);
+            assert_eq!(t.output, 10);
+            assert_eq!(t.cache_read, 15);
+            assert_eq!(t.cache_write, 20);
+            assert_eq!(t.reasoning, 25);
+            assert!((c.unwrap() - 6.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn attribute_model_no_providers_yields_empty() {
+        let out = attribute_model_to_providers(sample_tokens(), Some(1.0), &[]);
+        assert!(out.is_empty());
     }
 }

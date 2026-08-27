@@ -209,6 +209,7 @@ class ApiClient {
     async getToolErrors(params = {})    { return this.get('/genai/tool_errors', params); }
     async getHourOfDay(params = {})     { return this.get('/genai/hour_of_day', params); }
     async getAgentRoles(params = {})    { return this.get('/genai/agent_roles', params); }
+    async getProviderMix(params = {})   { return this.get('/genai/provider_mix', params); }
 
     /**
      * Fetch session diagnose report
