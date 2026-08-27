@@ -245,8 +245,12 @@ pub trait StorageBackend: Send + Sync {
         filters: &GenAiFilters,
     ) -> Result<Vec<LatencyStats>>;
 
-    /// Bucketed p50/p90/p95/p99 latency percentiles by model for the
-    /// requested metrics ("duration", "ttft").
+    /// Bucketed latency percentiles by model for the requested metrics
+    /// ("duration", "ttft"). Rolling buckets (fixed `bucket_secs` grid from
+    /// the epoch, non-empty only) when `timezone` is `None`; calendar-day
+    /// buckets in the given IANA timezone (DST-aware, empty days included
+    /// with null percentiles, explicit `start_time`/`end_time` required)
+    /// otherwise (#119/#141).
     #[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
     async fn query_latency_percentiles(
         &self,
@@ -255,6 +259,7 @@ pub trait StorageBackend: Send + Sync {
         filters: &GenAiFilters,
         bucket_secs: u64,
         metrics: &[&str],
+        timezone: Option<&str>,
     ) -> Result<LatencyPercentilesResponse>;
 
     /// Generic distribution over a named metric cohort (issue #133):

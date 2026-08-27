@@ -107,6 +107,16 @@ pub struct UsageCommand {
     #[arg(long)]
     pub latency_percentiles: bool,
 
+    /// Bucket the latency percentiles by calendar day in --timezone
+    /// (DST-aware 23/25-hour days, empty days shown with no percentiles)
+    /// instead of the fixed --bucket-secs grid
+    #[arg(long)]
+    pub calendar_day: bool,
+
+    /// IANA timezone for --calendar-day (e.g. Europe/London); default UTC
+    #[arg(long, requires = "calendar_day")]
+    pub timezone: Option<String>,
+
     /// Show tool approval/rejection decision summary (Claude Code)
     #[arg(long)]
     pub tool_approvals: bool,
@@ -525,9 +535,15 @@ impl UsageCommand {
                 None
             };
 
-        // --latency-percentiles
+        // --latency-percentiles. Calendar-day mode is explicit: only an
+        // explicit --calendar-day opts in (UTC when no --timezone).
         let latency_percentiles: Option<otelite_core::api::LatencyPercentilesResponse> =
             if self.latency_percentiles {
+                let tz = if self.calendar_day {
+                    Some(self.timezone.as_deref().unwrap_or("UTC"))
+                } else {
+                    None
+                };
                 Some(
                     storage
                         .query_latency_percentiles(
@@ -536,6 +552,7 @@ impl UsageCommand {
                             &GenAiFilters::default(),
                             self.bucket_secs,
                             &["duration", "ttft"],
+                            tz,
                         )
                         .await
                         .map_err(|e| {
@@ -849,7 +866,12 @@ impl UsageCommand {
                 }
 
                 if let Some(ref resp) = latency_percentiles {
-                    display_latency_percentiles(resp, self.model.as_deref());
+                    display_latency_percentiles(
+                        resp,
+                        self.model.as_deref(),
+                        self.calendar_day
+                            .then(|| self.timezone.as_deref().unwrap_or("UTC")),
+                    );
                     println!();
                 }
 
@@ -1360,6 +1382,7 @@ fn display_latency_context(bins: &[otelite_core::api::LatencyByContextBin]) {
 fn display_latency_percentiles<'a>(
     resp: &'a otelite_core::api::LatencyPercentilesResponse,
     model_filter: Option<&str>,
+    calendar_timezone: Option<&str>,
 ) {
     use chrono::{DateTime, Local, Utc};
 
@@ -1405,9 +1428,17 @@ fn display_latency_percentiles<'a>(
             Cell::new("p99 ms").fg(Color::Red),
             Cell::new("Tok/s* (p10/p50/p90)").fg(Color::Yellow),
         ]);
+        let pct = |v: Option<f64>| v.map_or("—".to_string(), |x| format!("{x:.0}"));
         for p in points {
             let dt = DateTime::<Utc>::from_timestamp_nanos(p.ts);
-            let bucket_str = dt.with_timezone(&Local).format("%m-%d %H:%M").to_string();
+            // Calendar mode: label the day in the bucket's own timezone.
+            let bucket_str = match calendar_timezone {
+                Some(tz) => match <chrono_tz::Tz as std::str::FromStr>::from_str(tz) {
+                    Ok(tz) => dt.with_timezone(&tz).format("%Y-%m-%d").to_string(),
+                    Err(_) => dt.with_timezone(&Local).format("%Y-%m-%d").to_string(),
+                },
+                None => dt.with_timezone(&Local).format("%m-%d %H:%M").to_string(),
+            };
             let tok = match (
                 p.throughput_p10_tok_s,
                 p.throughput_p50_tok_s,
@@ -1420,11 +1451,11 @@ fn display_latency_percentiles<'a>(
                 Cell::new(bucket_str),
                 Cell::new(&label),
                 Cell::new(p.count),
-                Cell::new(format!("{:.0}", p.p10_ms)),
-                Cell::new(format!("{:.0}", p.p50_ms)),
-                Cell::new(format!("{:.0}", p.p90_ms)),
-                Cell::new(format!("{:.0}", p.p95_ms)),
-                Cell::new(format!("{:.0}", p.p99_ms)),
+                Cell::new(pct(p.p10_ms)),
+                Cell::new(pct(p.p50_ms)),
+                Cell::new(pct(p.p90_ms)),
+                Cell::new(pct(p.p95_ms)),
+                Cell::new(pct(p.p99_ms)),
                 Cell::new(tok),
             ]);
         }

@@ -1722,19 +1722,36 @@ pub struct LatencySeriesPoint {
 pub struct LatencyPercentilePoint {
     /// Bucket start timestamp in nanoseconds since Unix epoch.
     pub ts: i64,
-    /// 10th percentile in milliseconds (lower tail, #119). Weak estimate
-    /// when `count < 10`. Absent from pre-#119 server responses.
+    /// Bucket end timestamp in nanoseconds since Unix epoch; the bucket
+    /// covers `[ts, end_ts)`. In calendar-day mode a DST day is 23 or 25
+    /// hours, so `end_ts - ts` is not a fixed 86400 s. Absent from
+    /// pre-#119 server responses.
     #[serde(default)]
-    pub p10_ms: f64,
-    /// 50th percentile in milliseconds.
-    pub p50_ms: f64,
-    /// 90th percentile in milliseconds.
-    pub p90_ms: f64,
-    /// 95th percentile in milliseconds.
-    pub p95_ms: f64,
-    /// 99th percentile in milliseconds.
-    pub p99_ms: f64,
-    /// Number of values in this bucket.
+    pub end_ts: i64,
+    /// 10th percentile in milliseconds (lower tail, #119). Weak estimate
+    /// when `count < 10`. `None` only for empty calendar-day buckets
+    /// (`count == 0`); rolling buckets always have a value. Absent from
+    /// pre-#119 server responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p10_ms: Option<f64>,
+    /// 50th percentile in milliseconds. `None` only for empty
+    /// calendar-day buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p50_ms: Option<f64>,
+    /// 90th percentile in milliseconds. `None` only for empty
+    /// calendar-day buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p90_ms: Option<f64>,
+    /// 95th percentile in milliseconds. `None` only for empty
+    /// calendar-day buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_ms: Option<f64>,
+    /// 99th percentile in milliseconds. `None` only for empty
+    /// calendar-day buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p99_ms: Option<f64>,
+    /// Number of values in this bucket. Zero only for empty calendar-day
+    /// buckets.
     pub count: u64,
     /// Derived end-to-end output throughput percentiles in tokens/second,
     /// computed per call from raw nanosecond durations (never aggregate

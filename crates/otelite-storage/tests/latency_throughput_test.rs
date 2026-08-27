@@ -175,6 +175,7 @@ fn test_latency_percentiles_series_throughput_fields() {
         3600,
         &["duration"],
         &GenAiFilters::default(),
+        None,
     )
     .unwrap();
 
@@ -213,6 +214,7 @@ fn test_latency_percentiles_series_throughput_none_when_ineligible() {
         3600,
         &["duration"],
         &GenAiFilters::default(),
+        None,
     )
     .unwrap();
 
@@ -252,7 +254,7 @@ fn test_new_fields_deserialize_from_pre119_payloads() {
                            "p95_ms": 2.5, "p99_ms": 3.0, "count": 4}"#;
     let point: otelite_core::api::LatencyPercentilePoint =
         serde_json::from_str(legacy_point).unwrap();
-    assert_eq!(point.p10_ms, 0.0);
+    assert_eq!(point.p10_ms, None, "absent p10_ms defaults to null");
     assert!(point.throughput_p10_tok_s.is_none());
     assert_eq!(point.throughput_sample_count, 0);
 }

@@ -1110,18 +1110,18 @@ async fn test_get_latency_percentiles_with_data() {
     assert_eq!(dur.all.len(), 1, "single bucket: {resp:?}");
     assert_eq!(dur.all[0].count, 3);
     // durations [100, 300, 400] sorted: p50=300, p90/p95/p99=400
-    assert_eq!(dur.all[0].p50_ms, 300.0);
-    assert_eq!(dur.all[0].p90_ms, 400.0);
-    assert_eq!(dur.all[0].p95_ms, 400.0);
-    assert_eq!(dur.all[0].p99_ms, 400.0);
+    assert_eq!(dur.all[0].p50_ms, Some(300.0));
+    assert_eq!(dur.all[0].p90_ms, Some(400.0));
+    assert_eq!(dur.all[0].p95_ms, Some(400.0));
+    assert_eq!(dur.all[0].p99_ms, Some(400.0));
     assert_eq!(dur.models.len(), 2);
     assert_eq!(dur.models["modelA"][0].count, 2);
     assert_eq!(dur.models["modelB"][0].count, 1);
 
     let tt = &resp.metrics["ttft"];
     assert_eq!(tt.all[0].count, 3, "all three spans carried valid ttft");
-    assert_eq!(tt.all[0].p50_ms, 90.0);
-    assert_eq!(tt.all[0].p90_ms, 150.0);
+    assert_eq!(tt.all[0].p50_ms, Some(90.0));
+    assert_eq!(tt.all[0].p90_ms, Some(150.0));
 
     // Unknown metric name → 400, not 500.
     let app = server.build_router();
@@ -1855,4 +1855,113 @@ async fn test_latency_throughput_fields_end_to_end() {
     assert_eq!(point["throughput_p50_tok_s"], 100.0);
     assert_eq!(point["throughput_p90_tok_s"], 1000.0);
     assert!(point["p10_ms"].is_number());
+}
+
+/// Issue #119/#141: calendar-day bucketing is explicit (calendar_day +
+/// timezone), emits explicit bucket end timestamps, and includes empty
+/// days with null percentiles. Invalid parameters are 400s, not 500s.
+#[tokio::test]
+async fn test_latency_percentiles_calendar_day() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+    let day: i64 = 86_400_000_000_000;
+    // R0 is not on a UTC midnight; floor to one so the window is exactly
+    // three full calendar days.
+    let d0 = (R0 / day) * day;
+
+    // One call on day 0, one on day 1; day 2 stays empty.
+    storage
+        .write_span(&llm_request_span(
+            "cd-0",
+            "modelA",
+            d0 + 3_600_000_000_000,
+            100,
+            None,
+        ))
+        .await
+        .unwrap();
+    storage
+        .write_span(&llm_request_span(
+            "cd-1",
+            "modelA",
+            d0 + day + 3_600_000_000_000,
+            100,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+
+    let (status, v) = get_json(
+        &app,
+        &format!(
+            "/api/genai/latency_percentiles?start_time={d0}&end_time={}&calendar_day=1&timezone=UTC&metrics=duration",
+            d0 + 3 * day
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let points = v["metrics"]["duration"]["all"].as_array().unwrap();
+    assert_eq!(points.len(), 3, "three calendar days, empty one included");
+    assert_eq!(points[0]["count"], 1);
+    assert_eq!(points[1]["count"], 1);
+    assert_eq!(points[2]["count"], 0);
+    assert!(points[2]["p50_ms"].is_null(), "empty day: null percentiles");
+    for (i, p) in points.iter().enumerate() {
+        assert_eq!(p["ts"], d0 + i as i64 * day);
+        assert_eq!(
+            p["end_ts"],
+            d0 + (i + 1) as i64 * day,
+            "explicit bucket end timestamp"
+        );
+    }
+
+    // Invalid parameters → 400, with a message.
+    for (name, url) in [
+        (
+            "bad timezone",
+            &format!(
+                "/api/genai/latency_percentiles?start_time={R0}&end_time={}&calendar_day=1&timezone=Not/AZone",
+                R0 + day
+            ),
+        ),
+        (
+            "timezone without calendar_day",
+            &format!(
+                "/api/genai/latency_percentiles?start_time={R0}&end_time={}&timezone=UTC",
+                R0 + day
+            ),
+        ),
+        (
+            "calendar_day without window",
+            &String::from("/api/genai/latency_percentiles?calendar_day=1&timezone=UTC"),
+        ),
+        (
+            "bogus calendar_day value",
+            &format!(
+                "/api/genai/latency_percentiles?start_time={R0}&end_time={}&calendar_day=maybe",
+                R0 + day
+            ),
+        ),
+    ] {
+        let (status, v) = get_json(&app, url).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {v}");
+    }
+
+    // Rolling mode is unaffected: no empty buckets, no 400s, points carry
+    // end_ts one bucket width past the start.
+    let (status, v) = get_json(
+        &app,
+        &format!(
+            "/api/genai/latency_percentiles?start_time={d0}&end_time={}&bucket_secs=3600&metrics=duration",
+            d0 + 2 * day
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let points = v["metrics"]["duration"]["all"].as_array().unwrap();
+    assert_eq!(points.len(), 2, "rolling: only non-empty buckets");
+    for p in points {
+        assert_eq!(p["end_ts"], p["ts"].as_i64().unwrap() + 3_600_000_000_000);
+    }
 }

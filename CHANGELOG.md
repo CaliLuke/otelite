@@ -11,6 +11,17 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Calendar-day latency buckets with timezones.** The latency percentiles
+  endpoint (and `otelite usage --latency-percentiles --calendar-day
+  [--timezone Europe/London]`) can now bucket by local calendar day in any
+  IANA timezone. DST days are correctly 23 or 25 hours, every day in the
+  range is present (empty days show zero samples instead of vanishing),
+  each bucket carries an explicit end timestamp, and calls are attributed
+  to the day they started. The mode is explicit — the default rolling
+  `--bucket-secs` grid is unchanged.
+
 ## [0.1.79] - 2026-08-27
 
 ### Added

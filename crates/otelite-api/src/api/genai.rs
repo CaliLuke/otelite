@@ -547,10 +547,21 @@ pub struct LatencyPercentileQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
-    /// Bucket size in seconds (default 3600 = 1 hour).
+    /// Bucket size in seconds (default 3600 = 1 hour). Ignored in
+    /// calendar-day mode.
     pub bucket_secs: Option<u64>,
     /// Comma-separated metrics: "duration,ttft" (default: both).
     pub metrics: Option<String>,
+    /// Calendar-day bucketing: `1` (or `true`) buckets by local day in
+    /// `timezone` instead of the fixed `bucket_secs` grid. DST days are
+    /// 23 or 25 hours; empty days are present with null percentiles; calls
+    /// are attributed by start time. Requires explicit `start_time` and
+    /// `end_time` (#119/#141).
+    pub calendar_day: Option<String>,
+    /// IANA timezone for `calendar_day=1` (e.g. `Europe/London`,
+    /// `America/New_York`). Defaults to UTC. Ignored (and rejected)
+    /// without `calendar_day=1`.
+    pub timezone: Option<String>,
     /// Agent family filter: `claude`, `opencode`, or `codex`
     pub agent: Option<String>,
     /// Model name filter
@@ -663,6 +674,55 @@ pub async fn get_latency_percentiles(
         ));
     }
 
+    // Calendar-day mode (#141): explicit, never a silent switch. The
+    // timezone must validate as an IANA zone; the window must be explicit.
+    let calendar_day = match query.calendar_day.as_deref() {
+        None => false,
+        Some("1" | "true" | "yes") => true,
+        Some("0" | "false" | "no") => false,
+        Some(v) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "calendar_day must be 1/0, true/false or yes/no, got '{v}'"
+                ))),
+            ))
+        },
+    };
+    let timezone: Option<String> = match (query.timezone.as_deref(), calendar_day) {
+        (Some(tz), true) => {
+            let tz = tz.trim();
+            let _parsed: chrono_tz::Tz = std::str::FromStr::from_str(tz).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(format!(
+                        "unknown IANA timezone '{tz}': {e} (e.g. Europe/London, America/New_York, UTC)"
+                    ))),
+                )
+            })?;
+            Some(tz.to_string())
+        },
+        (None, true) => Some("UTC".to_string()),
+        (Some(tz), false) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "timezone '{tz}' is only used with calendar_day=1"
+                ))),
+            ))
+        },
+        (None, false) => None,
+    };
+    if calendar_day && (query.start_time.is_none() || query.end_time.is_none()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "calendar_day=1 requires explicit start_time and end_time",
+            )),
+        ));
+    }
+    let timezone = timezone.as_deref();
+
     let mut rows = state
         .storage
         .query_latency_percentiles(
@@ -671,6 +731,7 @@ pub async fn get_latency_percentiles(
             &filters,
             bucket_secs,
             &metrics,
+            timezone,
         )
         .await
         .map_err(|e| {

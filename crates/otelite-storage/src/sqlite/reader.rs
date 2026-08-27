@@ -2230,6 +2230,75 @@ fn collect_codex_ttft_values(
     Ok(out)
 }
 
+/// Calendar-day bucket boundaries in an IANA timezone.
+///
+/// Each bucket covers `[start, end)` of one local day; DST days are 23 or
+/// 25 hours because boundaries are local midnights mapped to instants, not
+/// a fixed 86 400 s step. Buckets are clipped to the query window so the
+/// first and last (possibly partial) days tile `[start_ns, end_ns)`
+/// exactly, and calls are attributed by start time — a boundary-crossing
+/// call appears exactly once, in the day it started.
+fn calendar_day_buckets(start_ns: i64, end_ns: i64, tz: &chrono_tz::Tz) -> Result<Vec<(i64, i64)>> {
+    use chrono::{DateTime, TimeDelta, Utc};
+
+    if end_ns <= start_ns {
+        return Err(StorageError::QueryError(
+            "end_time must be after start_time".to_string(),
+        ));
+    }
+    // i64 nanosecond instants only reach ~±292 000 years; anything beyond
+    // is invalid input, not an instant to map.
+    let day_of = |ns: i64, what: &str| -> Result<chrono::NaiveDate> {
+        let secs = ns.div_euclid(1_000_000_000);
+        let nsecs = ns.rem_euclid(1_000_000_000) as u32;
+        DateTime::<Utc>::from_timestamp(secs, nsecs)
+            .ok_or_else(|| StorageError::QueryError(format!("{what} out of range")))
+            .map(|dt| dt.with_timezone(tz).date_naive())
+    };
+    let first_day = day_of(start_ns, "start_time")?;
+    let last_day = day_of(end_ns - 1, "end_time")?;
+
+    let mut buckets = Vec::new();
+    let mut day = first_day;
+    while day <= last_day {
+        let next_day = day + TimeDelta::days(1);
+        // Local midnight can be ambiguous (DST ends at midnight) or
+        // nonexistent (DST starts at midnight) in some zones; `.earliest()`
+        // is the deterministic chronological mapping in both cases.
+        let day_start = day
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| {
+                t.and_local_timezone(*tz)
+                    .earliest()
+                    .and_then(|dt| dt.timestamp_nanos_opt())
+            })
+            .ok_or_else(|| {
+                StorageError::QueryError(format!(
+                    "timezone {tz}: cannot resolve local midnight for {day}"
+                ))
+            })?;
+        let day_end = next_day
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| {
+                t.and_local_timezone(*tz)
+                    .earliest()
+                    .and_then(|dt| dt.timestamp_nanos_opt())
+            })
+            .ok_or_else(|| {
+                StorageError::QueryError(format!(
+                    "timezone {tz}: cannot resolve local midnight for {next_day}"
+                ))
+            })?;
+        let clipped_start = day_start.max(start_ns);
+        let clipped_end = day_end.min(end_ns);
+        if clipped_start < clipped_end {
+            buckets.push((clipped_start, clipped_end));
+        }
+        day = next_day;
+    }
+    Ok(buckets)
+}
+
 /// Bucketed latency percentiles (issue #132).
 ///
 /// Cohorts, matching `query_latency_stats` so the two endpoints never
@@ -2242,7 +2311,11 @@ fn collect_codex_ttft_values(
 ///   TTFT attribute, so the cohorts are disjoint. Histogram rows with
 ///   count > 1 expand each bucket's observations at the bucket midpoint;
 ///   count == 1 rows contribute their exact `sum`.
-#[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
+///
+/// Buckets are either a fixed `bucket_secs` grid from the epoch (rolling
+/// mode, non-empty buckets only) or calendar days in `timezone`
+/// (DST-aware, empty days included, #141).
+#[allow(clippy::too_many_arguments)] // filter bar (#135) and calendar mode (#141) pushed us past 5
 pub fn query_latency_percentiles(
     conn: &Connection,
     start_time: Option<i64>,
@@ -2250,16 +2323,12 @@ pub fn query_latency_percentiles(
     bucket_secs: u64,
     metrics: &[&str],
     filters: &GenAiFilters,
+    timezone: Option<&str>,
 ) -> Result<otelite_core::api::LatencyPercentilesResponse> {
     use otelite_core::api::{
         LatencyPercentilePoint, LatencyPercentileSeries, LatencyPercentilesResponse,
     };
 
-    if bucket_secs == 0 {
-        return Err(StorageError::QueryError(
-            "bucket_secs must be positive".to_string(),
-        ));
-    }
     let want_duration = metrics.contains(&"duration");
     let want_ttft = metrics.contains(&"ttft");
     if !want_duration && !want_ttft {
@@ -2267,6 +2336,35 @@ pub fn query_latency_percentiles(
             "metrics must include \"duration\" and/or \"ttft\"".to_string(),
         ));
     }
+
+    // Bucket mode. Rolling: fixed-width grid from the epoch, only
+    // non-empty buckets are emitted (pre-#141 behaviour). Calendar: explicit
+    // IANA timezone, one bucket per local day, empty days emitted with
+    // count 0 and null percentiles; requires an explicit window.
+    let calendar_buckets: Option<Vec<(i64, i64)>> = match timezone {
+        Some(tz_name) => {
+            let (start_ns, end_ns) = match (start_time, end_time) {
+                (Some(s), Some(e)) => (s, e),
+                _ => {
+                    return Err(StorageError::QueryError(
+                        "calendar-day mode requires explicit start_time and end_time".to_string(),
+                    ))
+                },
+            };
+            let tz = std::str::FromStr::from_str(tz_name).map_err(|e| {
+                StorageError::QueryError(format!("unknown IANA timezone '{tz_name}': {e}"))
+            })?;
+            Some(calendar_day_buckets(start_ns, end_ns, &tz)?)
+        },
+        None => {
+            if bucket_secs == 0 {
+                return Err(StorageError::QueryError(
+                    "bucket_secs must be positive".to_string(),
+                ));
+            }
+            None
+        },
+    };
     let bucket_ns = bucket_secs as i64 * 1_000_000_000;
 
     let span_values = collect_llm_request_values(conn, start_time, end_time, filters)?;
@@ -2276,7 +2374,32 @@ pub fn query_latency_percentiles(
         Vec::new()
     };
 
-    // (metric, model|None, bucket) -> values in ms
+    // Attribute a timestamp to its bucket start, or None when it falls
+    // outside the bucket grid (defensive: window-filtered values cannot
+    // miss, calendar windows tile the query range exactly).
+    let assign_bucket = |ts: i64| -> Option<i64> {
+        match &calendar_buckets {
+            Some(buckets) => {
+                let starts: Vec<i64> = buckets.iter().map(|(s, _)| *s).collect();
+                let idx = starts.partition_point(|s| *s <= ts).checked_sub(1)?;
+                let (s, e) = buckets[idx];
+                (ts < e).then_some(s)
+            },
+            None => Some((ts / bucket_ns) * bucket_ns),
+        }
+    };
+    let bucket_end = |bucket_start: i64| -> i64 {
+        match &calendar_buckets {
+            Some(buckets) => buckets
+                .iter()
+                .find(|(s, _)| *s == bucket_start)
+                .map(|(_, e)| *e)
+                .unwrap_or(bucket_start + bucket_ns),
+            None => bucket_start + bucket_ns,
+        }
+    };
+
+    // (metric, model|None, bucket start) -> values in ms
     let mut groups: std::collections::BTreeMap<(&'static str, Option<String>, i64), Vec<f64>> =
         std::collections::BTreeMap::new();
     let push =
@@ -2285,7 +2408,9 @@ pub fn query_latency_percentiles(
          model: Option<String>,
          ts: i64,
          value_ms: f64| {
-            let bucket = (ts / bucket_ns) * bucket_ns;
+            let Some(bucket) = assign_bucket(ts) else {
+                return;
+            };
             match model {
                 Some(m) => {
                     g.entry((metric, Some(m), bucket))
@@ -2332,7 +2457,9 @@ pub fn query_latency_percentiles(
         let Some(rate) = throughput_rate_tok_s(v.duration_ns, v.output_tokens) else {
             continue;
         };
-        let bucket = (v.start_ns / bucket_ns) * bucket_ns;
+        let Some(bucket) = assign_bucket(v.start_ns) else {
+            continue;
+        };
         match &v.model {
             Some(m) => {
                 rates
@@ -2347,50 +2474,107 @@ pub fn query_latency_percentiles(
         }
     }
 
-    let mut out = LatencyPercentilesResponse::default();
-    for ((metric, model, bucket), values) in &groups {
-        let mut values = values.clone();
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let rate_key = (model.clone(), *bucket);
-        let (
-            throughput_p10_tok_s,
-            throughput_p50_tok_s,
-            throughput_p90_tok_s,
-            throughput_sample_count,
-        ) = match rates.get(&rate_key) {
-            Some(bucket_rates) if !bucket_rates.is_empty() => {
-                let mut bucket_rates = bucket_rates.clone();
-                bucket_rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                (
-                    Some(percentile_f64(&bucket_rates, 0.10)),
-                    Some(percentile_f64(&bucket_rates, 0.50)),
-                    Some(percentile_f64(&bucket_rates, 0.90)),
-                    bucket_rates.len() as u64,
-                )
-            },
-            _ => (None, None, None, 0),
-        };
-        let point = LatencyPercentilePoint {
-            ts: *bucket,
-            p10_ms: percentile_f64(&values, 0.10),
-            p50_ms: percentile_f64(&values, 0.50),
-            p90_ms: percentile_f64(&values, 0.90),
-            p95_ms: percentile_f64(&values, 0.95),
-            p99_ms: percentile_f64(&values, 0.99),
-            count: values.len() as u64,
-            throughput_p10_tok_s,
-            throughput_p50_tok_s,
-            throughput_p90_tok_s,
-            throughput_sample_count,
-        };
-        let series = out
-            .metrics
-            .entry(metric.to_string())
-            .or_insert_with(LatencyPercentileSeries::default);
-        match model {
-            Some(m) => series.models.entry(m.clone()).or_default().push(point),
-            None => series.all.push(point),
+    // Models that have data for at least one metric — the per-model grid of
+    // calendar mode spans these plus the "all models" scope.
+    let mut model_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for key in groups.keys() {
+        if let Some(m) = &key.1 {
+            model_set.insert(m.clone());
         }
+    }
+
+    let percentile_point =
+        |ts: i64, model: &Option<String>, values: Option<&Vec<f64>>| -> LatencyPercentilePoint {
+            let (p10_ms, p50_ms, p90_ms, p95_ms, p99_ms, count) = match values {
+                Some(values) if !values.is_empty() => {
+                    let mut values = values.clone();
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    (
+                        Some(percentile_f64(&values, 0.10)),
+                        Some(percentile_f64(&values, 0.50)),
+                        Some(percentile_f64(&values, 0.90)),
+                        Some(percentile_f64(&values, 0.95)),
+                        Some(percentile_f64(&values, 0.99)),
+                        values.len() as u64,
+                    )
+                },
+                _ => (None, None, None, None, None, 0),
+            };
+            let rate_key = (model.clone(), ts);
+            let (
+                throughput_p10_tok_s,
+                throughput_p50_tok_s,
+                throughput_p90_tok_s,
+                throughput_sample_count,
+            ) = match rates.get(&rate_key) {
+                Some(bucket_rates) if !bucket_rates.is_empty() => {
+                    let mut bucket_rates = bucket_rates.clone();
+                    bucket_rates
+                        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    (
+                        Some(percentile_f64(&bucket_rates, 0.10)),
+                        Some(percentile_f64(&bucket_rates, 0.50)),
+                        Some(percentile_f64(&bucket_rates, 0.90)),
+                        bucket_rates.len() as u64,
+                    )
+                },
+                _ => (None, None, None, 0),
+            };
+            LatencyPercentilePoint {
+                ts,
+                end_ts: bucket_end(ts),
+                p10_ms,
+                p50_ms,
+                p90_ms,
+                p95_ms,
+                p99_ms,
+                count,
+                throughput_p10_tok_s,
+                throughput_p50_tok_s,
+                throughput_p90_tok_s,
+                throughput_sample_count,
+            }
+        };
+
+    let mut out = LatencyPercentilesResponse::default();
+    match &calendar_buckets {
+        // Rolling mode: only non-empty buckets, pre-#141 behaviour.
+        None => {
+            for ((metric, model, bucket), values) in &groups {
+                let point = percentile_point(*bucket, model, Some(values));
+                let series = out
+                    .metrics
+                    .entry(metric.to_string())
+                    .or_insert_with(LatencyPercentileSeries::default);
+                match model {
+                    Some(m) => series.models.entry(m.clone()).or_default().push(point),
+                    None => series.all.push(point),
+                }
+            }
+        },
+        // Calendar mode: full grid — every day × every model (and the
+        // "all models" scope) × every requested metric, empty buckets
+        // included with count 0 and null percentiles.
+        Some(buckets) => {
+            let mut model_scopes: Vec<Option<String>> = vec![None];
+            model_scopes.extend(model_set.iter().cloned().map(Some));
+            for metric in metrics {
+                for model in &model_scopes {
+                    for (bucket_start, _) in buckets {
+                        let values = groups.get(&(metric, model.clone(), *bucket_start));
+                        let point = percentile_point(*bucket_start, model, values);
+                        let series = out
+                            .metrics
+                            .entry(metric.to_string())
+                            .or_insert_with(LatencyPercentileSeries::default);
+                        match model {
+                            Some(m) => series.models.entry(m.clone()).or_default().push(point),
+                            None => series.all.push(point),
+                        }
+                    }
+                }
+            }
+        },
     }
     for series in out.metrics.values_mut() {
         series.all.sort_by_key(|p| p.ts);
@@ -8999,6 +9183,7 @@ mod tests {
             3600,
             &["duration", "ttft"],
             &GenAiFilters::default(),
+            None,
         )
         .unwrap();
         assert!(percentile_rows(&resp) == 0, "expected no points");
@@ -9013,7 +9198,8 @@ mod tests {
             None,
             0,
             &["duration"],
-            &GenAiFilters::default()
+            &GenAiFilters::default(),
+            None
         )
         .is_err());
         assert!(query_latency_percentiles(
@@ -9022,7 +9208,8 @@ mod tests {
             None,
             3600,
             &["nope"],
-            &GenAiFilters::default()
+            &GenAiFilters::default(),
+            None
         )
         .is_err());
     }
@@ -9095,6 +9282,7 @@ mod tests {
             10,
             &["duration", "ttft"],
             &GenAiFilters::default(),
+            None,
         )
         .unwrap();
 
@@ -9109,31 +9297,32 @@ mod tests {
         assert!(b0.len() == 1 && b1.len() == 1);
         assert_eq!(b0[0].count, 3, "bucket 0: 3 requests");
         // sorted [100, 300, 400]: p50=300 (idx (3-1)*0.5=1), p90=400, p95=400, p99=400
-        assert_eq!(b0[0].p50_ms, 300.0);
-        assert_eq!(b0[0].p90_ms, 400.0);
-        assert_eq!(b0[0].p95_ms, 400.0);
-        assert_eq!(b0[0].p99_ms, 400.0);
+        assert_eq!(b0[0].p50_ms, Some(300.0));
+        assert_eq!(b0[0].p90_ms, Some(400.0));
+        assert_eq!(b0[0].p95_ms, Some(400.0));
+        assert_eq!(b0[0].p99_ms, Some(400.0));
         assert_eq!(b1[0].count, 1);
-        assert_eq!(b1[0].p50_ms, 500.0);
+        assert_eq!(b1[0].p50_ms, Some(500.0));
 
         // per-model
         let a = &dur.models["modelA"];
         assert_eq!(a.len(), 2);
         assert_eq!(a[0].count, 2);
         assert_eq!(
-            a[0].p50_ms, 300.0,
+            a[0].p50_ms,
+            Some(300.0),
             "[100,300] → idx (2-1)*0.5=0.5.round()=1 → 300"
         );
         let b = &dur.models["modelB"];
         assert_eq!(b[0].count, 1);
-        assert_eq!(b[0].p50_ms, 400.0);
+        assert_eq!(b[0].p50_ms, Some(400.0));
 
         // ttft: modelA [20, 90] bucket 0 + modelB [150] bucket 0 → all [20, 90, 150]
         let tt = &resp.metrics["ttft"];
         assert_eq!(tt.all.len(), 1);
         assert_eq!(tt.all[0].count, 3);
-        assert_eq!(tt.all[0].p50_ms, 90.0);
-        assert_eq!(tt.all[0].p90_ms, 150.0);
+        assert_eq!(tt.all[0].p50_ms, Some(90.0));
+        assert_eq!(tt.all[0].p90_ms, Some(150.0));
         assert_eq!(tt.models["modelA"][0].count, 2);
         assert_eq!(tt.models["modelB"][0].count, 1);
 
@@ -9145,6 +9334,7 @@ mod tests {
             10,
             &["duration"],
             &GenAiFilters::default(),
+            None,
         )
         .unwrap();
         assert!(percentile_rows(&resp) == 0);
@@ -9185,16 +9375,23 @@ mod tests {
             r#"{"model":"gpt-x"}"#,
         );
 
-        let resp =
-            query_latency_percentiles(&conn, None, None, 3600, &["ttft"], &GenAiFilters::default())
-                .unwrap();
+        let resp = query_latency_percentiles(
+            &conn,
+            None,
+            None,
+            3600,
+            &["ttft"],
+            &GenAiFilters::default(),
+            None,
+        )
+        .unwrap();
         let tt = &resp.metrics["ttft"];
         assert_eq!(tt.all.len(), 1, "single hourly bucket");
         assert_eq!(tt.all[0].count, 3, "1 exact + 2 expanded");
         // values: 120 (exact), 50 (midpoint 0-100), 200 (midpoint 100-300)
         // sorted [50, 120, 200]: p50=120
-        assert_eq!(tt.all[0].p50_ms, 120.0);
-        assert_eq!(tt.all[0].p90_ms, 200.0);
+        assert_eq!(tt.all[0].p50_ms, Some(120.0));
+        assert_eq!(tt.all[0].p90_ms, Some(200.0));
         assert_eq!(tt.models["gpt-x"][0].count, 3);
         assert!(
             !resp.metrics.contains_key("duration"),

@@ -420,11 +420,14 @@ impl StorageBackend for SqliteBackend {
         filters: &GenAiFilters,
         bucket_secs: u64,
         metrics: &[&str],
+        timezone: Option<&str>,
     ) -> Result<otelite_core::api::LatencyPercentilesResponse> {
         let filters = filters.clone();
         let metrics: Vec<String> = metrics.iter().map(|m| m.to_string()).collect();
+        let timezone = timezone.map(str::to_string);
         self.read_query(move |conn| {
             let refs: Vec<&str> = metrics.iter().map(String::as_str).collect();
+            let tz = timezone.as_deref();
             reader::query_latency_percentiles(
                 conn,
                 start_time,
@@ -432,6 +435,7 @@ impl StorageBackend for SqliteBackend {
                 bucket_secs,
                 &refs,
                 &filters,
+                tz,
             )
             .map_err(StorageError::from)
         })

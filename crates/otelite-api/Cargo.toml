@@ -30,6 +30,7 @@ utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
 # Date/time formatting for session diagnose endpoint
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 # MIME type detection for static files
 mime_guess = "2.0"
