@@ -9,5 +9,6 @@ pub mod metrics;
 pub mod providers;
 pub mod reasoning;
 pub mod service;
+pub mod sessions;
 pub mod traces;
 pub mod usage;

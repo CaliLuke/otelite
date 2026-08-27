@@ -547,3 +547,271 @@ async fn test_get_agents_with_data() {
     assert_eq!(cl.tool_calls, 1, "tool.execution span count");
     assert_eq!(cl.retries, None, "claude emits no retry telemetry");
 }
+
+use otelite_core::api::{CostDistributionResponse, SessionCostResponse};
+
+#[tokio::test]
+async fn test_get_session_costs_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/costs?start_time={R0}&end_time={R1}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let costs: SessionCostResponse = serde_json::from_slice(&body).unwrap();
+    assert!(costs.sessions.is_empty());
+    assert_eq!(costs.median_cost_usd, None);
+    assert!(costs.anomaly_rule.contains("3 x median"));
+}
+
+#[tokio::test]
+async fn test_get_session_costs_with_data() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    // Four opencode sessions with distinct cumulative cost counters (last
+    // value in the window is the total): 1.0, 2.0, 3.0, 100.0 → median
+    // 2.5, threshold 7.5 → only the $100 session is anomalous.
+    for (sid, cost) in [("s1", 1.0), ("s2", 2.0), ("s3", 3.0), ("s4", 100.0)] {
+        storage
+            .write_metric(&agent_metric(
+                "opencode.session.cost.total",
+                R0 - 1_000_000_000,
+                None,
+                Some((1, 0.0)),
+                &[("session.id", sid)],
+            ))
+            .await
+            .unwrap();
+        storage
+            .write_metric(&agent_metric(
+                "opencode.session.cost.total",
+                R1,
+                None,
+                Some((2, cost)),
+                &[("session.id", sid), ("project.id", "proj-1")],
+            ))
+            .await
+            .unwrap();
+    }
+    storage
+        .write_metric(&agent_metric(
+            "opencode.session.duration",
+            R1,
+            None,
+            Some((1, 60_000.0)),
+            &[("session.id", "s1")],
+        ))
+        .await
+        .unwrap();
+    storage
+        .write_metric(&agent_metric(
+            "opencode.session.token.total",
+            R1,
+            None,
+            Some((1, 12_345.0)),
+            &[("session.id", "s1")],
+        ))
+        .await
+        .unwrap();
+
+    // claude: one session from llm_request span attributes (no cost counter
+    // is trusted — priced by the API layer, which has no pricing rows in the
+    // test DB, so its cost stays None).
+    let mut span = Span {
+        trace_id: "t".to_string(),
+        span_id: "sp1".to_string(),
+        parent_span_id: None,
+        name: "claude_code.llm_request".to_string(),
+        kind: SpanKind::Internal,
+        start_time: R1,
+        end_time: R1 + 1,
+        attributes: HashMap::new(),
+        status: SpanStatus {
+            code: SpanStatusCode::Ok,
+            message: None,
+        },
+        events: Vec::new(),
+        resource: None,
+    };
+    span.attributes
+        .insert("session.id".to_string(), "c1".to_string());
+    span.attributes
+        .insert("model".to_string(), "m1".to_string());
+    span.attributes
+        .insert("input_tokens".to_string(), "100".to_string());
+    span.attributes
+        .insert("output_tokens".to_string(), "40".to_string());
+    span.attributes
+        .insert("cache_read_tokens".to_string(), "10".to_string());
+    span.attributes
+        .insert("cache_creation_tokens".to_string(), "5".to_string());
+    storage.write_span(&span).await.unwrap();
+
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/costs?start_time={R0}&end_time={R1}&limit=50"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let costs: SessionCostResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(costs.sessions.len(), 5);
+    // cost desc: s4 ($100) first, then s3/s2/s1, unpriced claude last.
+    assert_eq!(
+        costs
+            .sessions
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s4", "s3", "s2", "s1", "c1"]
+    );
+    assert_eq!(costs.median_cost_usd, Some(2.5), "median of [1,2,3,100]");
+    assert!(costs.sessions[0].anomaly, "$100 > 3 x $2.5");
+    assert!(!costs.sessions[1].anomaly, "$3 < $7.5");
+    assert!(!costs.sessions[4].anomaly, "no cost → cannot be anomalous");
+
+    let s4 = &costs.sessions[0];
+    assert_eq!(s4.agent, "opencode");
+    assert_eq!(s4.cost_usd, Some(100.0), "last cumulative value, not a sum");
+    assert_eq!(s4.cost_source.as_deref(), Some("actual"));
+    assert_eq!(s4.project_id.as_deref(), Some("proj-1"));
+
+    let s1 = &costs.sessions[3];
+    assert_eq!(s1.tokens, 12_345);
+    assert_eq!(s1.duration_secs, Some(60.0), "60 000 ms → 60.0 s");
+
+    let c1 = &costs.sessions[4];
+    assert_eq!(c1.agent, "claude");
+    assert_eq!(c1.tokens, 155);
+    assert_eq!(
+        c1.cost_usd, None,
+        "no pricing rows → null, not a fabricated zero"
+    );
+    assert_eq!(c1.cost_source.as_deref(), Some("estimated"));
+
+    // limit truncates the listing but the anomaly flag survived it: refetch
+    // with limit=2 — s4 (the outlier) must still be flagged.
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/costs?start_time={R0}&end_time={R1}&limit=2"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let limited: SessionCostResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(limited.sessions.len(), 2);
+    assert!(limited.sessions[0].anomaly);
+    assert_eq!(
+        limited.median_cost_usd,
+        Some(2.5),
+        "median over the full window"
+    );
+}
+
+#[tokio::test]
+async fn test_get_session_cost_distribution() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    // Costs 0, 0.01, 150, 1000 across four opencode sessions, plus one
+    // unpriced claude session (excluded from the distribution). With 4
+    // buckets the bounds are [0,100) [100,215.4) [215.4,464.2) [464.2,1000].
+    for (sid, cost) in [("d0", 0.0), ("d1", 0.01), ("d2", 150.0), ("d3", 1000.0)] {
+        storage
+            .write_metric(&agent_metric(
+                "opencode.session.cost.total",
+                R1,
+                None,
+                Some((1, cost)),
+                &[("session.id", sid)],
+            ))
+            .await
+            .unwrap();
+    }
+    let mut span = Span {
+        trace_id: "t".to_string(),
+        span_id: "sp1".to_string(),
+        parent_span_id: None,
+        name: "claude_code.llm_request".to_string(),
+        kind: SpanKind::Internal,
+        start_time: R1,
+        end_time: R1 + 1,
+        attributes: HashMap::new(),
+        status: SpanStatus {
+            code: SpanStatusCode::Ok,
+            message: None,
+        },
+        events: Vec::new(),
+        resource: None,
+    };
+    span.attributes
+        .insert("session.id".to_string(), "c1".to_string());
+    span.attributes
+        .insert("input_tokens".to_string(), "10".to_string());
+    span.attributes
+        .insert("output_tokens".to_string(), "10".to_string());
+    storage.write_span(&span).await.unwrap();
+
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/cost-distribution?start_time={R0}&end_time={R1}&buckets=4"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dist: CostDistributionResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(dist.buckets.len(), 4);
+    let total: u64 = dist.buckets.iter().map(|b| b.count).sum();
+    assert_eq!(total, 4, "unpriced session excluded");
+    // [0, 0.1) catches both zero-ish costs: 0 and 0.01
+    assert_eq!(dist.buckets[0].count, 2);
+    assert_eq!(dist.buckets[0].min_usd, 0.0);
+    // $150 sits in the second bucket, $1000 in the inclusive last one.
+    assert_eq!(dist.buckets[1].count, 1);
+    assert_eq!(dist.buckets[2].count, 0);
+    assert_eq!(dist.buckets[3].count, 1);
+    assert_eq!(dist.buckets[3].max_usd, 1000.0);
+    // bounds ascend and are contiguous
+    for w in dist.buckets.windows(2) {
+        assert!(w[0].max_usd <= w[1].max_usd);
+        assert!((w[0].max_usd - w[1].min_usd).abs() < 1e-9);
+    }
+}

@@ -171,6 +171,12 @@ enum Commands {
         after_help = "Examples:\n  otelite agents --since 24h\n  otelite agents --since 7d --format json"
     )]
     Agents(commands::agents::AgentsCommand),
+    /// Session cost analysis: top-cost sessions and the cost distribution
+    #[command(
+        subcommand,
+        after_help = "Examples:\n  otelite sessions costs --since 24h --top 20\n  otelite sessions cost-hist --since 7d --buckets 30 --format json"
+    )]
+    Sessions(commands::sessions::SessionsCommand),
     /// Launch the Terminal User Interface
     #[command(
         after_help = "Examples:\n  otelite tui\n  otelite tui --api-url http://localhost:3000\n  otelite tui --view traces --refresh-interval 5"
@@ -563,6 +569,11 @@ async fn run_cli() -> Result<()> {
             Ok(())
         },
         Some(Commands::Agents(cmd)) => {
+            let storage = create_storage(&config).await?;
+            cmd.execute(storage, config.format).await?;
+            Ok(())
+        },
+        Some(Commands::Sessions(cmd)) => {
             let storage = create_storage(&config).await?;
             cmd.execute(storage, config.format).await?;
             Ok(())

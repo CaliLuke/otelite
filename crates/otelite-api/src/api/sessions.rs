@@ -15,7 +15,7 @@ use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::trace::StatusCode as SpanStatusCode;
 use otelite_core::telemetry::{extract_ttft_secs, GenAiSpanInfo, Span};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 fn root_llm_span(spans: &[Span]) -> Option<&Span> {
@@ -399,4 +399,116 @@ pub async fn list_sessions(
         sessions: summaries,
         total,
     }))
+}
+
+/// Query parameters for GET /api/sessions/costs.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct SessionCostsQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    /// Max sessions to return (default 50, cap 500). The anomaly flag is
+    /// computed over the full window before truncation.
+    pub limit: Option<usize>,
+}
+
+/// GET /api/sessions/costs
+///
+/// Per-session cost, tokens and duration for opencode and claude sessions
+/// in the window, sorted by cost descending. opencode's cost is its own
+/// cumulative session-cost counter ("actual"); claude is estimated from
+/// span token counts x pricing ("estimated") because its cost counter
+/// under-reports. A session is anomalous when its cost exceeds three times
+/// the median session cost (formula in `anomaly_rule`).
+#[utoipa::path(
+    get,
+    path = "/api/sessions/costs",
+    params(SessionCostsQuery),
+    responses(
+        (status = 200, description = "Per-session costs, sorted by cost descending", body = otelite_core::api::SessionCostResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn get_session_costs(
+    State(state): State<AppState>,
+    Query(params): Query<SessionCostsQuery>,
+) -> Result<Json<otelite_core::api::SessionCostResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use otelite_core::session_cost;
+
+    let limit = params.limit.unwrap_or(50).min(500);
+
+    let rows = state
+        .storage
+        .query_session_costs(params.start_time, params.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query session costs: {e}"
+                ))),
+            )
+        })?;
+
+    let pricing = state.pricing.snapshot().await;
+    let mut sessions = session_cost::build_session_costs(rows, &pricing.db);
+    let median = session_cost::apply_anomaly_flags(&mut sessions).map(|(m, _)| m);
+    sessions.truncate(limit);
+
+    Ok(Json(otelite_core::api::SessionCostResponse {
+        sessions,
+        median_cost_usd: median,
+        anomaly_rule: session_cost::ANOMALY_RULE.to_string(),
+    }))
+}
+
+/// Query parameters for GET /api/sessions/cost-distribution.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct SessionCostDistributionQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    /// Number of log-spaced buckets (default 20, cap 100).
+    pub buckets: Option<usize>,
+}
+
+/// GET /api/sessions/cost-distribution
+///
+/// Log-spaced histogram of per-session costs over the window. Bucket 0
+/// covers zero-cost sessions; the remaining buckets span equal decades up
+/// to the most expensive session.
+#[utoipa::path(
+    get,
+    path = "/api/sessions/cost-distribution",
+    params(SessionCostDistributionQuery),
+    responses(
+        (status = 200, description = "Log-spaced per-session cost distribution", body = otelite_core::api::CostDistributionResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn get_session_cost_distribution(
+    State(state): State<AppState>,
+    Query(params): Query<SessionCostDistributionQuery>,
+) -> Result<Json<otelite_core::api::CostDistributionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use otelite_core::session_cost;
+
+    let buckets = params.buckets.unwrap_or(20).min(100);
+
+    let rows = state
+        .storage
+        .query_session_costs(params.start_time, params.end_time)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query session cost distribution: {e}"
+                ))),
+            )
+        })?;
+
+    let pricing = state.pricing.snapshot().await;
+    let sessions = session_cost::build_session_costs(rows, &pricing.db);
+
+    Ok(Json(session_cost::build_cost_distribution(
+        &sessions, buckets,
+    )))
 }

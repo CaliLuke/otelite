@@ -1089,6 +1089,85 @@ impl AgentRollupStorage {
     }
 }
 
+/// Per-session cost record (wire). `agent` is the harness that emitted the
+/// session ("opencode" or "claude" — codex emits no per-session identifiers,
+/// so it never appears). `cost_usd` is `None` when the cost cannot be
+/// established (no counter and no priced models) — never a fabricated zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionCost {
+    pub session_id: String,
+    pub agent: String,
+    /// Project the session ran in, where the harness reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// "actual" (the harness's own cost counter) or "estimated"
+    /// (tokens x pricing table).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+    pub tokens: u64,
+    /// Wall-clock duration of the session in seconds, where measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    /// `true` when `cost_usd > 3 x median_cost_usd` (see
+    /// [`SessionCostResponse::anomaly_rule`]).
+    pub anomaly: bool,
+}
+
+/// Top-cost sessions response. `sessions` is sorted by cost descending
+/// (uncosted sessions last) and truncated to the requested limit; the
+/// anomaly flag and median are computed over the **full** window before
+/// truncation, so `limit` never hides an outlier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionCostResponse {
+    pub sessions: Vec<SessionCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_cost_usd: Option<f64>,
+    /// The outlier formula, stated for consumers: a session is anomalous
+    /// when its cost exceeds three times the median session cost.
+    pub anomaly_rule: String,
+}
+
+/// One log-spaced cost bucket of the per-session cost distribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CostBucket {
+    pub min_usd: f64,
+    pub max_usd: f64,
+    pub count: u64,
+}
+
+/// Log-spaced distribution of per-session costs (wire).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CostDistributionResponse {
+    pub buckets: Vec<CostBucket>,
+}
+
+/// Storage-layer per-session cost: token detail per model (the API layer
+/// prices it) plus the harness cost counter where one exists. Not a wire
+/// type — see [`SessionCostResponse`].
+#[derive(Debug, Clone)]
+pub struct SessionCostStorage {
+    pub agent: String,
+    pub session_id: String,
+    pub project_id: Option<String>,
+    /// The harness's own per-session cost (opencode's cumulative
+    /// `session.cost.total` counter, last value in the window); `None` for
+    /// harnesses without a cost metric.
+    pub counter_cost_usd: Option<f64>,
+    /// Total tokens across the session's models.
+    pub tokens: u64,
+    /// Per-model token detail; priced by the API layer for harnesses
+    /// without a cost counter.
+    pub models: Vec<(String, AgentTokenUsage)>,
+    /// Session duration in seconds, where the harness measures it.
+    pub duration_secs: Option<f64>,
+}
+
 /// Token usage split for one sub-agent role.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

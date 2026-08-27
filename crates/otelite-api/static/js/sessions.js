@@ -35,6 +35,7 @@ class SessionsView {
                 </div>
                 <span class="filter-hint">Click a row to open the Session Report.</span>
             </div>
+            <div id="sessions-cost-panel"></div>
             <div id="sessions-list"></div>
         `;
 
@@ -54,6 +55,7 @@ class SessionsView {
 
     async _loadAndRender() {
         const list = document.getElementById('sessions-list');
+        const panel = document.getElementById('sessions-cost-panel');
         list.innerHTML = '<div class="loading-state"><span class="spinner-sm"></span> Loading…</div>';
         try {
             const params = {
@@ -61,14 +63,62 @@ class SessionsView {
                 end_time: this.trEnd.getTime() * 1_000_000,
                 limit: 200,
             };
-            const resp = await this.api.getSessions(params);
-            this._renderList(resp.sessions || []);
+            const [resp, costs, dist] = await Promise.all([
+                this.api.getSessions(params),
+                this.api.getSessionCosts({ ...params, limit: 500 }).catch(() => null),
+                this.api.getSessionCostDistribution({
+                    start_time: params.start_time,
+                    end_time: params.end_time,
+                    buckets: 20,
+                }).catch(() => null),
+            ]);
+            this._renderCostPanel(costs, dist);
+            const costBySid = new Map((costs?.sessions || []).map(s => [s.session_id, s]));
+            this._renderList(resp.sessions || [], costBySid);
         } catch (err) {
             list.innerHTML = `<div class="error-message">Failed to load sessions: ${this._escape(err.message)}</div>`;
         }
     }
 
-    _renderList(sessions) {
+    _renderCostPanel(costs, dist) {
+        const panel = document.getElementById('sessions-cost-panel');
+        if (!panel) return;
+        let html = '';
+        if (dist && Array.isArray(dist.buckets) && dist.buckets.length) {
+            const buckets = dist.buckets;
+            const maxCount = buckets.reduce((m, b) => Math.max(m, b.count), 0);
+            const total = buckets.reduce((s, b) => s + b.count, 0);
+            const width = 100;
+            const chartHeight = 100;
+            const barGap = 0.5;
+            const barWidth = Math.max((width - barGap * (buckets.length - 1)) / buckets.length, 0.1);
+            const fmtUsd = v => v <= 0 ? '$0' : v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
+            const bars = buckets.map((b, i) => {
+                const h = maxCount > 0 ? (b.count / maxCount) * chartHeight : 0;
+                const title = `${fmtUsd(b.min_usd)} – ${fmtUsd(b.max_usd)}: ${b.count} session${b.count === 1 ? '' : 's'}`;
+                return `<rect class="cost-chart-bar" x="${(i * (barWidth + barGap)).toFixed(3)}" y="${(chartHeight - h).toFixed(3)}" width="${barWidth.toFixed(3)}" height="${h.toFixed(3)}"><title>${this._escape(title)}</title></rect>`;
+            }).join('');
+            html += `
+                <h3>Session cost distribution</h3>
+                <p class="section-hint">${total} costed session${total === 1 ? '' : 's'} in the window (log-spaced buckets, first bucket = zero-cost).</p>
+                <div class="cost-chart">
+                    <svg class="cost-chart-svg" viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none">
+                        ${bars}
+                    </svg>
+                    <div class="cost-chart-axis-labels">
+                        <span class="cost-chart-axis-left">${this._escape(fmtUsd(buckets[0].min_usd))}</span>
+                        <span class="cost-chart-axis-mid">${this._escape(fmtUsd(buckets[Math.floor(buckets.length / 2)].max_usd))}</span>
+                        <span class="cost-chart-axis-right">${this._escape(fmtUsd(buckets[buckets.length - 1].max_usd))}</span>
+                    </div>
+                </div>`;
+        }
+        if (costs && costs.anomaly_rule && (costs.median_cost_usd != null)) {
+            html += `<p class="section-hint">Anomaly rule: ${this._escape(costs.anomaly_rule)} — median ${this._escape(`$${costs.median_cost_usd.toFixed(4)}`)}.</p>`;
+        }
+        panel.innerHTML = html;
+    }
+
+    _renderList(sessions, costBySid) {
         const list = document.getElementById('sessions-list');
         if (sessions.length === 0) {
             list.innerHTML = '<div class="empty-state"><p>No sessions in this window</p><p class="empty-state-hint">Sessions are GenAI traces tagged with a <code>session.id</code> attribute. Widen the window or check that your instrumentation emits session ids.</p></div>';
@@ -98,6 +148,13 @@ class SessionsView {
                 : this._escape(s.models.join(', '));
             const durNs = s.last_seen_ns - s.first_seen_ns;
             const durCell = durNs > 0 ? fmtDur(durNs) : '<span class="cell-muted">—</span>';
+            const cost = costBySid ? costBySid.get(s.session_id) : null;
+            let costCell = '<span class="cell-muted">—</span>';
+            if (cost && cost.cost_usd != null) {
+                const estNote = cost.cost_source === 'estimated' ? ' (est.)' : '';
+                const badge = cost.anomaly ? ' <span class="anomaly-badge" title="cost exceeds 3× the median session cost">⚠</span>' : '';
+                costCell = `$${Number(cost.cost_usd).toFixed(2)}${estNote}${badge}`;
+            }
             const sid = this._escape(s.session_id);
             // Cross-nav buttons — stop propagation so the row click (Session Report) doesn't also fire.
             const navBtns = `
@@ -112,6 +169,7 @@ class SessionsView {
                     <td class="num-cell">${fmtNum(s.interaction_count)}</td>
                     <td class="num-cell">${fmtNum(s.total_input_tokens)}</td>
                     <td class="num-cell">${fmtNum(s.total_output_tokens)}</td>
+                    <td class="num-cell">${costCell}</td>
                     <td class="num-cell">${errCell}</td>
                     <td class="num-cell">${durCell}</td>
                     <td class="time-cell">${fmtTime(s.first_seen_ns)}</td>
@@ -129,6 +187,7 @@ class SessionsView {
                         <th class="num-cell">Interactions</th>
                         <th class="num-cell">Input tokens</th>
                         <th class="num-cell">Output tokens</th>
+                        <th class="num-cell">Cost</th>
                         <th class="num-cell">Errors</th>
                         <th class="num-cell">Duration</th>
                         <th>First seen</th>

@@ -11,6 +11,18 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Session cost analysis: which sessions spent what, and which are
+  outliers.** The Sessions page now shows each session's cost — opencode
+  sessions use their own cost counter, Claude Code sessions are priced from
+  token usage (their cost counter under-reports) — plus a log-spaced cost
+  distribution chart. Sessions spending more than 3× the median session cost
+  are flagged as anomalies. Also available from the CLI:
+  `otelite sessions costs --since 24h` (top-cost sessions) and
+  `otelite sessions cost-hist --since 24h` (distribution), and from
+  `GET /api/sessions/costs` / `GET /api/sessions/cost-distribution`.
+
 ## [0.1.74] - 2026-08-27
 
 ### Added

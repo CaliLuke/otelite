@@ -2485,6 +2485,7 @@ body {
 }
 .cost-chart-axis-mid { flex: 1; text-align: center; }
 .cost-chart-axis-right { text-align: right; }
+.anomaly-badge { color: #f59e0b; cursor: help; }
 
 .top-spans-cost-high { color: #f59e0b; font-weight: 600; }
 

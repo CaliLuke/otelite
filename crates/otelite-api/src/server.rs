@@ -69,6 +69,8 @@ use utoipa::OpenApi;
         crate::api::genai::get_context_type_split,
         crate::api::genai::get_tool_errors,
         crate::api::genai::get_hour_of_day,
+        crate::api::sessions::get_session_costs,
+        crate::api::sessions::get_session_cost_distribution,
     ),
     components(
         schemas(
@@ -127,6 +129,10 @@ use utoipa::OpenApi;
             otelite_core::api::ReasoningShareResponse,
             otelite_core::api::ReasoningShareByModel,
             otelite_core::api::ReasoningEffortEntry,
+            otelite_core::api::SessionCost,
+            otelite_core::api::SessionCostResponse,
+            otelite_core::api::CostBucket,
+            otelite_core::api::CostDistributionResponse,
         )
     ),
     tags(
@@ -305,6 +311,11 @@ impl DashboardServer {
             .route("/api/genai/hour_of_day", get(crate::api::genai::get_hour_of_day))
             // API routes - Sessions
             .route("/api/sessions", get(crate::api::sessions::list_sessions))
+            .route("/api/sessions/costs", get(crate::api::sessions::get_session_costs))
+            .route(
+                "/api/sessions/cost-distribution",
+                get(crate::api::sessions::get_session_cost_distribution),
+            )
             .route("/api/sessions/{session_id}/diagnose", get(crate::api::sessions::get_session_diagnose))
             // OpenAPI spec endpoint
             .route("/api/openapi.json", get(|| async {

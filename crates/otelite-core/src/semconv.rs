@@ -334,6 +334,12 @@ pub mod metric_names {
     /// Cumulative per-session cost histogram; `value_histogram[1]` is the
     /// session's total cost (USD) so far.
     pub const OPENCODE_SESSION_COST_TOTAL: &str = "opencode.session.cost.total";
+    /// Cumulative per-session duration histogram; `value_histogram[1]` is
+    /// the session's total duration (milliseconds) so far.
+    pub const OPENCODE_SESSION_DURATION: &str = "opencode.session.duration";
+    /// Cumulative per-session token histogram; `value_histogram[1]` is the
+    /// session's total tokens so far.
+    pub const OPENCODE_SESSION_TOKEN_TOTAL: &str = "opencode.session.token.total";
     /// Cumulative per-(session, tool_name) tool-duration histogram;
     /// `value_histogram[0]` is the session's total tool calls so far.
     pub const OPENCODE_TOOL_DURATION: &str = "opencode.tool.duration";

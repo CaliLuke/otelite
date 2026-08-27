@@ -12,7 +12,7 @@ use otelite_core::telemetry::{
 };
 use rusqlite::{Connection, Row};
 use serde::de::DeserializeOwned;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Query logs from the database
 pub fn query_logs(conn: &Connection, params: &QueryParams) -> Result<Vec<LogRecord>> {
@@ -3895,6 +3895,311 @@ fn push_agent(
     });
 }
 
+/// Per-session costs (opencode + claude) over the window. Codex is
+/// deliberately absent: its metrics carry no per-session identifier.
+pub fn query_session_costs(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::SessionCostStorage>> {
+    use otelite_core::api::SessionCostStorage;
+
+    let mut out: Vec<SessionCostStorage> = Vec::new();
+    out.extend(opencode_session_costs(conn, start_time, end_time)?);
+    out.extend(claude_session_costs(conn, start_time, end_time)?);
+    Ok(out)
+}
+
+/// Opencode per-session values from its three cumulative session metrics:
+/// each row re-emits the running session total, so a session's value is the
+/// last row for that session in the window. Row volumes are small on the
+/// live DB (~10k rows/name/day), so a name-indexed window fetch plus an
+/// in-memory merge suffices — no per-session index needed.
+fn opencode_session_costs(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::SessionCostStorage>> {
+    use otelite_core::api::SessionCostStorage;
+    use otelite_core::semconv::agent_names as anames;
+    use otelite_core::semconv::metric_names as mnames;
+
+    let last_cost = last_hist_sum_per_session(
+        conn,
+        mnames::OPENCODE_SESSION_COST_TOTAL,
+        start_time,
+        end_time,
+    )?;
+    let last_duration_ms = last_hist_sum_per_session(
+        conn,
+        mnames::OPENCODE_SESSION_DURATION,
+        start_time,
+        end_time,
+    )?;
+    let last_tokens = last_hist_sum_per_session(
+        conn,
+        mnames::OPENCODE_SESSION_TOKEN_TOTAL,
+        start_time,
+        end_time,
+    )?;
+    // `project.id` is a flat attribute key, so the JSON path needs the
+    // quoted form.
+    let last_project = last_attr_per_session(
+        conn,
+        mnames::OPENCODE_SESSION_COST_TOTAL,
+        "$.\"project.id\"",
+        start_time,
+        end_time,
+    )?;
+
+    let mut session_ids: BTreeSet<String> = BTreeSet::new();
+    for map in [&last_cost, &last_duration_ms, &last_tokens] {
+        session_ids.extend(map.keys().cloned());
+    }
+
+    Ok(session_ids
+        .into_iter()
+        .map(|sid| {
+            let tokens = last_tokens
+                .get(&sid)
+                .map(|v| v.round().max(0.0) as u64)
+                .unwrap_or(0);
+            SessionCostStorage {
+                agent: anames::OPENCODE.to_string(),
+                session_id: sid.clone(),
+                project_id: last_project.get(&sid).cloned(),
+                counter_cost_usd: last_cost.get(&sid).copied(),
+                tokens,
+                // Priced from the counter, not from tokens: the session
+                // metrics carry no per-model split.
+                models: Vec::new(),
+                duration_secs: last_duration_ms.get(&sid).map(|ms| ms / 1000.0),
+            }
+        })
+        .collect())
+}
+
+/// Last histogram sum ($[1]) per `session.id` in the window for one metric.
+/// Rows whose session has no in-window row are absent; a malformed
+/// histogram value never overrides an earlier valid one.
+fn last_hist_sum_per_session(
+    conn: &Connection,
+    metric_name: &str,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<HashMap<String, f64>> {
+    let (sql, params) =
+        session_window_fetch(metric_name, start_time, end_time, HISTOGRAM_SUM_FIELD_SQL)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to read {metric_name} sessions: {e}"))
+    })?;
+    let rows = stmt
+        .query_map(refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<f64>>(2)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to read {metric_name} sessions: {e}"))
+        })?;
+    let mut out: HashMap<String, (i64, f64)> = HashMap::new();
+    for row in rows {
+        let (sid, ts, value) = row.map_err(|e| {
+            StorageError::QueryError(format!("Failed to read {metric_name} sessions: {e}"))
+        })?;
+        if let Some(v) = value {
+            let entry = out.entry(sid).or_insert((i64::MIN, 0.0));
+            if ts >= entry.0 {
+                *entry = (ts, v);
+            }
+        }
+    }
+    Ok(out.into_iter().map(|(k, (_, v))| (k, v)).collect())
+}
+
+/// Last non-null attribute value per `session.id` in the window (used for
+/// the optional `project.id` label).
+fn last_attr_per_session(
+    conn: &Connection,
+    metric_name: &str,
+    attr_path: &str,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<HashMap<String, String>> {
+    let val_expr = format!(
+        "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{attr_path}') END"
+    );
+    let (sql, params) = session_window_fetch(metric_name, start_time, end_time, &val_expr)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to read {metric_name} sessions: {e}"))
+    })?;
+    let rows = stmt
+        .query_map(refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to read {metric_name} sessions: {e}"))
+        })?;
+    let mut out: HashMap<String, (i64, String)> = HashMap::new();
+    for row in rows {
+        let (sid, ts, value) = row.map_err(|e| {
+            StorageError::QueryError(format!("Failed to read {metric_name} sessions: {e}"))
+        })?;
+        if let Some(v) = value {
+            let entry = out.entry(sid).or_insert((i64::MIN, String::new()));
+            if ts >= entry.0 {
+                *entry = (ts, v);
+            }
+        }
+    }
+    Ok(out.into_iter().map(|(k, (_, v))| (k, v)).collect())
+}
+
+const HISTOGRAM_SUM_FIELD_SQL: &str =
+    "CASE WHEN json_valid(value_histogram) THEN CAST(json_extract(value_histogram, '$[1]') AS REAL) END";
+
+/// WHERE clause + params for a name-indexed metrics window fetch keyed on
+/// `session.id`, shared by the per-session last-value helpers.
+fn session_window_fetch(
+    metric_name: &str,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    value_sql: &str,
+) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>)> {
+    let sid_expr =
+        "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END";
+    let mut where_clause = format!("WHERE name = ?1 AND {sid_expr} IS NOT NULL");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(metric_name.to_string())];
+    if let Some(start) = start_time {
+        where_clause.push_str(&format!(" AND timestamp >= ?{}", params.len() + 1));
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+    let sql = format!("SELECT {sid_expr}, timestamp, {value_sql} FROM metrics {where_clause}");
+    Ok((sql, params))
+}
+
+/// Claude per-session costs from `claude_code.llm_request` span attributes:
+/// token counts summed per (session, model), duration as first-to-last
+/// request span time. The token data comes from the spans rather than the
+/// `claude_code.cost.usage` counter, which under-reports on the live data
+/// (~$19 counter vs ~$570 tokens×pricing over 7 days). Spans carry no
+/// reasoning tokens, so claude session token totals exclude thinking
+/// tokens (the agent rollup includes them via the token.usage metric).
+fn claude_session_costs(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<otelite_core::api::SessionCostStorage>> {
+    use otelite_core::api::{AgentTokenUsage, SessionCostStorage};
+    use otelite_core::semconv::agent_names as anames;
+    use otelite_core::semconv::LLM_REQUEST_SPAN_NAME;
+
+    let sid_expr =
+        "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"session.id\"') END";
+    // `gen_ai.request.model` is a flat attribute key → quoted JSON path.
+    let model_expr = "CASE WHEN json_valid(attributes) THEN COALESCE(\
+        json_extract(attributes, '$.model'), \
+        json_extract(attributes, '$.\"gen_ai.request.model\"')) END";
+    let tok =
+        |key: &str| format!("COALESCE(CAST(json_extract(attributes, '$.{key}') AS INTEGER), 0)");
+
+    let mut where_clause = format!("WHERE name = ?1 AND {sid_expr} IS NOT NULL");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(LLM_REQUEST_SPAN_NAME.to_string())];
+    if let Some(start) = start_time {
+        where_clause.push_str(&format!(" AND start_time >= ?{}", params.len() + 1));
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND start_time <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+    let sql = format!(
+        "SELECT {sid_expr}, {model_expr}, {}, {}, {}, {}, start_time \
+         FROM spans {where_clause}",
+        tok("input_tokens"),
+        tok("output_tokens"),
+        tok("cache_read_tokens"),
+        tok("cache_creation_tokens"),
+    );
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to read claude session spans: {e}"))
+    })?;
+    let rows = stmt
+        .query_map(refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to read claude session spans: {e}"))
+        })?;
+
+    struct Acc {
+        models: BTreeMap<String, AgentTokenUsage>,
+        min_ts: i64,
+        max_ts: i64,
+    }
+    let mut sessions: BTreeMap<String, Acc> = BTreeMap::new();
+    for row in rows {
+        let (sid, model, input, output, cache_read, cache_write, ts) = row.map_err(|e| {
+            StorageError::QueryError(format!("Failed to read claude session spans: {e}"))
+        })?;
+        let acc = sessions.entry(sid).or_insert_with(|| Acc {
+            models: BTreeMap::new(),
+            min_ts: i64::MAX,
+            max_ts: i64::MIN,
+        });
+        acc.min_ts = acc.min_ts.min(ts);
+        acc.max_ts = acc.max_ts.max(ts);
+        let m = acc
+            .models
+            .entry(model.unwrap_or_else(|| "(unknown)".to_string()))
+            .or_default();
+        m.input += input as u64;
+        m.output += output as u64;
+        m.cache_read += cache_read as u64;
+        m.cache_write += cache_write as u64;
+    }
+
+    Ok(sessions
+        .into_iter()
+        .map(|(sid, acc)| {
+            let tokens: u64 = acc.models.values().map(|t| t.total()).sum::<u64>();
+            let duration_secs = (acc.max_ts > acc.min_ts)
+                .then_some((acc.max_ts - acc.min_ts) as f64 / 1_000_000_000.0);
+            SessionCostStorage {
+                agent: anames::CLAUDE.to_string(),
+                session_id: sid,
+                project_id: None,
+                counter_cost_usd: None,
+                tokens,
+                models: acc.models.into_iter().collect(),
+                duration_secs,
+            }
+        })
+        .collect())
+}
+
 /// Cache hit rate: `cache_read / (cache_read + input)`, `None` when the
 /// denominator is 0 (no prompt tokens at all in the window).
 fn cache_hit_rate(cache_read: u64, input: u64) -> Option<f64> {
@@ -7110,5 +7415,217 @@ mod tests {
     #[test]
     fn reasoning_share_pct_no_reasoning_is_zero() {
         assert_eq!(reasoning_share_pct(0, 500), Some(0.0));
+    }
+
+    // ── query_session_costs ───────────────────────────────────────────────
+
+    fn sid_json(sid: &str, extra: &str) -> String {
+        if extra.is_empty() {
+            format!("{{\"session.id\":\"{sid}\"}}")
+        } else {
+            format!("{{\"session.id\":\"{sid}\",{extra}}}")
+        }
+    }
+
+    #[test]
+    fn session_costs_empty_db_returns_nothing() {
+        let conn = setup_test_db();
+        let rows = query_session_costs(&conn, Some(T0), Some(T0 + 10)).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn session_costs_opencode_takes_last_cumulative_value_per_session() {
+        let conn = setup_test_db();
+        // s1: cumulative cost re-emitted per flush — last value in the
+        // window is the session total, not a sum.
+        insert_histogram_row(
+            &conn,
+            "opencode.session.cost.total",
+            T0,
+            1,
+            0.5,
+            &sid_json("s1", r#""project.id":"proj-1""#),
+        );
+        insert_histogram_row(
+            &conn,
+            "opencode.session.cost.total",
+            T0 + 1,
+            2,
+            0.75,
+            &sid_json("s1", r#""project.id":"proj-1""#),
+        );
+        insert_histogram_row(
+            &conn,
+            "opencode.session.cost.total",
+            T0 + 2,
+            3,
+            1.25,
+            &sid_json("s1", r#""project.id":"proj-1""#),
+        );
+        // s2: single flush, zero cost (a free session is still a session).
+        insert_histogram_row(
+            &conn,
+            "opencode.session.cost.total",
+            T0 + 1,
+            1,
+            0.0,
+            &sid_json("s2", ""),
+        );
+        // duration (ms) and token totals follow the same shape.
+        insert_histogram_row(
+            &conn,
+            "opencode.session.duration",
+            T0,
+            1,
+            1_000.0,
+            &sid_json("s1", ""),
+        );
+        insert_histogram_row(
+            &conn,
+            "opencode.session.duration",
+            T0 + 2,
+            1,
+            3_000.0,
+            &sid_json("s1", ""),
+        );
+        insert_histogram_row(
+            &conn,
+            "opencode.session.token.total",
+            T0,
+            1,
+            100.0,
+            &sid_json("s1", ""),
+        );
+        insert_histogram_row(
+            &conn,
+            "opencode.session.token.total",
+            T0 + 2,
+            1,
+            300.0,
+            &sid_json("s1", ""),
+        );
+        // s3 only has an out-of-window row → absent from the result.
+        insert_histogram_row(
+            &conn,
+            "opencode.session.cost.total",
+            T0 - 1,
+            1,
+            9.0,
+            &sid_json("s3", ""),
+        );
+
+        let rows = query_session_costs(&conn, Some(T0), Some(T0 + 2)).unwrap();
+        assert_eq!(rows.len(), 2, "window rows only, no s3: {rows:?}");
+
+        let s1 = rows.iter().find(|r| r.session_id == "s1").unwrap();
+        assert_eq!(s1.agent, "opencode");
+        assert_eq!(s1.counter_cost_usd, Some(1.25), "last value, not a sum");
+        assert_eq!(s1.tokens, 300, "last token total, not a sum");
+        assert_eq!(s1.duration_secs, Some(3.0), "3000 ms → 3.0 s");
+        assert_eq!(s1.project_id.as_deref(), Some("proj-1"));
+
+        let s2 = rows.iter().find(|r| r.session_id == "s2").unwrap();
+        assert_eq!(s2.counter_cost_usd, Some(0.0));
+        assert_eq!(s2.project_id, None);
+        assert_eq!(s2.duration_secs, None);
+    }
+
+    #[test]
+    fn session_costs_opencode_malformed_histogram_never_overrides_valid() {
+        let conn = setup_test_db();
+        insert_histogram_row(
+            &conn,
+            "opencode.session.cost.total",
+            T0,
+            1,
+            0.5,
+            &sid_json("s1", ""),
+        );
+        // A corrupt flush later in the window must not reset the total to 0.
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_histogram, attributes) \
+             VALUES ('opencode.session.cost.total', 2, ?1, 'garbage', ?2)",
+            rusqlite::params![T0 + 5, sid_json("s1", "")],
+        )
+        .unwrap();
+
+        let rows = query_session_costs(&conn, Some(T0), Some(T0 + 5)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].counter_cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn session_costs_claude_sums_span_tokens_per_model() {
+        let conn = setup_test_db();
+        let span = |ts: i64, attrs: &str| {
+            conn.execute(
+                "INSERT INTO spans (
+                    trace_id, span_id, name, kind, start_time, end_time,
+                    attributes, events, resource, status_code
+                ) VALUES ('t', ?1, 'claude_code.llm_request', 0, ?2, ?2 + 1000, ?3, '[]', '{}', 0)",
+                rusqlite::params![format!("sp{ts}"), ts, attrs],
+            )
+            .unwrap();
+        };
+        // c1/model-1: two requests → summed; model-2: one request.
+        span(
+            T0,
+            r#"{"session.id":"c1","model":"model-1","input_tokens":"10","output_tokens":"2","cache_read_tokens":"0","cache_creation_tokens":"0"}"#,
+        );
+        span(
+            T0 + 1_000_000_000,
+            r#"{"session.id":"c1","model":"model-1","input_tokens":"5","output_tokens":"1","cache_read_tokens":"100","cache_creation_tokens":"4"}"#,
+        );
+        span(
+            T0 + 2_000_000_000,
+            r#"{"session.id":"c1","gen_ai.request.model":"model-2","input_tokens":"7","output_tokens":"3","cache_read_tokens":"0","cache_creation_tokens":"0"}"#,
+        );
+        // c2: single request → zero duration.
+        span(
+            T0 + 1,
+            r#"{"session.id":"c2","model":"model-1","input_tokens":"1","output_tokens":"1","cache_read_tokens":"0","cache_creation_tokens":"0"}"#,
+        );
+        // No session.id → skipped, not misattributed.
+        span(
+            T0 + 2,
+            r#"{"model":"model-1","input_tokens":"500","output_tokens":"500","cache_read_tokens":"0","cache_creation_tokens":"0"}"#,
+        );
+        // Wrong span name → ignored.
+        span(
+            T0 + 3,
+            r#"{"session.id":"c1","model":"other","input_tokens":"9","output_tokens":"9","cache_read_tokens":"0","cache_creation_tokens":"0"}"#,
+        );
+        conn.execute(
+            "UPDATE spans SET name = 'claude_code.tool.execution' WHERE span_id = ?1",
+            rusqlite::params![format!("sp{}", T0 + 3)],
+        )
+        .unwrap();
+
+        let rows = query_session_costs(&conn, Some(T0), Some(T0 + 10_000_000_000)).unwrap();
+        let c1 = rows.iter().find(|r| r.session_id == "c1").unwrap();
+        assert_eq!(c1.agent, "claude");
+        assert_eq!(c1.counter_cost_usd, None);
+        assert_eq!(c1.tokens, 10 + 2 + 5 + 1 + 100 + 4 + 7 + 3);
+        // 2 seconds between first and last request.
+        assert_eq!(c1.duration_secs, Some(2.0));
+        let models: std::collections::BTreeMap<_, _> =
+            c1.models.iter().map(|(m, t)| (m.as_str(), t)).collect();
+        assert_eq!(models["model-1"].input, 15);
+        assert_eq!(models["model-1"].output, 3);
+        assert_eq!(models["model-1"].cache_read, 100);
+        assert_eq!(models["model-1"].cache_write, 4);
+        // gen_ai.request.model fallback picked up model-2.
+        assert_eq!(models["model-2"].input, 7);
+        assert_eq!(models.len(), 2);
+
+        let c2 = rows.iter().find(|r| r.session_id == "c2").unwrap();
+        assert_eq!(c2.tokens, 2);
+        assert_eq!(
+            c2.duration_secs, None,
+            "single request → no measurable duration"
+        );
+
+        assert_eq!(rows.len(), 2, "sessionless span skipped: {rows:?}");
     }
 }

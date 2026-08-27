@@ -459,6 +459,36 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    pub async fn fetch_session_costs(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::SessionCostResponse> {
+        let url = format!("{}/api/sessions/costs", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch session costs: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn fetch_session_cost_distribution(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::CostDistributionResponse> {
+        let url = format!("{}/api/sessions/cost-distribution", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch session cost distribution: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_conversation_depth(
         &self,
         params: Vec<(&str, String)>,

@@ -21,6 +21,9 @@ pub mod semconv;
 // Model pricing data + cost computation
 pub mod pricing;
 
+// Per-session cost analysis helpers (anomaly rule, log-spaced buckets)
+pub mod session_cost;
+
 // Agent-framework attribute recognizers (CrewAI, AutoGen, LangGraph, ...)
 pub mod agent_frameworks;
 

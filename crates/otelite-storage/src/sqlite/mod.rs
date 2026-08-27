@@ -549,6 +549,17 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_session_costs(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<otelite_core::api::SessionCostStorage>> {
+        self.read_query(move |conn| {
+            reader::query_session_costs(conn, start_time, end_time).map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_request_param_profile(
         &self,
         start_time: Option<i64>,

@@ -13,8 +13,8 @@ use crate::api::{
     ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse,
     LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage,
     ProviderMixResponse, ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats,
-    SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    SessionCostRow, SessionCostStorage, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
+    TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -334,6 +334,20 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         bucket_secs: u64,
     ) -> Result<Vec<AgentRollupStorage>>;
+
+    /// Per-session costs (opencode + claude) over the window: last
+    /// per-session value of opencode's cumulative `session.cost.total` /
+    /// `session.duration` / `session.token.total` metrics, and per-session
+    /// token sums from claude `claude_code.llm_request` span attributes.
+    /// Codex is absent: its metrics carry no per-session identifier. Cost
+    /// is unenriched (opencode's counter in
+    /// [`SessionCostStorage::counter_cost_usd`], claude priced by the API
+    /// layer from the per-model totals).
+    async fn query_session_costs(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<SessionCostStorage>>;
 
     /// Sub-agent role attribution (cost and tokens per opencode `agent`
     /// label) over the time window.
