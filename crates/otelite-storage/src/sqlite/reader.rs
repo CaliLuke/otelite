@@ -5092,14 +5092,19 @@ pub fn query_session_context(
         .map_err(|e| StorageError::QueryError(format!("Failed to count session logs: {e}")))?;
 
     // ── metrics (aggregated in SQL; session.id addressing) ──
+    // CASE-wrapped equality, like the span index expression: a bare
+    // `json_extract(...) = ?` also matches rows whose attributes lack the
+    // key entirely (NULL = NULL compares true under json_extract's
+    // three-valued handling in this position), leaking every
+    // session-less metric row into the context for any window query.
     let mut q = format!(
         "SELECT name, unit, metric_type AS mtype, COUNT(*), \
          SUM(COALESCE(value_double, CAST(value_int AS REAL))), \
          MIN(COALESCE(value_double, CAST(value_int AS REAL))), \
          MAX(COALESCE(value_double, CAST(value_int AS REAL))), \
          MIN(timestamp), MAX(timestamp) \
-         FROM metrics WHERE json_valid(attributes) AND {sess}",
-        sess = sess_pred
+         FROM metrics WHERE {expr} IS NOT NULL AND {expr} = ?",
+        expr = semconv::session_id_expr("attributes")
     );
     let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session_id.to_string())];
     window("timestamp", &mut q, &mut p);
@@ -5174,11 +5179,14 @@ pub fn query_session_context(
     // session id can't leak another project label in.)
     let project_id = conn
         .query_row(
-            "SELECT json_extract(attributes, '$.\"project.id\"') FROM metrics \
-             WHERE json_valid(attributes) AND name LIKE 'opencode.%' \
-             AND json_extract(attributes, '$.\"session.id\"') = ? \
-             AND json_extract(attributes, '$.\"project.id\"') IS NOT NULL \
-             LIMIT 1",
+            &format!(
+                "SELECT json_extract(attributes, '$.\"project.id\"') FROM metrics \
+                 WHERE {expr} IS NOT NULL AND {expr} = ? \
+                 AND name LIKE 'opencode.%' \
+                 AND json_extract(attributes, '$.\"project.id\"') IS NOT NULL \
+                 LIMIT 1",
+                expr = semconv::session_id_expr("attributes")
+            ),
             rusqlite::params![session_id],
             |r| r.get::<_, Option<String>>(0),
         )
@@ -9261,6 +9269,44 @@ mod tests {
         assert_eq!(msg.metric_type, 1);
         assert_eq!(msg.first_ts, T0);
         assert_eq!(msg.last_ts, T0 + 100_000_000);
+    }
+
+    #[test]
+    fn session_context_window_does_not_leak_unlabeled_metrics() {
+        let conn = setup_test_db();
+        let sid = "wl-1";
+        // a session-labelled metric inside the window
+        insert_ctx_metric_int(
+            &conn,
+            "opencode.message.count",
+            T0,
+            5,
+            &format!("{{\"session.id\":\"{sid}\"}}"),
+        );
+        // an UNLABELLED metric in the same window: a bare
+        // json_extract(...) = ? predicate would wrongly match it
+        insert_ctx_metric_int(&conn, "opencode.message.count", T0, 7, "{}");
+        // and a labelled metric OUTSIDE the window
+        insert_ctx_metric_int(
+            &conn,
+            "opencode.message.count",
+            T0 - 100_000_000_000,
+            9,
+            &format!("{{\"session.id\":\"{sid}\"}}"),
+        );
+
+        let resp = query_session_context(&conn, sid, Some(T0), Some(T0 + 1_000_000_000), 500)
+            .unwrap()
+            .unwrap();
+        let m = resp
+            .metrics
+            .iter()
+            .find(|m| m.name == "opencode.message.count")
+            .unwrap();
+        assert_eq!(m.count, 1, "only the in-window labelled point counts");
+        assert_eq!(m.sum, Some(5.0), "unlabelled point must not leak in");
+        assert_eq!(m.first_ts, T0);
+        assert_eq!(m.last_ts, T0);
     }
 
     #[test]
