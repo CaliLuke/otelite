@@ -30,6 +30,9 @@ pub mod distribution;
 // Agent-framework attribute recognizers (CrewAI, AutoGen, LangGraph, ...)
 pub mod agent_frameworks;
 
+/// Cross-cutting GenAI filter dimensions (global filter bar, #135).
+pub mod filters;
+
 // Re-exports for convenience
 pub use telemetry::{
     format_attribute_preview, format_attribute_value, LogRecord, Metric, Resource, Span, Trace,

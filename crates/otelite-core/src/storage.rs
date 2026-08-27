@@ -17,6 +17,7 @@ use crate::api::{
     SessionContextResponse, SessionCostRow, SessionCostStorage, SystemUsage, TokenUsageSummary,
     ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
+use crate::filters::GenAiFilters;
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
 use crate::telemetry::log::SeverityLevel;
@@ -180,7 +181,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<(TokenUsageSummary, Vec<ModelUsage>, Vec<SystemUsage>)>;
 
     /// Time-bucketed token usage grouped by model for cost-over-time analysis.
@@ -191,7 +192,7 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_ns: i64,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<CostSeriesPoint>>;
 
     /// Top-N LLM spans ordered by the given sort dimension.
@@ -199,10 +200,12 @@ pub trait StorageBackend: Send + Sync {
     /// When `truncated_only` is true, only spans whose finish reason is
     /// `max_tokens` or `length` are returned.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
     async fn query_top_spans(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
         sort_by: TopSpanSort,
         truncated_only: bool,
@@ -213,6 +216,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<SessionCostRow>>;
 
@@ -221,6 +225,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<ConversationCostRow>>;
 
@@ -229,7 +234,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<FinishReasonCount>>;
 
     /// Latency (and optional TTFT) percentile statistics per model for LLM spans.
@@ -237,15 +242,17 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<LatencyStats>>;
 
     /// Bucketed p50/p90/p95/p99 latency percentiles by model for the
     /// requested metrics ("duration", "ttft").
+    #[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
     async fn query_latency_percentiles(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         bucket_secs: u64,
         metrics: &[&str],
     ) -> Result<LatencyPercentilesResponse>;
@@ -253,11 +260,13 @@ pub trait StorageBackend: Send + Sync {
     /// Generic distribution over a named metric cohort (issue #133):
     /// session_cost | tool_duration | llm_duration | ttft | output_tokens.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
     async fn query_distribution(
         &self,
         metric: &str,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         buckets: usize,
         scale: &str,
     ) -> Result<DistributionResponse>;
@@ -281,7 +290,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         _start_time: Option<i64>,
         _end_time: Option<i64>,
-        _model: Option<&str>,
+        _filters: &GenAiFilters,
     ) -> Result<GenAiCapabilityResponse> {
         Err(StorageError::QueryError(
             "GenAI capability reporting is not supported by this backend".to_string(),
@@ -293,7 +302,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<ErrorRateByModel>>;
 
     /// Aggregated tool-execution usage counts and durations.
@@ -301,6 +310,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<ToolUsage>>;
 
@@ -309,6 +319,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<RetryStats>;
 
     /// Aggregated retrieval / RAG statistics across retriever spans.
@@ -316,6 +327,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         top_queries_limit: usize,
     ) -> Result<RetrievalStats>;
 
@@ -324,7 +336,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<TruncationRateByModel>>;
 
     /// Cache token hit rate per model.
@@ -332,7 +344,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<CacheHitRateByModel>>;
 
     /// Cache economics (read/write split, hit rate, read:write ratio) per
@@ -416,6 +428,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<RequestParamProfile>;
 
     /// Turn-count distribution across conversations with a known conversation_id.
@@ -423,6 +436,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<ConversationDepthStats>;
 
     /// Latency (min/avg/p95/max + TTFT) per time bucket grouped by model or span name.
@@ -433,16 +447,18 @@ pub trait StorageBackend: Send + Sync {
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_secs: u64,
-        model: Option<&str>,
+        filters: &GenAiFilters,
         all_spans: bool,
     ) -> Result<Vec<LatencySeriesPoint>>;
 
     /// Call volume per time bucket grouped by model or span name.
     /// When `all_spans` is true the LLM guard is lifted and results are grouped by span name.
+    #[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
     async fn query_calls_series(
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         bucket_secs: u64,
         all_spans: bool,
     ) -> Result<Vec<CallsSeriesPoint>>;
@@ -452,7 +468,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<LatencyByContextBin>>;
 
     /// Per-(model, error_type) breakdown of error spans, bucketed into actionable categories.
@@ -460,7 +476,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<ErrorTypeBreakdown>>;
 
     /// All observed (request_model, response_model) pairs with a `differs` flag.
@@ -468,6 +484,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<ModelDriftPair>>;
 
     /// Approval/rejection summary for tool gating events.
@@ -475,6 +492,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<crate::api::ToolApprovalStats>;
 
     /// Distribution of stop_reason values across LLM spans.
@@ -482,6 +500,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<crate::api::StopReasonCount>>;
 
     /// Token usage broken down by llm_request.context type.
@@ -489,6 +508,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<crate::api::ContextTypeSplit>>;
 
     /// Top error messages from failed tool executions.
@@ -496,6 +516,7 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<crate::api::ToolErrorEntry>>;
 
@@ -504,5 +525,6 @@ pub trait StorageBackend: Send + Sync {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<crate::api::HourOfDayBucket>>;
 }

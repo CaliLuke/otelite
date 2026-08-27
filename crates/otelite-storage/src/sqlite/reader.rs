@@ -2,6 +2,7 @@
 
 use crate::error::{Result, StorageError};
 use crate::{QueryParams, StorageStats};
+use otelite_core::filters::GenAiFilters;
 use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::semconv;
 use otelite_core::telemetry::log::SeverityLevel;
@@ -759,6 +760,22 @@ fn token_exprs() -> TokenExprs {
     }
 }
 
+/// Append a GenAI filter scope (predicate fragment + bind params) to a
+/// WHERE clause under construction. No-op when the scope is `None`.
+fn push_scope(
+    where_clause: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    scope: Option<(String, Vec<String>)>,
+) {
+    if let Some((frag, fp)) = scope {
+        where_clause.push_str(&format!(" AND {frag}"));
+        params.extend(
+            fp.into_iter()
+                .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>),
+        );
+    }
+}
+
 const CAPABILITY_QUERY_LIMIT: usize = 10_000;
 
 #[derive(Default)]
@@ -896,7 +913,7 @@ pub fn query_genai_capabilities(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<otelite_core::api::GenAiCapabilityResponse> {
     let mut where_clause = String::from("WHERE 1=1");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -908,6 +925,7 @@ pub fn query_genai_capabilities(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
     let sql = format!(
         "WITH recent_spans AS (
             SELECT
@@ -979,7 +997,11 @@ pub fn query_genai_capabilities(
         }
         let request_model =
             first_semconv_attribute(&span.attributes, otelite_core::semconv::REQUEST_MODEL_KEYS);
-        if model.is_some_and(|model| request_model != Some(model)) {
+        if filters
+            .model
+            .as_deref()
+            .is_some_and(|model| request_model != Some(model))
+        {
             continue;
         }
         canonical_request_span_count += 1;
@@ -1067,6 +1089,7 @@ pub fn query_genai_capabilities(
         canonical_span_count: canonical_request_span_count,
         duplicate_span_count,
         truncated,
+        filters_applied: Vec::new(),
     })
 }
 
@@ -1077,7 +1100,7 @@ pub fn query_token_usage(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<(
     otelite_core::api::TokenUsageSummary,
     Vec<otelite_core::api::ModelUsage>,
@@ -1096,10 +1119,7 @@ pub fn query_token_usage(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let input_expr = exprs.input;
     let output_expr = exprs.output;
@@ -1211,7 +1231,7 @@ pub fn query_cost_series(
     start_time: Option<i64>,
     end_time: Option<i64>,
     bucket_ns: i64,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::CostSeriesPoint>> {
     if bucket_ns <= 0 {
         return Err(StorageError::QueryError(format!(
@@ -1232,10 +1252,7 @@ pub fn query_cost_series(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -1301,6 +1318,7 @@ pub fn query_top_spans(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
     limit: usize,
     sort_by: otelite_core::api::TopSpanSort,
     truncated_only: bool,
@@ -1317,6 +1335,7 @@ pub fn query_top_spans(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
     if truncated_only {
         where_clause.push_str(
             " AND (json_extract(attributes, '$.\"gen_ai.response.finish_reason\"') IN ('max_tokens','length')\
@@ -1421,6 +1440,7 @@ pub fn query_top_sessions(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
     limit: usize,
 ) -> Result<Vec<otelite_core::api::SessionCostRow>> {
     let exprs = token_exprs();
@@ -1435,6 +1455,7 @@ pub fn query_top_sessions(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -1488,6 +1509,7 @@ pub fn query_top_conversations(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
     limit: usize,
 ) -> Result<Vec<otelite_core::api::ConversationCostRow>> {
     let exprs = token_exprs();
@@ -1506,6 +1528,7 @@ pub fn query_top_conversations(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -1566,11 +1589,10 @@ pub fn query_finish_reasons(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::FinishReasonCount>> {
-    // Time/model filters are applied per sub-query. We build fragments so each UNION
+    // Time/filter scopes are applied per sub-query. We build fragments so each UNION
     // branch only references its own table's columns (spans.start_time / logs.timestamp).
-    let exprs = token_exprs();
     let mut spans_time_filter = String::new();
     let mut logs_time_filter = String::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1583,19 +1605,27 @@ pub fn query_finish_reasons(
         spans_time_filter.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        spans_time_filter.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
+    // The span filter scope applies to both spans branches (they share the
+    // fragment), so its params are bound twice — once per branch.
+    if let Some((frag, fp)) = filters.span_scope() {
+        spans_time_filter.push_str(&format!(" AND {frag}"));
+        params.extend(
+            fp.iter()
+                .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::ToSql>),
+        );
     }
-    // The plural (json_each) branch re-uses the same spans time/model filter, so bind again.
+    // The plural (json_each) branch re-uses the same spans time/filter scope, so bind again.
     if let Some(start) = start_time {
         params.push(Box::new(start));
     }
     if let Some(end) = end_time {
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        params.push(Box::new(m.to_string()));
+    if let Some((_, fp)) = filters.span_scope() {
+        params.extend(
+            fp.into_iter()
+                .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>),
+        );
     }
     if let Some(start) = start_time {
         logs_time_filter.push_str(" AND timestamp >= ?");
@@ -1604,6 +1634,13 @@ pub fn query_finish_reasons(
     if let Some(end) = end_time {
         logs_time_filter.push_str(" AND timestamp <= ?");
         params.push(Box::new(end));
+    }
+    if let Some((frag, fp)) = filters.log_scope() {
+        logs_time_filter.push_str(&format!(" AND {frag}"));
+        params.extend(
+            fp.into_iter()
+                .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>),
+        );
     }
 
     // Both spans branches carry the finish-reason guard verbatim so the
@@ -1771,7 +1808,7 @@ pub fn query_latency_stats(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::LatencyStats>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.request_span_guard);
@@ -1785,10 +1822,7 @@ pub fn query_latency_stats(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -2014,6 +2048,7 @@ fn collect_llm_request_values(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<LlmRequestValue>> {
     use otelite_core::telemetry::{classify_ttft_value, TtftValueQuality};
 
@@ -2028,6 +2063,7 @@ fn collect_llm_request_values(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -2098,20 +2134,30 @@ fn collect_codex_ttft_values(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<(Option<String>, i64, f64)>> {
     use otelite_core::semconv::metric_names as mnames;
 
     let mut where_clause =
-        String::from("WHERE name = ?1 AND json_valid(attributes) AND json_valid(value_histogram)");
+        String::from("WHERE name = ? AND json_valid(attributes) AND json_valid(value_histogram)");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
         vec![Box::new(mnames::CODEX_TURN_TTFT.to_string())];
     if let Some(start) = start_time {
-        where_clause.push_str(" AND timestamp >= ?2");
+        where_clause.push_str(" AND timestamp >= ?");
         params.push(Box::new(start));
     }
     if let Some(end) = end_time {
-        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        where_clause.push_str(" AND timestamp <= ?");
         params.push(Box::new(end));
+    }
+    // Codex metrics carry no session/project/model labels, so only session-scoped
+    // rows are addressable here; the scope fragment degrades to None otherwise.
+    if let Some((frag, fp)) = filters.metric_scope() {
+        where_clause.push_str(&format!(" AND {frag}"));
+        params.extend(
+            fp.into_iter()
+                .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>),
+        );
     }
     let sql = format!(
         "SELECT json_extract(attributes, '$.model'), timestamp, value_histogram          FROM metrics {where_clause}",
@@ -2160,12 +2206,14 @@ fn collect_codex_ttft_values(
 ///   TTFT attribute, so the cohorts are disjoint. Histogram rows with
 ///   count > 1 expand each bucket's observations at the bucket midpoint;
 ///   count == 1 rows contribute their exact `sum`.
+#[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
 pub fn query_latency_percentiles(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
     bucket_secs: u64,
     metrics: &[&str],
+    filters: &GenAiFilters,
 ) -> Result<otelite_core::api::LatencyPercentilesResponse> {
     use otelite_core::api::{
         LatencyPercentilePoint, LatencyPercentileSeries, LatencyPercentilesResponse,
@@ -2185,9 +2233,9 @@ pub fn query_latency_percentiles(
     }
     let bucket_ns = bucket_secs as i64 * 1_000_000_000;
 
-    let span_values = collect_llm_request_values(conn, start_time, end_time)?;
+    let span_values = collect_llm_request_values(conn, start_time, end_time, filters)?;
     let codex_ttft = if want_ttft {
-        collect_codex_ttft_values(conn, start_time, end_time)?
+        collect_codex_ttft_values(conn, start_time, end_time, filters)?
     } else {
         Vec::new()
     };
@@ -2285,6 +2333,7 @@ pub fn query_distribution(
     end_time: Option<i64>,
     buckets: usize,
     scale: &str,
+    filters: &GenAiFilters,
 ) -> Result<otelite_core::api::DistributionResponse> {
     use otelite_core::distribution;
 
@@ -2307,6 +2356,7 @@ pub fn query_distribution(
                 where_clause.push_str(" AND end_time <= ?");
                 params.push(Box::new(end));
             }
+            push_scope(&mut where_clause, &mut params, filters.span_scope());
             let sql = format!(
                 "SELECT (end_time - start_time) / 1000000 FROM spans {where_clause}"
             );
@@ -2327,7 +2377,7 @@ pub fn query_distribution(
             rows.into_iter().filter(|v| *v >= 0).map(|v| v as f64).collect()
         },
         "llm_duration" | "ttft" | "output_tokens" => {
-            let reqs = collect_llm_request_values(conn, start_time, end_time)?;
+            let reqs = collect_llm_request_values(conn, start_time, end_time, filters)?;
             match metric {
                 "llm_duration" => reqs
                     .iter()
@@ -2337,7 +2387,7 @@ pub fn query_distribution(
                 "ttft" => {
                     let mut vals: Vec<f64> =
                         reqs.iter().filter_map(|v| v.ttft_ms).collect();
-                    for (_, _, v) in collect_codex_ttft_values(conn, start_time, end_time)? {
+                    for (_, _, v) in collect_codex_ttft_values(conn, start_time, end_time, filters)? {
                         vals.push(v);
                     }
                     vals
@@ -2414,7 +2464,7 @@ pub fn query_error_rate(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::ErrorRateByModel>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -2428,10 +2478,7 @@ pub fn query_error_rate(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -2485,6 +2532,7 @@ pub fn query_tool_usage(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
     limit: usize,
 ) -> Result<Vec<otelite_core::api::ToolUsage>> {
     // The tool-span guard (verbatim conjunct) scopes the scan to
@@ -2502,6 +2550,7 @@ pub fn query_tool_usage(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -2568,6 +2617,7 @@ pub fn query_retry_stats(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<otelite_core::api::RetryStats> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -2581,6 +2631,7 @@ pub fn query_retry_stats(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -2631,6 +2682,7 @@ pub fn query_retry_stats(
         retried_calls,
         extra_attempts: extra_attempts as usize,
         retry_rate,
+        filters_applied: Vec::new(),
     })
 }
 
@@ -2648,6 +2700,7 @@ pub fn query_retrieval_stats(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
     top_queries_limit: usize,
 ) -> Result<otelite_core::api::RetrievalStats> {
     let mut time_filter = String::new();
@@ -2660,6 +2713,13 @@ pub fn query_retrieval_stats(
     if let Some(end) = end_time {
         time_filter.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
+    }
+    if let Some((frag, fp)) = filters.span_scope() {
+        time_filter.push_str(&format!(" AND {frag}"));
+        params.extend(
+            fp.into_iter()
+                .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>),
+        );
     }
 
     // CTE: per-retrieval-span query, document count, and top-1 score.
@@ -2712,6 +2772,7 @@ pub fn query_retrieval_stats(
             avg_documents_per_query: 0.0,
             avg_top_document_score: None,
             top_queries: Vec::new(),
+            filters_applied: Vec::new(),
         });
     }
 
@@ -2777,6 +2838,7 @@ pub fn query_retrieval_stats(
         avg_documents_per_query,
         avg_top_document_score,
         top_queries,
+        filters_applied: Vec::new(),
     })
 }
 
@@ -2830,7 +2892,7 @@ pub fn query_truncation_rate(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::TruncationRateByModel>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -2844,10 +2906,7 @@ pub fn query_truncation_rate(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -2904,7 +2963,7 @@ pub fn query_cache_hit_rate(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::CacheHitRateByModel>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -2918,10 +2977,7 @@ pub fn query_cache_hit_rate(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -3199,6 +3255,7 @@ fn opencode_usage_rows(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<OpencodeCounterRow>> {
     use otelite_core::semconv::metric_labels as lbl;
     use otelite_core::semconv::metric_names as mnames;
@@ -3211,17 +3268,18 @@ fn opencode_usage_rows(
         })
         .collect();
 
-    let mut where_clause = String::from("WHERE name = ?1");
+    let mut where_clause = String::from("WHERE name = ?");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
         vec![Box::new(mnames::OPENCODE_TOKEN_USAGE.to_string())];
     if let Some(start) = start_time {
-        where_clause.push_str(" AND timestamp >= ?2");
+        where_clause.push_str(" AND timestamp >= ?");
         params.push(Box::new(start));
     }
     if let Some(end) = end_time {
-        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        where_clause.push_str(" AND timestamp <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.metric_scope());
 
     let sql = format!(
         "SELECT {}, timestamp, \
@@ -3397,7 +3455,7 @@ pub fn query_cache_economics(
         };
     // ── opencode: cumulative counter, window fetch + per-series baseline ──
     {
-        let rows = opencode_usage_rows(conn, start_time, end_time)?;
+        let rows = opencode_usage_rows(conn, start_time, end_time, &GenAiFilters::default())?;
         let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
         for (labels, ts, delta) in opencode_counter_deltas(rows, &baselines) {
             let model = labels.get(1).and_then(|m| m.clone());
@@ -3656,7 +3714,7 @@ pub fn query_reasoning_share(
 
     // ── opencode: cumulative counters, types reasoning + output ──
     {
-        let rows = opencode_usage_rows(conn, start_time, end_time)?;
+        let rows = opencode_usage_rows(conn, start_time, end_time, &GenAiFilters::default())?;
         let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
         for (labels, _ts, delta) in opencode_counter_deltas(rows, &baselines) {
             let model = labels.get(1).and_then(|m| m.clone());
@@ -3823,6 +3881,7 @@ pub fn query_reasoning_share(
     Ok(otelite_core::api::ReasoningShareResponse {
         models: model_entries,
         effort,
+        filters_applied: Vec::new(),
     })
 }
 
@@ -3875,7 +3934,7 @@ pub fn query_agent_rollup(
     // ── opencode ─────────────────────────────────────────────────────────
     {
         // token.usage: one fetch, one baseline pass, per-row clamped deltas.
-        let rows = opencode_usage_rows(conn, start_time, end_time)?;
+        let rows = opencode_usage_rows(conn, start_time, end_time, &GenAiFilters::default())?;
         let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
         let mut models: HashMap<String, AgentTokenUsage> = HashMap::new();
         let mut series: HashMap<i64, HashMap<String, AgentTokenUsage>> = HashMap::new();
@@ -4263,7 +4322,7 @@ pub fn query_project_rollup(
 
     // Token deltas: the #125 per-row clamped pass (series key includes
     // session.id, so per-project attribution cannot cross sessions).
-    let rows = opencode_usage_rows(conn, start_time, end_time)?;
+    let rows = opencode_usage_rows(conn, start_time, end_time, &GenAiFilters::default())?;
     let baselines = opencode_usage_baselines(conn, &rows, start_time)?;
     for (labels, _ts, delta) in opencode_counter_deltas(rows, &baselines) {
         let session = labels.get(3).and_then(|s| s.as_deref());
@@ -5286,6 +5345,8 @@ pub fn query_session_context(
         logs_total: logs_total as u64,
         metrics: metrics_out,
         timeline,
+        // Per-session endpoint: the global filter bar is not applicable.
+        filters_applied: Vec::new(),
     }))
 }
 
@@ -5445,6 +5506,7 @@ pub fn query_agent_roles(
         roles: role_rows,
         unknown_share_pct,
         agents_covered: vec!["opencode".to_string()],
+        filters_applied: Vec::new(),
     })
 }
 
@@ -5803,6 +5865,7 @@ pub fn query_provider_mix(
         method,
         providers,
         total_tokens,
+        filters_applied: Vec::new(),
     })
 }
 
@@ -5811,6 +5874,7 @@ pub fn query_request_param_profile(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<otelite_core::api::RequestParamProfile> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -5824,6 +5888,7 @@ pub fn query_request_param_profile(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
@@ -5886,6 +5951,7 @@ pub fn query_request_param_profile(
     Ok(otelite_core::api::RequestParamProfile {
         temperature_buckets,
         max_tokens_buckets,
+        filters_applied: Vec::new(),
     })
 }
 
@@ -5894,6 +5960,7 @@ pub fn query_conversation_depth(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<otelite_core::api::ConversationDepthStats> {
     let exprs = token_exprs();
     let conv_id = "json_extract(attributes, '$.\"gen_ai.conversation.id\"')";
@@ -5908,6 +5975,7 @@ pub fn query_conversation_depth(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT COUNT(*) AS turns
@@ -5939,6 +6007,7 @@ pub fn query_conversation_depth(
             p50_turns: 0,
             p95_turns: 0,
             p99_turns: 0,
+            filters_applied: Vec::new(),
         });
     }
 
@@ -5952,6 +6021,7 @@ pub fn query_conversation_depth(
         p50_turns: percentile(&turn_counts, 0.50),
         p95_turns: percentile(&turn_counts, 0.95),
         p99_turns: percentile(&turn_counts, 0.99),
+        filters_applied: Vec::new(),
     })
 }
 
@@ -5965,7 +6035,7 @@ pub fn query_latency_series(
     start_time: Option<i64>,
     end_time: Option<i64>,
     bucket_secs: u64,
-    model: Option<&str>,
+    filters: &GenAiFilters,
     all_spans: bool,
 ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
     let exprs = token_exprs();
@@ -5991,12 +6061,7 @@ pub fn query_latency_series(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if !all_spans {
-        if let Some(m) = model {
-            where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-            params.push(Box::new(m.to_string()));
-        }
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -6127,10 +6192,12 @@ pub fn query_latency_series(
 }
 
 /// Call volume per time bucket grouped by model (LLM mode) or span name (all-spans mode).
+#[allow(clippy::too_many_arguments)] // filter bar (#135) pushed us past 5
 pub fn query_calls_series(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
     bucket_secs: u64,
     all_spans: bool,
 ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
@@ -6156,6 +6223,7 @@ pub fn query_calls_series(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -6210,7 +6278,7 @@ pub fn query_latency_by_context(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::LatencyByContextBin>> {
     let exprs = token_exprs();
     let mut where_clause = format!(
@@ -6227,10 +6295,7 @@ pub fn query_latency_by_context(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -6380,7 +6445,7 @@ pub fn query_error_types(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
-    model: Option<&str>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::ErrorTypeBreakdown>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {} AND status_code = 2", exprs.llm_span_guard);
@@ -6394,10 +6459,7 @@ pub fn query_error_types(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
-    if let Some(m) = model {
-        where_clause.push_str(&format!(" AND ({}) = ?", exprs.model));
-        params.push(Box::new(m.to_string()));
-    }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "WITH error_spans AS (
@@ -6477,6 +6539,7 @@ pub fn query_model_drift(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::ModelDriftPair>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -6490,6 +6553,7 @@ pub fn query_model_drift(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(end));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -6542,6 +6606,7 @@ pub fn query_tool_approvals(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<otelite_core::api::ToolApprovalStats> {
     // name = TOOL_APPROVAL_SPAN_NAME scopes the scan to
     // idx_spans_tool_approval.
@@ -6555,6 +6620,7 @@ pub fn query_tool_approvals(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(e));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -6628,6 +6694,7 @@ pub fn query_stop_reasons(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::StopReasonCount>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -6640,6 +6707,7 @@ pub fn query_stop_reasons(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(e));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -6678,6 +6746,7 @@ pub fn query_context_type_split(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::ContextTypeSplit>> {
     let exprs = token_exprs();
     let mut where_clause = format!("WHERE {}", exprs.llm_span_guard);
@@ -6690,6 +6759,7 @@ pub fn query_context_type_split(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(e));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     let sql = format!(
         "SELECT
@@ -6736,6 +6806,7 @@ pub fn query_tool_errors(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
     limit: usize,
 ) -> Result<Vec<otelite_core::api::ToolErrorEntry>> {
     // name = TOOL_EXECUTION_SPAN_NAME scopes the scan to
@@ -6757,6 +6828,7 @@ pub fn query_tool_errors(
         where_clause.push_str(" AND end_time <= ?");
         params.push(Box::new(e));
     }
+    push_scope(&mut where_clause, &mut params, filters.span_scope());
 
     // Truncate long error messages at 120 chars for grouping
     let sql = format!(
@@ -6796,6 +6868,7 @@ pub fn query_hour_of_day(
     conn: &Connection,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    filters: &GenAiFilters,
 ) -> Result<Vec<otelite_core::api::HourOfDayBucket>> {
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -6807,6 +6880,14 @@ pub fn query_hour_of_day(
     if let Some(e) = end_time {
         time_filter.push_str(" AND end_time <= ?");
         params.push(Box::new(e));
+    }
+    // Shared by both sub-queries; each statement binds its own copy of params.
+    if let Some((frag, fp)) = filters.span_scope() {
+        time_filter.push_str(&format!(" AND {frag}"));
+        params.extend(
+            fp.into_iter()
+                .map(|p| Box::new(p) as Box<dyn rusqlite::ToSql>),
+        );
     }
 
     // Duplicate params for the two sub-queries (SQLite doesn't support named params easily here)
@@ -6974,7 +7055,7 @@ mod tests {
         .unwrap();
 
         let (summary, by_model, by_system) =
-            query_token_usage(&conn, Some(50), Some(300), None).unwrap();
+            query_token_usage(&conn, Some(50), Some(300), &GenAiFilters::default()).unwrap();
 
         assert_eq!(summary.total_requests, 1);
         assert_eq!(summary.total_input_tokens, 50);
@@ -7536,7 +7617,7 @@ mod tests {
     #[test]
     fn test_query_tool_approvals_empty() {
         let conn = setup_test_db();
-        let stats = query_tool_approvals(&conn, None, None).unwrap();
+        let stats = query_tool_approvals(&conn, None, None, &GenAiFilters::default()).unwrap();
         assert_eq!(stats.total, 0);
         assert_eq!(stats.auto_accepted, 0);
         assert_eq!(stats.rejected, 0);
@@ -7550,7 +7631,7 @@ mod tests {
         insert_tool_decision(&conn, "accept", "user", "Write");
         insert_tool_decision(&conn, "reject", "user", "Bash");
 
-        let stats = query_tool_approvals(&conn, None, None).unwrap();
+        let stats = query_tool_approvals(&conn, None, None, &GenAiFilters::default()).unwrap();
         assert_eq!(stats.total, 4);
         assert_eq!(stats.auto_accepted, 2); // accept + source=config
         assert_eq!(stats.user_accepted, 1); // accept + source=user
@@ -7563,7 +7644,7 @@ mod tests {
     #[test]
     fn test_query_stop_reasons_empty() {
         let conn = setup_test_db();
-        let rows = query_stop_reasons(&conn, None, None).unwrap();
+        let rows = query_stop_reasons(&conn, None, None, &GenAiFilters::default()).unwrap();
         // No LLM spans → empty vec (no stop_reason attribute, no groupable rows)
         assert_eq!(rows.len(), 0);
     }
@@ -7575,7 +7656,7 @@ mod tests {
         insert_llm_span(&conn, "claude-sonnet", 200, 80, Some("end_turn"), None);
         insert_llm_span(&conn, "claude-sonnet", 150, 60, Some("tool_use"), None);
 
-        let rows = query_stop_reasons(&conn, None, None).unwrap();
+        let rows = query_stop_reasons(&conn, None, None, &GenAiFilters::default()).unwrap();
         let tool_use = rows
             .iter()
             .find(|r| r.reason == "tool_use")
@@ -7591,7 +7672,7 @@ mod tests {
     #[test]
     fn test_query_context_type_split_empty() {
         let conn = setup_test_db();
-        let rows = query_context_type_split(&conn, None, None).unwrap();
+        let rows = query_context_type_split(&conn, None, None, &GenAiFilters::default()).unwrap();
         // Empty DB → no rows (nothing to group by context)
         assert!(rows.is_empty());
     }
@@ -7603,7 +7684,7 @@ mod tests {
         insert_llm_span(&conn, "model-b", 200, 80, None, Some("interaction"));
         insert_llm_span(&conn, "model-c", 150, 60, None, Some("sub_agent"));
 
-        let rows = query_context_type_split(&conn, None, None).unwrap();
+        let rows = query_context_type_split(&conn, None, None, &GenAiFilters::default()).unwrap();
         let interaction = rows.iter().find(|r| r.context == "interaction");
         let sub_agent = rows.iter().find(|r| r.context == "sub_agent");
         assert!(interaction.is_some(), "interaction row missing");
@@ -7615,7 +7696,7 @@ mod tests {
     #[test]
     fn test_query_tool_errors_empty() {
         let conn = setup_test_db();
-        let rows = query_tool_errors(&conn, None, None, 10).unwrap();
+        let rows = query_tool_errors(&conn, None, None, &GenAiFilters::default(), 10).unwrap();
         assert_eq!(rows.len(), 0);
     }
 
@@ -7626,7 +7707,7 @@ mod tests {
         insert_failed_tool(&conn, "Bash", "Shell command failed");
         insert_failed_tool(&conn, "Read", "File not found");
 
-        let rows = query_tool_errors(&conn, None, None, 10).unwrap();
+        let rows = query_tool_errors(&conn, None, None, &GenAiFilters::default(), 10).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].tool_name, "Bash");
         assert_eq!(rows[0].count, 2);
@@ -7637,7 +7718,7 @@ mod tests {
     #[test]
     fn test_query_hour_of_day_returns_24_buckets() {
         let conn = setup_test_db();
-        let rows = query_hour_of_day(&conn, None, None).unwrap();
+        let rows = query_hour_of_day(&conn, None, None, &GenAiFilters::default()).unwrap();
         assert_eq!(rows.len(), 24);
         assert_eq!(rows[0].hour, 0);
         assert_eq!(rows[23].hour, 23);
@@ -7646,7 +7727,7 @@ mod tests {
     #[test]
     fn test_query_hour_of_day_empty_db_all_zero() {
         let conn = setup_test_db();
-        let rows = query_hour_of_day(&conn, None, None).unwrap();
+        let rows = query_hour_of_day(&conn, None, None, &GenAiFilters::default()).unwrap();
         assert!(rows.iter().all(|r| r.llm_calls == 0 && r.tool_calls == 0));
     }
 
@@ -7669,7 +7750,7 @@ mod tests {
             rusqlite::params![next_id(), next_id(), ts_ns, ts_ns + 500_000_000],
         ).unwrap();
 
-        let rows = query_hour_of_day(&conn, None, None).unwrap();
+        let rows = query_hour_of_day(&conn, None, None, &GenAiFilters::default()).unwrap();
         assert_eq!(rows.len(), 24);
         assert_eq!(rows[14].hour, 14);
         assert_eq!(rows[14].llm_calls, 1, "hour 14 should have 1 LLM call");
@@ -7792,7 +7873,13 @@ mod tests {
         )
         .unwrap();
 
-        let rows = query_finish_reasons(&conn, Some(1000000000), Some(2000000000), None).unwrap();
+        let rows = query_finish_reasons(
+            &conn,
+            Some(1000000000),
+            Some(2000000000),
+            &GenAiFilters::default(),
+        )
+        .unwrap();
         let count = |reason: &str| {
             rows.iter()
                 .find(|r| r.reason == reason)
@@ -7844,7 +7931,14 @@ mod tests {
             9000000000,
         ); // outside window
 
-        let rows = query_tool_usage(&conn, Some(1000000000), Some(8000000000), 10).unwrap();
+        let rows = query_tool_usage(
+            &conn,
+            Some(1000000000),
+            Some(8000000000),
+            &GenAiFilters::default(),
+            10,
+        )
+        .unwrap();
         let get = |tool: &str| rows.iter().find(|r| r.tool_name == tool);
         assert_eq!(
             get("search").unwrap().count,
@@ -7884,7 +7978,7 @@ mod tests {
         }));
         insert(serde_json::json!({"gen_ai.request.model": "x"})); // not retrieval
 
-        let stats = query_retrieval_stats(&conn, None, None, 10).unwrap();
+        let stats = query_retrieval_stats(&conn, None, None, &GenAiFilters::default(), 10).unwrap();
         assert_eq!(
             stats.total_retrievals, 2,
             "RETRIEVER kind + retrieval.query span"
@@ -7900,7 +7994,8 @@ mod tests {
 
         // Empty database returns defaults, not an error.
         let empty = setup_test_db();
-        let stats = query_retrieval_stats(&empty, None, None, 10).unwrap();
+        let stats =
+            query_retrieval_stats(&empty, None, None, &GenAiFilters::default(), 10).unwrap();
         assert_eq!(stats.total_retrievals, 0);
     }
 
@@ -8812,16 +8907,39 @@ mod tests {
     #[test]
     fn latency_percentiles_empty_db() {
         let conn = setup_test_db();
-        let resp =
-            query_latency_percentiles(&conn, None, None, 3600, &["duration", "ttft"]).unwrap();
+        let resp = query_latency_percentiles(
+            &conn,
+            None,
+            None,
+            3600,
+            &["duration", "ttft"],
+            &GenAiFilters::default(),
+        )
+        .unwrap();
         assert!(percentile_rows(&resp) == 0, "expected no points");
     }
 
     #[test]
     fn latency_percentiles_rejects_bad_inputs() {
         let conn = setup_test_db();
-        assert!(query_latency_percentiles(&conn, None, None, 0, &["duration"]).is_err());
-        assert!(query_latency_percentiles(&conn, None, None, 3600, &["nope"]).is_err());
+        assert!(query_latency_percentiles(
+            &conn,
+            None,
+            None,
+            0,
+            &["duration"],
+            &GenAiFilters::default()
+        )
+        .is_err());
+        assert!(query_latency_percentiles(
+            &conn,
+            None,
+            None,
+            3600,
+            &["nope"],
+            &GenAiFilters::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -8885,7 +9003,15 @@ mod tests {
             (400, Some(150), None),
         );
 
-        let resp = query_latency_percentiles(&conn, None, None, 10, &["duration", "ttft"]).unwrap();
+        let resp = query_latency_percentiles(
+            &conn,
+            None,
+            None,
+            10,
+            &["duration", "ttft"],
+            &GenAiFilters::default(),
+        )
+        .unwrap();
 
         let dur = &resp.metrics["duration"];
         assert_eq!(dur.all.len(), 2, "two duration buckets for all");
@@ -8927,9 +9053,15 @@ mod tests {
         assert_eq!(tt.models["modelB"][0].count, 1);
 
         // window filter excludes everything
-        let resp =
-            query_latency_percentiles(&conn, Some(T0 + 100_000_000_000), None, 10, &["duration"])
-                .unwrap();
+        let resp = query_latency_percentiles(
+            &conn,
+            Some(T0 + 100_000_000_000),
+            None,
+            10,
+            &["duration"],
+            &GenAiFilters::default(),
+        )
+        .unwrap();
         assert!(percentile_rows(&resp) == 0);
     }
 
@@ -8968,7 +9100,9 @@ mod tests {
             r#"{"model":"gpt-x"}"#,
         );
 
-        let resp = query_latency_percentiles(&conn, None, None, 3600, &["ttft"]).unwrap();
+        let resp =
+            query_latency_percentiles(&conn, None, None, 3600, &["ttft"], &GenAiFilters::default())
+                .unwrap();
         let tt = &resp.metrics["ttft"];
         assert_eq!(tt.all.len(), 1, "single hourly bucket");
         assert_eq!(tt.all[0].count, 3, "1 exact + 2 expanded");
@@ -9004,21 +9138,57 @@ mod tests {
         // session_cost is priced in the API layer, so it errors here by
         // design — only the storage-resolved cohorts are covered.
         for metric in ["tool_duration", "llm_duration", "ttft", "output_tokens"] {
-            let resp = query_distribution(&conn, metric, None, None, 20, "linear").unwrap();
+            let resp = query_distribution(
+                &conn,
+                metric,
+                None,
+                None,
+                20,
+                "linear",
+                &GenAiFilters::default(),
+            )
+            .unwrap();
             assert!(
                 resp.buckets.is_empty() && resp.stats.is_none(),
                 "{metric}: expected empty"
             );
             assert_eq!(resp.metric, metric);
         }
-        assert!(query_distribution(&conn, "session_cost", None, None, 20, "linear").is_err());
+        assert!(query_distribution(
+            &conn,
+            "session_cost",
+            None,
+            None,
+            20,
+            "linear",
+            &GenAiFilters::default()
+        )
+        .is_err());
     }
 
     #[test]
     fn distribution_rejects_bad_inputs() {
         let conn = setup_test_db();
-        assert!(query_distribution(&conn, "bogus", None, None, 20, "linear").is_err());
-        assert!(query_distribution(&conn, "ttft", None, None, 20, "exponential").is_err());
+        assert!(query_distribution(
+            &conn,
+            "bogus",
+            None,
+            None,
+            20,
+            "linear",
+            &GenAiFilters::default()
+        )
+        .is_err());
+        assert!(query_distribution(
+            &conn,
+            "ttft",
+            None,
+            None,
+            20,
+            "exponential",
+            &GenAiFilters::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -9058,7 +9228,9 @@ mod tests {
         insert_tool_span(&conn, "t1", T0, 25);
         insert_tool_span(&conn, "t2", T0 + 1_000_000_000, 900);
 
-        let d = |m: &str, scale: &str| query_distribution(&conn, m, None, None, 4, scale).unwrap();
+        let d = |m: &str, scale: &str| {
+            query_distribution(&conn, m, None, None, 4, scale, &GenAiFilters::default()).unwrap()
+        };
 
         let llm = d("llm_duration", "linear");
         assert_eq!(llm.unit, "ms");
@@ -9399,6 +9571,7 @@ mod tests {
             None,
             4,
             "linear",
+            &GenAiFilters::default(),
         )
         .unwrap();
         assert_eq!(dist_count(&resp), 1, "only the later span is in the window");

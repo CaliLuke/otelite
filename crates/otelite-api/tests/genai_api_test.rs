@@ -153,7 +153,7 @@ async fn test_get_stop_reasons_empty() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let reasons: Vec<otelite_core::api::StopReasonCount> = serde_json::from_slice(&body).unwrap();
+    let reasons: Vec<otelite_core::api::StopReasonCount> = items(&body, "stop_reasons");
     assert!(reasons.is_empty());
 }
 
@@ -176,7 +176,7 @@ async fn test_get_context_type_split_empty() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let split: Vec<otelite_core::api::ContextTypeSplit> = serde_json::from_slice(&body).unwrap();
+    let split: Vec<otelite_core::api::ContextTypeSplit> = items(&body, "context_type_split");
     // context_type_split returns empty vec for empty DB
     assert!(split.is_empty());
 }
@@ -200,7 +200,7 @@ async fn test_get_tool_errors_empty() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let errors: Vec<otelite_core::api::ToolErrorEntry> = serde_json::from_slice(&body).unwrap();
+    let errors: Vec<otelite_core::api::ToolErrorEntry> = items(&body, "tool_errors");
     assert!(errors.is_empty());
 }
 
@@ -223,7 +223,7 @@ async fn test_get_hour_of_day_empty() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let buckets: Vec<otelite_core::api::HourOfDayBucket> = serde_json::from_slice(&body).unwrap();
+    let buckets: Vec<otelite_core::api::HourOfDayBucket> = items(&body, "hour_of_day");
     // Empty DB returns 24 zero-filled buckets (one per hour)
     assert_eq!(buckets.len(), 24);
     assert!(buckets
@@ -1472,4 +1472,249 @@ async fn test_get_session_context_window_filter() {
         ctx.spans_total, 1,
         "totals count the queried scope (window, when given)"
     );
+}
+
+/// Unwrap the `GenAiItemsResponse` envelope (#135) into `items`.
+fn items<T: serde::de::DeserializeOwned>(body: &[u8], label: &str) -> T {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or_else(|e| {
+        panic!(
+            "parse {label} response: {e}: {}",
+            String::from_utf8_lossy(body)
+        )
+    });
+    serde_json::from_value(
+        v.get("items")
+            .cloned()
+            .unwrap_or_else(|| panic!("missing items in {label} response: {v}")),
+    )
+    .unwrap_or_else(|e| panic!("parse {label} items: {e}"))
+}
+
+// ── #135: global filter bar contract ────────────────────────────────────────
+//
+// Every genai endpoint accepts the five filter-bar params, applies the subset
+// it supports, and echoes `filters_applied`. Unsupported params are ignored
+// (never a 400).
+
+async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|e| panic!("parse {uri}: {e}"));
+    (status, v)
+}
+
+#[tokio::test]
+async fn test_filters_applied_echoed_on_all_genai_endpoints() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    // Struct-response endpoints: filters_applied is a field on the body.
+    // Rollup endpoints require an explicit window (codex rollup).
+    let w = format!("start_time={R0}&end_time={R1}");
+    let struct_endpoints: Vec<String> = [
+        "/api/genai/usage?agent=claude",
+        "/api/genai/latency_percentiles",
+        "/api/genai/capabilities",
+        "/api/genai/retry_stats",
+        "/api/genai/retrieval_stats",
+        "/api/genai/request_param_profile",
+        "/api/genai/conversation_depth",
+        "/api/genai/tool_approvals",
+        &format!("/api/genai/agents?{w}"),
+        &format!("/api/genai/projects?{w}"),
+        &format!("/api/genai/agent_roles?{w}"),
+        &format!("/api/genai/provider_mix?{w}"),
+        &format!("/api/genai/reasoning_share?{w}"),
+        "/api/genai/pricing_metadata",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for uri in &struct_endpoints {
+        let (status, v) = get_json(&app, uri).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{uri} -> {status}: {}",
+            String::from_utf8_lossy(
+                &axum::body::to_bytes(
+                    app.clone()
+                        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap()
+                        .into_body(),
+                    usize::MAX,
+                )
+                .await
+                .unwrap()
+            )
+        );
+        let applied = v.get("filters_applied").and_then(|x| x.as_array());
+        assert!(applied.is_some(), "{uri} missing filters_applied: {v}");
+    }
+
+    // Wrapped array endpoints: { items, filters_applied }.
+    let wrapped_endpoints = [
+        "/api/genai/cost_series",
+        "/api/genai/top_spans",
+        "/api/genai/top_sessions",
+        "/api/genai/top_conversations",
+        "/api/genai/finish_reasons",
+        "/api/genai/latency_stats",
+        "/api/genai/error_rate",
+        "/api/genai/tool_usage",
+        "/api/genai/truncation_rate",
+        "/api/genai/latency_series",
+        "/api/genai/calls_series",
+        "/api/genai/latency_by_context",
+        "/api/genai/error_types",
+        "/api/genai/model_drift",
+        "/api/genai/stop_reasons",
+        "/api/genai/context_type_split",
+        "/api/genai/tool_errors",
+        "/api/genai/hour_of_day",
+        "/api/genai/agent_framework_defs",
+    ];
+    for uri in wrapped_endpoints {
+        let (status, v) = get_json(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(v.get("items").is_some(), "{uri} missing items: {v}");
+        let applied = v.get("filters_applied").and_then(|x| x.as_array());
+        assert!(applied.is_some(), "{uri} missing filters_applied: {v}");
+    }
+
+    // Sessions list + costs
+    for uri in ["/api/sessions", "/api/sessions/costs"] {
+        let (status, v) = get_json(&app, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(
+            v.get("filters_applied")
+                .and_then(|x| x.as_array())
+                .is_some(),
+            "{uri} missing filters_applied: {v}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_filter_params_accepted_never_400() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    // All five params at once, including an unknown agent family: 200, and
+    // the unknown family is not echoed as applied.
+    let uri = "/api/genai/top_spans?agent=made-up-agent&model=x&provider=y&project=p&session=s";
+    let (status, v) = get_json(&app, uri).await;
+    assert_eq!(status, StatusCode::OK, "unknown agent must not 400");
+    let applied: Vec<String> = v["filters_applied"]
+        .as_array()
+        .cloned()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert!(!applied.iter().any(|d| d == "agent"), "{applied:?}");
+    for dim in ["model", "provider", "project", "session"] {
+        assert!(applied.iter().any(|d| d == dim), "{applied:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_session_filter_scopes_results() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    // Two claude-family sessions. The session list keys interactions on
+    // spans carrying `gen_ai.*` attributes (see root_llm_span), so both spans
+    // need one.
+    let mut span_a = llm_request_span("a1", "modelA", R0, 100, None);
+    span_a
+        .attributes
+        .insert("gen_ai.request.model".to_string(), "modelA".to_string());
+    storage.write_span(&span_a).await.unwrap();
+    let mut span_b = llm_request_span("b1", "modelB", R0 + 200_000_000, 200, None);
+    span_b
+        .attributes
+        .insert("session.id".to_string(), "s2".to_string());
+    span_b
+        .attributes
+        .insert("gen_ai.request.model".to_string(), "modelB".to_string());
+    storage.write_span(&span_b).await.unwrap();
+
+    let app = server.build_router();
+
+    // Unfiltered: both sessions in the list.
+    let (status, v) = get_json(
+        &app,
+        &format!("/api/sessions?start_time={R0}&end_time={R1}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["sessions"].as_array().unwrap().len(), 2, "{v}");
+
+    // Filtered: only session s1.
+    let (status, v) = get_json(
+        &app,
+        &format!("/api/sessions?start_time={R0}&end_time={R1}&session=s1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let sessions = v["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{v}");
+    assert_eq!(sessions[0]["session_id"], "s1");
+    let applied: Vec<String> = v["filters_applied"]
+        .as_array()
+        .cloned()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert!(applied.iter().any(|d| d == "session"), "{applied:?}");
+}
+
+#[tokio::test]
+async fn test_model_filter_scopes_top_spans() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    storage
+        .write_span(&llm_request_span("sp-a", "modelA", R0, 100, None))
+        .await
+        .unwrap();
+    storage
+        .write_span(&llm_request_span(
+            "sp-b",
+            "modelB",
+            R0 + 500_000_000,
+            200,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+
+    let (status, v) = get_json(
+        &app,
+        &format!("/api/genai/top_spans?start_time={R0}&end_time={R1}&model=modelA"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{v}");
+    assert_eq!(items[0]["span_id"], "sp-a");
+    let applied: Vec<String> = v["filters_applied"]
+        .as_array()
+        .cloned()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert!(applied.iter().any(|d| d == "model"), "{applied:?}");
 }

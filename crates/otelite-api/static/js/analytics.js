@@ -38,8 +38,11 @@ class AnalyticsView {
         this.trWindowHours = 24;
         this.trEnd = now;
         this.trStart = new Date(now.getTime() - this.trWindowHours * 3600000);
-        this.modelFilter = null;
         this.topNSort = 'cost';
+        // Global filter bar state (#135) — persisted in the URL hash query
+        this.filters = parseHashQuery();
+        this.appliedUnion = new Set();
+        this._bar = null;
         // Loader registry — keyed by section id ('cost', 'latency', ...)
         this.sectionLoaders = {};
         // Sections that have rendered their content for the current params.
@@ -74,9 +77,7 @@ class AnalyticsView {
                         <option value="168">7 days</option>
                     </select>
                 </div>
-                <select id="analytics-model-filter" class="filter-select">
-                    <option value="">All models</option>
-                </select>
+                <div id="analytics-filter-bar"></div>
             </div>
             <div id="analytics-pricing-notice"></div>
             <div id="analytics-summary-cards"></div>
@@ -94,10 +95,8 @@ class AnalyticsView {
         this._attachTimeRangeListeners();
         this._attachTipsPanelListener();
         this._syncDateInputs();
-        document.getElementById('analytics-model-filter').addEventListener('change', (e) => {
-            this.modelFilter = e.target.value || null;
-            this._refresh();
-        });
+        this._initFilterBar();
+        this._hookFilterEcho();
 
         this._registerSectionLoaders();
         this._attachSectionToggleHandlers();
@@ -299,7 +298,6 @@ class AnalyticsView {
             params.start_time = this.trStart.getTime() * 1_000_000;
             params.end_time = (this.trEnd || new Date()).getTime() * 1_000_000;
         }
-        if (this.modelFilter) params.model = this.modelFilter;
         return params;
     }
 
@@ -421,13 +419,54 @@ class AnalyticsView {
         set('behavior', `${fmt(requests)} req`);
     }
 
+    _initFilterBar() {
+        const mount = document.getElementById('analytics-filter-bar');
+        if (!mount) return;
+        this.api.globalFilters = this.filters;
+        this._bar = renderFilterBar(mount, this.filters, {
+            onChange: (state) => {
+                this.filters = { ...state };
+                writeHashQuery(this.filters);
+                this._refresh();
+            },
+        });
+        this._bar.grey([...this.appliedUnion]);
+    }
+
+    /**
+     * Record `filters_applied` echoed by each genai response so the bar can
+     * grey out dimensions no loaded endpoint honours (#135).
+     */
+    _hookFilterEcho() {
+        const inner = this.api.get.bind(this.api);
+        this.api.get = async (endpoint, params) => {
+            const result = await inner(endpoint, params);
+            if (this.api.lastFiltersApplied) {
+                for (const d of this.api.lastFiltersApplied) this.appliedUnion.add(d);
+                if (this._bar) this._bar.grey([...this.appliedUnion]);
+            }
+            return result;
+        };
+    }
+
     _populateModelDropdown(byModel) {
-        const sel = document.getElementById('analytics-model-filter');
-        if (!sel) return;
-        const current = this.modelFilter || '';
-        const models = byModel.map(r => r.model).filter(Boolean).sort();
-        sel.innerHTML = '<option value="">All models</option>' +
-            models.map(m => `<option value="${this._esc(m)}"${m === current ? ' selected' : ''}>${this._esc(m)}</option>`).join('');
+        // Rebuild the bar's model select now that we know the models in the
+        // window; provider options come from the by_system breakdown.
+        const mount = document.getElementById('analytics-filter-bar');
+        if (!mount) return;
+        const models = [...new Set(byModel.map(r => r.model).filter(Boolean))].sort();
+        const bySystem = (this.lastSummary && this.lastSummary.by_system) || [];
+        const providers = [...new Set(bySystem.map(r => r.system).filter(Boolean))].sort();
+        this._bar = renderFilterBar(mount, this.filters, {
+            modelOptions: models,
+            providerOptions: providers,
+            onChange: (state) => {
+                this.filters = { ...state };
+                writeHashQuery(this.filters);
+                this._refresh();
+            },
+        });
+        this._bar.grey([...this.appliedUnion]);
     }
 
     // ── Section lazy-loaders ─────────────────────────────────────────────────

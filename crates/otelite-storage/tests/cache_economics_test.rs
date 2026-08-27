@@ -6,6 +6,7 @@
 //! token sums. Savings fields are left unenriched for the API layer.
 
 use otelite_core::api::RoleTokenUsage;
+use otelite_core::filters::GenAiFilters;
 use otelite_storage::sqlite::{reader, schema};
 use rusqlite::Connection;
 
@@ -505,7 +506,8 @@ fn test_cache_hit_rate_original_query_unchanged() {
         },
     );
 
-    let rows = reader::query_cache_hit_rate(&conn, Some(T0), Some(END), None).unwrap();
+    let rows =
+        reader::query_cache_hit_rate(&conn, Some(T0), Some(END), &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     assert_eq!(row.model.as_deref(), Some("k"));
@@ -516,7 +518,16 @@ fn test_cache_hit_rate_original_query_unchanged() {
     assert!((row.hit_rate.unwrap() - 400.0 / 1200.0).abs() < 1e-12);
 
     // Model filter still works.
-    let filtered = reader::query_cache_hit_rate(&conn, Some(T0), Some(END), Some("nope")).unwrap();
+    let filtered = reader::query_cache_hit_rate(
+        &conn,
+        Some(T0),
+        Some(END),
+        &GenAiFilters {
+            model: Some("nope".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(filtered.is_empty());
 }
 

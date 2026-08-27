@@ -14,6 +14,10 @@ class SessionsView {
         this.trEnd = now;
         this.trStart = new Date(now.getTime() - this.trWindowHours * 3600000);
         this.refreshInterval = null;
+        // Global filter bar state (#135) — persisted in the URL hash query
+        this.filters = parseHashQuery();
+        this.appliedUnion = new Set();
+        this._bar = null;
     }
 
     async render() {
@@ -34,6 +38,7 @@ class SessionsView {
                     <button id="sessions-refresh" class="btn btn-secondary btn-sm">Refresh</button>
                 </div>
                 <span class="filter-hint">Click a row to open the Session Report.</span>
+                <div id="sessions-filter-bar" class="filter-bar-row"></div>
             </div>
             <div id="sessions-cost-panel"></div>
             <div id="sessions-list"></div>
@@ -50,7 +55,40 @@ class SessionsView {
 
         document.getElementById('sessions-refresh').addEventListener('click', () => this._loadAndRender());
 
+        this._initFilterBar();
+        this._hookFilterEcho();
+
         await this._loadAndRender();
+    }
+
+    _initFilterBar() {
+        const mount = document.getElementById('sessions-filter-bar');
+        if (!mount) return;
+        this.api.globalFilters = this.filters;
+        this._bar = renderFilterBar(mount, this.filters, {
+            onChange: (state) => {
+                this.filters = { ...state };
+                writeHashQuery(this.filters);
+                this._loadAndRender();
+            },
+        });
+        this._bar.grey([...this.appliedUnion]);
+    }
+
+    /**
+     * Record `filters_applied` echoed by each genai/sessions response so the
+     * bar can grey out dimensions no loaded endpoint honours (#135).
+     */
+    _hookFilterEcho() {
+        const inner = this.api.get.bind(this.api);
+        this.api.get = async (endpoint, params) => {
+            const result = await inner(endpoint, params);
+            if (this.api.lastFiltersApplied) {
+                for (const d of this.api.lastFiltersApplied) this.appliedUnion.add(d);
+                if (this._bar) this._bar.grey([...this.appliedUnion]);
+            }
+            return result;
+        };
     }
 
     async _loadAndRender() {

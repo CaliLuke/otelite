@@ -467,6 +467,9 @@ pub struct TokenUsageResponse {
     pub by_model: Vec<ModelUsage>,
     /// Token usage grouped by system (provider)
     pub by_system: Vec<SystemUsage>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Overall token usage summary
@@ -748,6 +751,9 @@ pub struct GenAiCapabilityResponse {
     pub duplicate_span_count: usize,
     /// Older physical spans were excluded by the bounded most-recent sample.
     pub truncated: bool,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Error-rate summary for LLM spans grouped by model.
@@ -784,6 +790,9 @@ pub struct RetryStats {
     pub extra_attempts: usize,
     /// Fraction in the range 0.0..1.0.
     pub retry_rate: f64,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Retrieval / RAG statistics aggregated across retriever spans.
@@ -795,6 +804,9 @@ pub struct RetrievalStats {
     /// None when no retrieval span emitted a document score.
     pub avg_top_document_score: Option<f64>,
     pub top_queries: Vec<TopRetrievalQuery>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// A single grouped retrieval query with aggregate stats.
@@ -928,6 +940,9 @@ pub struct ReasoningEffortEntry {
 pub struct ReasoningShareResponse {
     pub models: Vec<ReasoningShareByModel>,
     pub effort: Vec<ReasoningEffortEntry>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Token usage for one agent harness, all five categories.
@@ -1003,6 +1018,9 @@ pub struct AgentRollup {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AgentRollupResponse {
     pub agents: Vec<AgentRollup>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Storage-layer per-agent rollup: token detail per model (the API layer
@@ -1139,6 +1157,9 @@ pub struct ProjectRollup {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ProjectRollupResponse {
     pub projects: Vec<ProjectRollup>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Storage-layer per-project rollup. Not a wire type — see
@@ -1277,6 +1298,9 @@ pub struct SessionCostResponse {
     /// The outlier formula, stated for consumers: a session is anomalous
     /// when its cost exceeds three times the median session cost.
     pub anomaly_rule: String,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// One log-spaced cost bucket of the per-session cost distribution.
@@ -1335,6 +1359,9 @@ pub struct DistributionResponse {
     /// None when the window has no values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<DistributionStats>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Session header for the session context endpoint (issue #134).
@@ -1434,6 +1461,9 @@ pub struct SessionContextResponse {
     /// Spans and logs merged, ascending by ts, capped at `limit`.
     #[serde(default)]
     pub timeline: Vec<SessionContextTimelineEvent>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Storage-layer per-session cost: token detail per model (the API layer
@@ -1523,6 +1553,9 @@ pub struct AgentRolesResponse {
     /// Agents whose telemetry this analysis covers. Claude Code and Codex do
     /// not emit a role label today, so this is currently `["opencode"]`.
     pub agents_covered: Vec<String>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// One model row inside a provider mix entry. `cost_usd` is estimated from
@@ -1576,6 +1609,9 @@ pub struct ProviderMixResponse {
     pub providers: Vec<ProviderMixEntry>,
     /// Total tokens across all providers (the denominator of share_pct).
     pub total_tokens: u64,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Distribution of `gen_ai.request.temperature` values across LLM calls.
@@ -1602,6 +1638,9 @@ pub struct MaxTokensBucket {
 pub struct RequestParamProfile {
     pub temperature_buckets: Vec<TemperatureBucket>,
     pub max_tokens_buckets: Vec<MaxTokensBucket>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Turn-count distribution across all observed conversations.
@@ -1613,6 +1652,9 @@ pub struct ConversationDepthStats {
     pub p50_turns: i64,
     pub p95_turns: i64,
     pub p99_turns: i64,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Single time-bucket latency point, grouped by model (LLM mode) or span name (all-spans mode).
@@ -1697,6 +1739,9 @@ pub struct LatencyPercentileSeries {
 pub struct LatencyPercentilesResponse {
     #[serde(default)]
     pub metrics: std::collections::BTreeMap<String, LatencyPercentileSeries>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// LLM latency broken down by input-token context size bin.
@@ -1849,6 +1894,13 @@ pub struct SessionSummary {
     pub first_seen_ns: i64,
     /// Last interaction start time (epoch ns).
     pub last_seen_ns: i64,
+    /// Project ids observed in this session (opencode data only).
+    pub projects: Vec<String>,
+    /// Provider identifiers observed in this session (gen_ai.system /
+    /// gen_ai.provider.name / llm.provider).
+    pub providers: Vec<String>,
+    /// Agent families observed in this session: claude / opencode / codex.
+    pub agent_families: Vec<String>,
 }
 
 /// Wrapper for paginated session lists from GET /api/sessions.
@@ -1857,6 +1909,9 @@ pub struct SessionSummary {
 pub struct SessionListResponse {
     pub sessions: Vec<SessionSummary>,
     pub total: usize,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// Summary counts for tool approval events (claude_code.tool.blocked_on_user spans).
@@ -1875,6 +1930,9 @@ pub struct ToolApprovalStats {
     pub total: usize,
     /// Top tools that were explicitly rejected (tool_name + count).
     pub top_rejected: Vec<ToolApprovalEntry>,
+    /// Filter dimensions the endpoint actually applied (global filter bar,
+    /// #135). Empty when the endpoint accepts but does not apply filters.
+    pub filters_applied: Vec<String>,
 }
 
 /// A single tool name with a count, used in approval stats.

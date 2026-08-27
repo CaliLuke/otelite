@@ -8,18 +8,48 @@ const API_BASE = '/api';
 class ApiClient {
     constructor() {
         this.baseUrl = API_BASE;
+        // Global filter bar state (#135): { agent, model, provider, project, session }.
+        // Injected into every genai/sessions list call; endpoints echo back
+        // the subset they applied in `filters_applied`.
+        this.globalFilters = {};
+        // Last `filters_applied` seen on a genai/sessions response (union
+        // bookkeeping lives in the view).
+        this.lastFiltersApplied = null;
     }
+
+    /**
+     * Endpoints whose array payload is wrapped in { items, filters_applied } (#135)
+     */
+    static WRAPPED_ENDPOINTS = new Set([
+        '/genai/cost_series', '/genai/top_spans', '/genai/top_sessions',
+        '/genai/top_conversations', '/genai/finish_reasons', '/genai/latency_stats',
+        '/genai/error_rate', '/genai/tool_usage', '/genai/truncation_rate',
+        '/genai/latency_series', '/genai/calls_series', '/genai/latency_by_context',
+        '/genai/error_types', '/genai/model_drift', '/genai/stop_reasons',
+        '/genai/context_type_split', '/genai/tool_errors', '/genai/hour_of_day',
+        '/genai/agent_framework_defs',
+    ]);
 
     /**
      * Make a GET request
      */
     async get(endpoint, params = {}) {
+        // Merge the global filter bar into genai + sessions endpoints;
+        // every one of them accepts the five params (unsupported ones are
+        // ignored server-side, never a 400).
+        let merged = params;
+        const isFiltered = endpoint.startsWith('/genai/') ||
+            endpoint === '/sessions' || endpoint === '/sessions/costs';
+        if (isFiltered) {
+            merged = { ...this.globalFilters, ...params };
+        }
+
         const url = new URL(`${this.baseUrl}${endpoint}`, window.location.origin);
 
         // Add query parameters
-        Object.keys(params).forEach(key => {
-            if (params[key] !== null && params[key] !== undefined) {
-                url.searchParams.append(key, params[key]);
+        Object.keys(merged).forEach(key => {
+            if (merged[key] !== null && merged[key] !== undefined) {
+                url.searchParams.append(key, merged[key]);
             }
         });
 
@@ -35,7 +65,16 @@ class ApiClient {
                 throw new Error(`HTTP ${response.status}: ${detail}`);
             }
 
-            return await response.json();
+            const body = await response.json();
+
+            // #135: wrapped array endpoints carry { items, filters_applied }
+            this.lastFiltersApplied =
+                (body && Array.isArray(body.filters_applied)) ? body.filters_applied : null;
+            if (ApiClient.WRAPPED_ENDPOINTS.has(endpoint) &&
+                body && Array.isArray(body.items)) {
+                return body.items;
+            }
+            return body;
         } catch (error) {
             console.error('API GET failed:', endpoint, error);
             throw error;

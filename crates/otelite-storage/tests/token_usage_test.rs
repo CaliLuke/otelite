@@ -1,5 +1,6 @@
 //! Tests for token usage query functionality
 
+use otelite_core::filters::GenAiFilters;
 use otelite_storage::sqlite::{reader, schema};
 use rusqlite::Connection;
 
@@ -13,7 +14,7 @@ fn setup_test_db() -> Connection {
 fn test_query_token_usage_empty() {
     let conn = setup_test_db();
     let (summary, by_model, by_system) =
-        reader::query_token_usage(&conn, None, None, None).unwrap();
+        reader::query_token_usage(&conn, None, None, &GenAiFilters::default()).unwrap();
 
     assert_eq!(summary.total_input_tokens, 0);
     assert_eq!(summary.total_output_tokens, 0);
@@ -57,7 +58,7 @@ fn test_query_token_usage_with_data() {
     .unwrap();
 
     let (summary, by_model, by_system) =
-        reader::query_token_usage(&conn, None, None, None).unwrap();
+        reader::query_token_usage(&conn, None, None, &GenAiFilters::default()).unwrap();
 
     // Check summary
     assert_eq!(summary.total_input_tokens, 4500); // 1000 + 2000 + 1500
@@ -114,7 +115,7 @@ fn test_query_token_usage_with_time_filter() {
 
     // Query with time filter (only first span)
     let (summary, by_model, _) =
-        reader::query_token_usage(&conn, Some(0), Some(3000), None).unwrap();
+        reader::query_token_usage(&conn, Some(0), Some(3000), &GenAiFilters::default()).unwrap();
 
     assert_eq!(summary.total_input_tokens, 1000);
     assert_eq!(summary.total_output_tokens, 500);
@@ -148,7 +149,7 @@ fn test_query_token_usage_ignores_non_genai_spans() {
     .unwrap();
 
     let (summary, by_model, by_system) =
-        reader::query_token_usage(&conn, None, None, None).unwrap();
+        reader::query_token_usage(&conn, None, None, &GenAiFilters::default()).unwrap();
 
     // Should only count the GenAI span
     assert_eq!(summary.total_input_tokens, 1000);
@@ -173,7 +174,7 @@ fn test_query_token_usage_handles_missing_token_fields() {
     .unwrap();
 
     let (summary, by_model, _by_system) =
-        reader::query_token_usage(&conn, None, None, None).unwrap();
+        reader::query_token_usage(&conn, None, None, &GenAiFilters::default()).unwrap();
 
     // Should handle missing fields gracefully (COALESCE to 0)
     assert_eq!(summary.total_input_tokens, 0);
@@ -204,7 +205,16 @@ fn test_output_context_ratio_includes_cache_tokens() {
     )
     .unwrap();
 
-    let stats = reader::query_latency_stats(&conn, None, None, Some("cached-model")).unwrap();
+    let stats = reader::query_latency_stats(
+        &conn,
+        None,
+        None,
+        &GenAiFilters {
+            model: Some("cached-model".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].output_input_ratio_p50, Some(0.05));
     assert_eq!(stats[0].output_input_ratio_p95, Some(0.05));
@@ -213,6 +223,7 @@ fn test_output_context_ratio_includes_cache_tokens() {
         &conn,
         None,
         None,
+        &GenAiFilters::default(),
         10,
         otelite_core::api::TopSpanSort::OutputInputRatio,
         false,
@@ -260,7 +271,7 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     .unwrap();
 
     let (summary, by_model, by_system) =
-        reader::query_token_usage(&conn, None, None, None).unwrap();
+        reader::query_token_usage(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(summary.total_requests, 1);
     assert_eq!(summary.total_input_tokens, 100);
     assert_eq!(summary.total_output_tokens, 40);
@@ -280,7 +291,7 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     assert_eq!(by_system.len(), 1);
     assert_eq!(by_system[0].system, "opencode-go");
 
-    let latency = reader::query_latency_stats(&conn, None, None, None).unwrap();
+    let latency = reader::query_latency_stats(&conn, None, None, &GenAiFilters::default()).unwrap();
     let codex_latency = latency
         .iter()
         .find(|row| row.model.as_deref() == Some("codex-test-model"))
@@ -291,21 +302,31 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
     assert_eq!(codex_latency.derived_tokens_per_sec_p50, None);
     assert_eq!(codex_latency.output_input_ratio_p50, None);
 
-    let series = reader::query_latency_series(&conn, None, None, 3600, None, false).unwrap();
+    let series =
+        reader::query_latency_series(&conn, None, None, 3600, &GenAiFilters::default(), false)
+            .unwrap();
     assert_eq!(series.len(), 2);
     assert!(series.iter().any(|row| {
         row.model.as_deref() == Some("codex-test-model") && row.count == 1 && row.avg_ms == 4000.0
     }));
 
-    let calls = reader::query_calls_series(&conn, None, None, 3600, false).unwrap();
+    let calls =
+        reader::query_calls_series(&conn, None, None, &GenAiFilters::default(), 3600, false)
+            .unwrap();
     assert!(calls
         .iter()
         .any(|row| { row.model.as_deref() == Some("codex-test-model") && row.requests == 1 }));
 
     // Codex does not emit usage attributes, so it must not appear in cost
     // analytics as a fabricated zero-cost request.
-    let cost_series =
-        reader::query_cost_series(&conn, None, None, 3600 * 1_000_000_000, None).unwrap();
+    let cost_series = reader::query_cost_series(
+        &conn,
+        None,
+        None,
+        3600 * 1_000_000_000,
+        &GenAiFilters::default(),
+    )
+    .unwrap();
     assert_eq!(cost_series.len(), 1);
     assert_eq!(cost_series[0].model.as_deref(), Some("opencode-test-model"));
 
@@ -313,6 +334,7 @@ fn test_analytics_adapters_select_codex_requests_and_opencode_llm_calls() {
         &conn,
         None,
         None,
+        &GenAiFilters::default(),
         10,
         otelite_core::api::TopSpanSort::TotalTokens,
         false,
@@ -347,7 +369,8 @@ fn test_genai_capability_report_keeps_codex_usage_unavailable_and_deduplicates_s
     )
     .unwrap();
 
-    let report = reader::query_genai_capabilities(&conn, None, None, None).unwrap();
+    let report =
+        reader::query_genai_capabilities(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(report.canonical_span_count, 2);
     assert_eq!(report.duplicate_span_count, 1);
     let codex = report
@@ -405,7 +428,7 @@ fn test_latency_stats_normalizes_ttft_and_flags_degenerate_groups() {
     )
     .unwrap();
 
-    let stats = reader::query_latency_stats(&conn, None, None, None).unwrap();
+    let stats = reader::query_latency_stats(&conn, None, None, &GenAiFilters::default()).unwrap();
     let buffered = stats
         .iter()
         .find(|row| row.model.as_deref() == Some("buffered-model"))
@@ -429,7 +452,9 @@ fn test_latency_stats_normalizes_ttft_and_flags_degenerate_groups() {
     assert_eq!(invalid.ttft_count, 0);
     assert_eq!(invalid.ttft_invalid_count, 1);
 
-    let series = reader::query_latency_series(&conn, None, None, 3600, None, false).unwrap();
+    let series =
+        reader::query_latency_series(&conn, None, None, 3600, &GenAiFilters::default(), false)
+            .unwrap();
     let buffered_series = series
         .iter()
         .find(|row| row.model.as_deref() == Some("buffered-model"))
@@ -438,7 +463,8 @@ fn test_latency_stats_normalizes_ttft_and_flags_degenerate_groups() {
     assert_eq!(buffered_series.ttft_degenerate_count, 10);
     assert!(buffered_series.ttft_degenerate);
 
-    let context = reader::query_latency_by_context(&conn, None, None, None).unwrap();
+    let context =
+        reader::query_latency_by_context(&conn, None, None, &GenAiFilters::default()).unwrap();
     let buffered_context = context
         .iter()
         .find(|row| row.model.as_deref() == Some("buffered-model"))

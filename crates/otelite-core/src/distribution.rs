@@ -86,6 +86,7 @@ pub fn build(
         scale: scale.to_string(),
         buckets: bin_values(&values, buckets, scale),
         stats: summarize(&values),
+        filters_applied: Vec::new(),
     }
 }
 

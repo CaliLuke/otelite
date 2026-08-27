@@ -3377,3 +3377,26 @@ body {
     color: var(--muted-color, #8b8b9e);
 }
 .rs-effort { margin-top: 10px; max-width: 420px; }
+
+/* ── Global filter bar (#135) ─────────────────────────────────────────── */
+.filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+.filter-bar-row {
+    margin-top: 0.5rem;
+}
+.filter-bar .filter-select,
+.filter-bar .filter-input {
+    min-width: 120px;
+    max-width: 220px;
+}
+.filter-bar .fb-inactive {
+    opacity: 0.45;
+}
+.filter-bar .fb-inactive::placeholder {
+    opacity: 0.8;
+}

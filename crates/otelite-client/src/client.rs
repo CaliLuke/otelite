@@ -1192,7 +1192,7 @@ mod tests {
             .match_query(mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"total":10,"auto_accepted":8,"user_accepted":1,"rejected":1,"unknown":0,"top_rejected":[]}"#)
+            .with_body(r#"{"total":10,"auto_accepted":8,"user_accepted":1,"rejected":1,"unknown":0,"top_rejected":[],"filters_applied":["agent","model","provider","project","session"]}"#)
             .create_async()
             .await;
 
@@ -1322,7 +1322,8 @@ mod tests {
                     "reports": [],
                     "canonical_span_count": 0,
                     "duplicate_span_count": 0,
-                    "truncated": false
+                    "truncated": false,
+                    "filters_applied": ["agent", "model", "provider", "project", "session"]
                 }"#,
             )
             .create_async()
@@ -1427,5 +1428,32 @@ mod tests {
             Error::ApiError(msg) => assert!(msg.contains("500")),
             _ => panic!("Expected ApiError"),
         }
+    }
+    #[tokio::test]
+    async fn test_fetch_tool_approvals_echoes_filters_applied() {
+        // #135: every genai endpoint echoes the filter dimensions it applied;
+        // unsupported params are ignored, never a 400.
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/tool_approvals")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "agent".to_string(),
+                "opencode".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"total":0,"auto_accepted":0,"user_accepted":0,"rejected":0,"unknown":0,"top_rejected":[],"filters_applied":[]}"#)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client
+            .fetch_tool_approvals(vec![("agent", "opencode".to_string())])
+            .await;
+
+        mock.assert_async().await;
+        let stats = result.unwrap();
+        // rollup endpoint: the bar's dimensions aren't applied
+        assert_eq!(stats.filters_applied, Vec::<String>::new());
     }
 }

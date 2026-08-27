@@ -11,6 +11,7 @@ use otelite_core::api::{
     ErrorResponse, SessionContextGrowth, SessionDiagnoseResponse, SessionInteraction,
     SessionListResponse, SessionSummary,
 };
+use otelite_core::filters::{GenAiFilters, FILTER_DIMENSIONS};
 use otelite_core::query::{Operator, QueryPredicate, QueryValue};
 use otelite_core::storage::QueryParams;
 use otelite_core::telemetry::trace::StatusCode as SpanStatusCode;
@@ -255,6 +256,16 @@ pub struct SessionListQuery {
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
     pub limit: Option<usize>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// GET /api/sessions
@@ -306,12 +317,53 @@ pub async fn list_sessions(
 
     for (session_id, by_trace) in by_session {
         let mut models: BTreeSet<String> = BTreeSet::new();
+        let mut projects: BTreeSet<String> = BTreeSet::new();
+        let mut providers: BTreeSet<String> = BTreeSet::new();
+        let mut families: BTreeSet<String> = BTreeSet::new();
         let mut interaction_count = 0usize;
         let mut total_input: u64 = 0;
         let mut total_output: u64 = 0;
         let mut error_count = 0usize;
         let mut first_seen_ns = i64::MAX;
         let mut last_seen_ns = i64::MIN;
+
+        // Filter-bar dimensions collected from the session's spans:
+        // opencode carries project.id; provider is gen_ai.system (claude)
+        // or gen_ai.provider.name / llm.provider (opencode); the agent
+        // family is derived from span name / scope exactly like the
+        // storage-layer filter predicates.
+        for spans in by_trace.values() {
+            for s in spans {
+                if let Some(p) = s.attributes.get("project.id") {
+                    if !p.is_empty() {
+                        projects.insert(p.clone());
+                    }
+                }
+                for key in ["gen_ai.system", "gen_ai.provider.name", "llm.provider"] {
+                    if let Some(v) = s.attributes.get(key) {
+                        if !v.is_empty() {
+                            providers.insert(v.clone());
+                        }
+                    }
+                }
+                let scope = s
+                    .attributes
+                    .get("otel.scope.name")
+                    .cloned()
+                    .unwrap_or_default();
+                if s.name.starts_with("claude_code.")
+                    || scope.starts_with("com.anthropic.claude_code")
+                {
+                    families.insert("claude".to_string());
+                }
+                if s.name.starts_with("opencode.") || scope == "com.opencode" {
+                    families.insert("opencode".to_string());
+                }
+                if scope == "codex_cli_rs" {
+                    families.insert("codex".to_string());
+                }
+            }
+        }
 
         for (_trace_id, spans) in by_trace {
             let root = match root_llm_span(&spans) {
@@ -381,6 +433,9 @@ pub async fn list_sessions(
         summaries.push(SessionSummary {
             session_id,
             models: models.into_iter().collect(),
+            projects: projects.into_iter().collect(),
+            providers: providers.into_iter().collect(),
+            agent_families: families.into_iter().collect(),
             interaction_count,
             total_input_tokens: total_input,
             total_output_tokens: total_output,
@@ -390,14 +445,41 @@ pub async fn list_sessions(
         });
     }
 
+    // Apply the global filter bar in memory (#135): the list is built from
+    // span attributes, so all five dimensions are addressable.
+    if let Some(ref agent) = params.agent {
+        summaries.retain(|s| s.agent_families.iter().any(|f| f == agent));
+    }
+    if let Some(ref model) = params.model {
+        summaries.retain(|s| s.models.iter().any(|m| m == model));
+    }
+    if let Some(ref provider) = params.provider {
+        summaries.retain(|s| s.providers.iter().any(|p| p == provider));
+    }
+    if let Some(ref project) = params.project {
+        summaries.retain(|s| s.projects.iter().any(|p| p == project));
+    }
+    if let Some(ref session) = params.session {
+        summaries.retain(|s| s.session_id == *session);
+    }
+
     // Sort newest-first by last_seen, then truncate.
     summaries.sort_by_key(|s| std::cmp::Reverse(s.last_seen_ns));
     let total = summaries.len();
     summaries.truncate(limit);
 
+    let filters = GenAiFilters {
+        agent: params.agent.clone(),
+        model: params.model.clone(),
+        provider: params.provider.clone(),
+        project: params.project.clone(),
+        session: params.session.clone(),
+    };
+
     Ok(Json(SessionListResponse {
         sessions: summaries,
         total,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
     }))
 }
 
@@ -458,6 +540,9 @@ pub async fn get_session_costs(
         sessions,
         median_cost_usd: median,
         anomaly_rule: session_cost::ANOMALY_RULE.to_string(),
+        // Per-session costs come from opencode counters + claude token
+        // pricing; the bar's dimensions aren't addressable across both.
+        filters_applied: Vec::new(),
     }))
 }
 

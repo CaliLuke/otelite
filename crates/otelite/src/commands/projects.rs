@@ -39,7 +39,10 @@ impl ProjectsCommand {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.project_id.cmp(&b.project_id))
         });
-        let response = ProjectRollupResponse { projects };
+        let response = ProjectRollupResponse {
+            projects,
+            filters_applied: Vec::new(),
+        };
 
         use crate::config::OutputFormat;
         match format {

@@ -74,6 +74,7 @@ impl SessionsCommand {
                     sessions,
                     median_cost_usd: median,
                     anomaly_rule: session_cost::ANOMALY_RULE.to_string(),
+                    filters_applied: Vec::new(),
                 };
                 match format {
                     crate::config::OutputFormat::Json

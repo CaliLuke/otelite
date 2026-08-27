@@ -40,7 +40,10 @@ impl AgentsCommand {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.agent.cmp(&b.agent))
         });
-        let response = AgentRollupResponse { agents };
+        let response = AgentRollupResponse {
+            agents,
+            filters_applied: Vec::new(),
+        };
 
         use crate::config::OutputFormat;
         match format {

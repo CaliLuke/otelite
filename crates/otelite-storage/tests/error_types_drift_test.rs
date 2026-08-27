@@ -1,5 +1,6 @@
 //! Tests for query_error_types and query_model_drift
 
+use otelite_core::filters::GenAiFilters;
 use otelite_storage::sqlite::{reader, schema};
 use rusqlite::Connection;
 
@@ -26,7 +27,7 @@ fn insert_llm_span(conn: &Connection, span_id: &str, status_code: i64, attribute
 #[test]
 fn test_query_error_types_empty() {
     let conn = setup_test_db();
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert!(rows.is_empty());
 }
 
@@ -39,7 +40,7 @@ fn test_query_error_types_no_errors_when_all_ok() {
         1,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4"}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert!(rows.is_empty(), "OK spans should not appear in error_types");
 }
 
@@ -52,7 +53,7 @@ fn test_query_error_types_rate_limit_bucket() {
         2,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4","error.type":"RateLimitError"}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].bucket, "rate_limit");
     assert_eq!(rows[0].error_type, "RateLimitError");
@@ -68,7 +69,7 @@ fn test_query_error_types_http_429_bucket() {
         2,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4","http.response.status_code":429}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].bucket, "rate_limit");
 }
@@ -82,7 +83,7 @@ fn test_query_error_types_timeout_bucket() {
         2,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4","error.type":"TimeoutError"}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].bucket, "timeout");
 }
@@ -96,7 +97,7 @@ fn test_query_error_types_server_error_bucket() {
         2,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4","http.response.status_code":500}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].bucket, "server_error");
 }
@@ -110,7 +111,7 @@ fn test_query_error_types_unknown_bucket_fallback() {
         2,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4","error.type":"SomeWeirdError"}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].bucket, "unknown");
     assert_eq!(rows[0].error_type, "SomeWeirdError");
@@ -135,7 +136,7 @@ fn test_query_error_types_multiple_buckets_sorted_by_count() {
         2,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4","error.type":"TimeoutError"}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, None).unwrap();
+    let rows = reader::query_error_types(&conn, None, None, &GenAiFilters::default()).unwrap();
     // rate_limit (count=3) should come before timeout (count=1)
     assert!(rows[0].count >= rows[1].count);
     let buckets: Vec<&str> = rows.iter().map(|r| r.bucket.as_str()).collect();
@@ -158,7 +159,16 @@ fn test_query_error_types_filters_by_model() {
         2,
         r#"{"gen_ai.system":"anthropic","gen_ai.request.model":"claude-sonnet-4","error.type":"RateLimitError"}"#,
     );
-    let rows = reader::query_error_types(&conn, None, None, Some("gpt-4")).unwrap();
+    let rows = reader::query_error_types(
+        &conn,
+        None,
+        None,
+        &GenAiFilters {
+            model: Some("gpt-4".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].model.as_deref(), Some("gpt-4"));
 }
@@ -168,7 +178,7 @@ fn test_query_error_types_filters_by_model() {
 #[test]
 fn test_query_model_drift_empty() {
     let conn = setup_test_db();
-    let rows = reader::query_model_drift(&conn, None, None).unwrap();
+    let rows = reader::query_model_drift(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert!(rows.is_empty());
 }
 
@@ -182,7 +192,7 @@ fn test_query_model_drift_no_response_model() {
         1,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4"}"#,
     );
-    let rows = reader::query_model_drift(&conn, None, None).unwrap();
+    let rows = reader::query_model_drift(&conn, None, None, &GenAiFilters::default()).unwrap();
     // Row exists (request_model not null) but differs = false
     let drifted: Vec<_> = rows.iter().filter(|r| r.differs).collect();
     assert!(drifted.is_empty());
@@ -197,7 +207,7 @@ fn test_query_model_drift_matching_models_no_drift() {
         1,
         r#"{"gen_ai.system":"openai","gen_ai.request.model":"gpt-4","gen_ai.response.model":"gpt-4"}"#,
     );
-    let rows = reader::query_model_drift(&conn, None, None).unwrap();
+    let rows = reader::query_model_drift(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].differs);
 }
@@ -211,7 +221,7 @@ fn test_query_model_drift_differing_models_detected() {
         1,
         r#"{"gen_ai.system":"anthropic","gen_ai.request.model":"claude-3-5-sonnet","gen_ai.response.model":"claude-3-5-sonnet-20241022"}"#,
     );
-    let rows = reader::query_model_drift(&conn, None, None).unwrap();
+    let rows = reader::query_model_drift(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(
         rows[0].differs,
@@ -236,7 +246,7 @@ fn test_query_model_drift_groups_identical_pairs() {
             r#"{"gen_ai.system":"anthropic","gen_ai.request.model":"claude-3-5-sonnet","gen_ai.response.model":"claude-3-5-sonnet-20241022"}"#,
         );
     }
-    let rows = reader::query_model_drift(&conn, None, None).unwrap();
+    let rows = reader::query_model_drift(&conn, None, None, &GenAiFilters::default()).unwrap();
     assert_eq!(rows.len(), 1, "Identical pairs should be grouped");
     assert_eq!(rows[0].count, 2);
 }

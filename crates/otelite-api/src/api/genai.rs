@@ -7,17 +7,49 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    AgentRolesResponse, AgentRollup, AgentRollupResponse, CallsSeriesPoint, ContextTypeSplit,
-    ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse,
-    ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket,
-    LatencyByContextBin, LatencyPercentilesResponse, LatencySeriesPoint, LatencyStats,
-    ModelDriftPair, ProjectRollupResponse, ProviderMixResponse, ReasoningShareResponse,
-    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, StopReasonCount,
-    TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    AgentRolesResponse, AgentRollup, AgentRollupResponse, ConversationCostRow,
+    ConversationDepthStats, CostSeriesPoint, ErrorResponse, GenAiCapabilityResponse,
+    LatencyPercentilesResponse, ProjectRollupResponse, ProviderMixResponse, ReasoningShareResponse,
+    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, TokenUsageResponse,
+    ToolApprovalStats, TopSpan, TopSpanSort,
 };
+use otelite_core::filters::{GenAiFilters, FILTER_DIMENSIONS};
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
+
+/// Every GenAI endpoint accepts the five filter-bar dimensions as query
+/// params (#135); each endpoint applies the subset it genuinely supports
+/// and echoes that set back as `filters_applied`. Unsupported params are
+/// ignored — never a 400.
+/// Build a `GenAiFilters` from a query struct carrying the five filter
+/// fields.
+macro_rules! genai_filter_impl {
+    ($t:ident) => {
+        impl $t {
+            /// Build the effective filter set from this query (borrowing —
+            /// the handler still needs the raw query fields).
+            fn filters(&self) -> GenAiFilters {
+                GenAiFilters {
+                    agent: self.agent.clone(),
+                    model: self.model.clone(),
+                    provider: self.provider.clone(),
+                    project: self.project.clone(),
+                    session: self.session.clone(),
+                }
+            }
+        }
+    };
+}
+
+/// Wrapper for array-shaped GenAI responses so every endpoint can echo the
+/// filter dimensions it actually applied (`filters_applied`).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GenAiItemsResponse {
+    /// Response items (the same rows the endpoint returned before #135)
+    pub items: serde_json::Value,
+    /// Filter dimensions this endpoint actually applied
+    pub filters_applied: Vec<String>,
+}
 
 /// Enrich a batch of TopSpan rows with computed cost fields.
 fn enrich_top_spans(rows: &mut [TopSpan], db: &PricingDatabase) {
@@ -65,8 +97,16 @@ pub struct TokenUsageQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
-    /// Filter to a specific model name
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get token usage statistics for GenAI/LLM spans
@@ -87,9 +127,10 @@ pub async fn get_token_usage(
     State(state): State<AppState>,
     Query(query): Query<TokenUsageQuery>,
 ) -> Result<Json<TokenUsageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let (summary, by_model, by_system) = state
         .storage
-        .query_token_usage(query.start_time, query.end_time, query.model.as_deref())
+        .query_token_usage(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -105,6 +146,7 @@ pub async fn get_token_usage(
         summary,
         by_model,
         by_system,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
     }))
 }
 
@@ -117,8 +159,16 @@ pub struct CostSeriesQuery {
     pub end_time: Option<i64>,
     /// Bucket size in seconds (defaults to 3600 = 1 hour)
     pub bucket: Option<i64>,
-    /// Filter to a specific model name
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get time-bucketed token usage (cost-over-time)
@@ -130,7 +180,7 @@ pub struct CostSeriesQuery {
     path = "/api/genai/cost_series",
     params(CostSeriesQuery),
     responses(
-        (status = 200, description = "Cost series points", body = Vec<CostSeriesPoint>),
+        (status = 200, description = "Cost series points", body = GenAiItemsResponse),
         (status = 400, description = "Invalid bucket parameter", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
@@ -139,7 +189,7 @@ pub struct CostSeriesQuery {
 pub async fn get_cost_series(
     State(state): State<AppState>,
     Query(query): Query<CostSeriesQuery>,
-) -> Result<Json<Vec<CostSeriesPoint>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let bucket_seconds = query.bucket.unwrap_or(3600);
     if bucket_seconds <= 0 {
         return Err((
@@ -150,15 +200,11 @@ pub async fn get_cost_series(
         ));
     }
     let bucket_ns = bucket_seconds.saturating_mul(1_000_000_000);
+    let filters = query.filters();
 
     let mut series = state
         .storage
-        .query_cost_series(
-            query.start_time,
-            query.end_time,
-            bucket_ns,
-            query.model.as_deref(),
-        )
+        .query_cost_series(query.start_time, query.end_time, bucket_ns, &filters)
         .await
         .map_err(|e| {
             (
@@ -173,7 +219,17 @@ pub async fn get_cost_series(
     let pricing = state.pricing.snapshot().await;
     enrich_cost_series(&mut series, &pricing.db);
 
-    Ok(Json(series))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&series).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize cost series: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Query parameters for top-spans endpoint
@@ -192,6 +248,16 @@ pub struct TopSpansQuery {
     /// When true, return only spans with finish_reason max_tokens or length
     #[serde(default)]
     pub truncated_only: bool,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Query parameters for top-sessions endpoint
@@ -200,6 +266,16 @@ pub struct TopGroupQuery {
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
     pub limit: Option<usize>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get the top-N LLM spans by the requested sort dimension
@@ -208,7 +284,7 @@ pub struct TopGroupQuery {
     path = "/api/genai/top_spans",
     params(TopSpansQuery),
     responses(
-        (status = 200, description = "Top spans", body = Vec<TopSpan>),
+        (status = 200, description = "Top spans", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -216,14 +292,16 @@ pub struct TopGroupQuery {
 pub async fn get_top_spans(
     State(state): State<AppState>,
     Query(query): Query<TopSpansQuery>,
-) -> Result<Json<Vec<TopSpan>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let filters = query.filters();
 
     let mut spans = state
         .storage
         .query_top_spans(
             query.start_time,
             query.end_time,
+            &filters,
             limit,
             query.sort_by,
             query.truncated_only,
@@ -242,7 +320,17 @@ pub async fn get_top_spans(
     let pricing = state.pricing.snapshot().await;
     enrich_top_spans(&mut spans, &pricing.db);
 
-    Ok(Json(spans))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&spans).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize top spans: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 fn enrich_session_rows(rows: &mut [SessionCostRow], db: &PricingDatabase) {
@@ -277,7 +365,7 @@ fn enrich_conversation_rows(rows: &mut [ConversationCostRow], db: &PricingDataba
     path = "/api/genai/top_sessions",
     params(TopGroupQuery),
     responses(
-        (status = 200, description = "Top sessions", body = Vec<SessionCostRow>),
+        (status = 200, description = "Top sessions", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -285,12 +373,13 @@ fn enrich_conversation_rows(rows: &mut [ConversationCostRow], db: &PricingDataba
 pub async fn get_top_sessions(
     State(state): State<AppState>,
     Query(query): Query<TopGroupQuery>,
-) -> Result<Json<Vec<SessionCostRow>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let filters = query.filters();
 
     let mut rows = state
         .storage
-        .query_top_sessions(query.start_time, query.end_time, limit)
+        .query_top_sessions(query.start_time, query.end_time, &filters, limit)
         .await
         .map_err(|e| {
             (
@@ -305,7 +394,17 @@ pub async fn get_top_sessions(
     let pricing = state.pricing.snapshot().await;
     enrich_session_rows(&mut rows, &pricing.db);
 
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize top sessions: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Get the top-N conversations (gen_ai.conversation.id) by total token usage
@@ -314,7 +413,7 @@ pub async fn get_top_sessions(
     path = "/api/genai/top_conversations",
     params(TopGroupQuery),
     responses(
-        (status = 200, description = "Top conversations", body = Vec<ConversationCostRow>),
+        (status = 200, description = "Top conversations", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -322,12 +421,13 @@ pub async fn get_top_sessions(
 pub async fn get_top_conversations(
     State(state): State<AppState>,
     Query(query): Query<TopGroupQuery>,
-) -> Result<Json<Vec<ConversationCostRow>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let filters = query.filters();
 
     let mut rows = state
         .storage
-        .query_top_conversations(query.start_time, query.end_time, limit)
+        .query_top_conversations(query.start_time, query.end_time, &filters, limit)
         .await
         .map_err(|e| {
             (
@@ -342,7 +442,17 @@ pub async fn get_top_conversations(
     let pricing = state.pricing.snapshot().await;
     enrich_conversation_rows(&mut rows, &pricing.db);
 
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize top conversations: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Query parameters for finish-reason distribution endpoint
@@ -352,8 +462,16 @@ pub struct FinishReasonsQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
-    /// Filter to a specific model name
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get the distribution of finish / stop reasons across LLM spans
@@ -365,7 +483,7 @@ pub struct FinishReasonsQuery {
     path = "/api/genai/finish_reasons",
     params(FinishReasonsQuery),
     responses(
-        (status = 200, description = "Finish reason counts", body = Vec<FinishReasonCount>),
+        (status = 200, description = "Finish reason counts", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -373,10 +491,12 @@ pub struct FinishReasonsQuery {
 pub async fn get_finish_reasons(
     State(state): State<AppState>,
     Query(query): Query<FinishReasonsQuery>,
-) -> Result<Json<Vec<FinishReasonCount>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_finish_reasons(query.start_time, query.end_time, query.model.as_deref())
+        .query_finish_reasons(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -388,7 +508,17 @@ pub async fn get_finish_reasons(
             )
         })?;
 
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize finish_reasons: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Query parameters for latency endpoint
@@ -398,8 +528,16 @@ pub struct LatencyQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
-    /// Filter to a specific model name
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Query parameters for the latency percentile endpoint.
@@ -413,6 +551,16 @@ pub struct LatencyPercentileQuery {
     pub bucket_secs: Option<u64>,
     /// Comma-separated metrics: "duration,ttft" (default: both).
     pub metrics: Option<String>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get latency / TTFT percentile statistics per model for LLM spans.
@@ -421,7 +569,7 @@ pub struct LatencyPercentileQuery {
     path = "/api/genai/latency_stats",
     params(LatencyQuery),
     responses(
-        (status = 200, description = "Latency statistics per model", body = Vec<LatencyStats>),
+        (status = 200, description = "Latency statistics per model", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -429,10 +577,12 @@ pub struct LatencyPercentileQuery {
 pub async fn get_latency_stats(
     State(state): State<AppState>,
     Query(query): Query<LatencyQuery>,
-) -> Result<Json<Vec<LatencyStats>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_latency_stats(query.start_time, query.end_time, query.model.as_deref())
+        .query_latency_stats(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -444,7 +594,17 @@ pub async fn get_latency_stats(
             )
         })?;
 
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize latency_stats: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Bucketed p50/p90/p95/p99 latency percentiles by model (issue #132).
@@ -466,6 +626,7 @@ pub async fn get_latency_percentiles(
     State(state): State<AppState>,
     Query(query): Query<LatencyPercentileQuery>,
 ) -> Result<Json<LatencyPercentilesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let bucket_secs = query.bucket_secs.unwrap_or(3600);
     if bucket_secs == 0 {
         return Err((
@@ -502,9 +663,15 @@ pub async fn get_latency_percentiles(
         ));
     }
 
-    let rows = state
+    let mut rows = state
         .storage
-        .query_latency_percentiles(query.start_time, query.end_time, bucket_secs, &metrics)
+        .query_latency_percentiles(
+            query.start_time,
+            query.end_time,
+            &filters,
+            bucket_secs,
+            &metrics,
+        )
         .await
         .map_err(|e| {
             (
@@ -515,6 +682,8 @@ pub async fn get_latency_percentiles(
                 ))),
             )
         })?;
+
+    rows.filters_applied = filters.applied(&FILTER_DIMENSIONS);
 
     Ok(Json(rows))
 }
@@ -532,6 +701,16 @@ pub struct DistributionQuery {
     pub buckets: Option<usize>,
     /// Binning scale: linear | log (default linear).
     pub scale: Option<String>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Generic distribution over a named metric cohort (issue #133). One
@@ -592,6 +771,8 @@ pub async fn get_distributions(
         ));
     }
 
+    let filters = query.filters();
+
     let resp = if query.metric == "session_cost" {
         // Same source as the sessions cost panel (#126): opencode's own cost
         // counter ("actual") plus claude sessions priced from tokens.
@@ -618,6 +799,7 @@ pub async fn get_distributions(
                 &query.metric,
                 query.start_time,
                 query.end_time,
+                &filters,
                 buckets,
                 scale,
             )
@@ -650,9 +832,10 @@ pub async fn get_genai_capabilities(
     State(state): State<AppState>,
     Query(query): Query<ModelAnalyticsQuery>,
 ) -> Result<Json<GenAiCapabilityResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let report = state
+    let filters = query.filters();
+    let mut report = state
         .storage
-        .query_genai_capabilities(query.start_time, query.end_time, query.model.as_deref())
+        .query_genai_capabilities(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -662,6 +845,8 @@ pub async fn get_genai_capabilities(
                 ))),
             )
         })?;
+    report.filters_applied = filters.applied(&FILTER_DIMENSIONS);
+
     Ok(Json(report))
 }
 
@@ -672,8 +857,16 @@ pub struct ErrorRateQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
-    /// Filter to a specific model name
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get error rate per model across LLM spans.
@@ -682,7 +875,7 @@ pub struct ErrorRateQuery {
     path = "/api/genai/error_rate",
     params(ErrorRateQuery),
     responses(
-        (status = 200, description = "Error rate per model", body = Vec<ErrorRateByModel>),
+        (status = 200, description = "Error rate per model", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -690,10 +883,12 @@ pub struct ErrorRateQuery {
 pub async fn get_error_rate(
     State(state): State<AppState>,
     Query(query): Query<ErrorRateQuery>,
-) -> Result<Json<Vec<ErrorRateByModel>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_error_rate(query.start_time, query.end_time, query.model.as_deref())
+        .query_error_rate(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -705,7 +900,17 @@ pub async fn get_error_rate(
             )
         })?;
 
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize error_rate: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Query parameters for tool-usage endpoint
@@ -717,6 +922,16 @@ pub struct ToolUsageQuery {
     pub end_time: Option<i64>,
     /// Maximum number of tools to return (default 20, capped at 100)
     pub limit: Option<usize>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get aggregated per-tool usage for tool-execution spans.
@@ -725,7 +940,7 @@ pub struct ToolUsageQuery {
     path = "/api/genai/tool_usage",
     params(ToolUsageQuery),
     responses(
-        (status = 200, description = "Tool usage aggregates", body = Vec<ToolUsage>),
+        (status = 200, description = "Tool usage aggregates", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -733,12 +948,12 @@ pub struct ToolUsageQuery {
 pub async fn get_tool_usage(
     State(state): State<AppState>,
     Query(query): Query<ToolUsageQuery>,
-) -> Result<Json<Vec<ToolUsage>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
-
+    let filters = query.filters();
     let rows = state
         .storage
-        .query_tool_usage(query.start_time, query.end_time, limit)
+        .query_tool_usage(query.start_time, query.end_time, &filters, limit)
         .await
         .map_err(|e| {
             (
@@ -750,7 +965,17 @@ pub async fn get_tool_usage(
             )
         })?;
 
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize tool_usage: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Query parameters for retry-stats endpoint
@@ -760,6 +985,16 @@ pub struct RetryStatsQuery {
     pub start_time: Option<i64>,
     /// End time (nanoseconds since Unix epoch)
     pub end_time: Option<i64>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get retry statistics across LLM spans.
@@ -768,7 +1003,7 @@ pub struct RetryStatsQuery {
     path = "/api/genai/retry_stats",
     params(RetryStatsQuery),
     responses(
-        (status = 200, description = "Retry statistics", body = RetryStats),
+        (status = 200, description = "Retry statistics", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -777,9 +1012,10 @@ pub async fn get_retry_stats(
     State(state): State<AppState>,
     Query(query): Query<RetryStatsQuery>,
 ) -> Result<Json<RetryStats>, (StatusCode, Json<ErrorResponse>)> {
-    let stats = state
+    let filters = query.filters();
+    let mut stats = state
         .storage
-        .query_retry_stats(query.start_time, query.end_time)
+        .query_retry_stats(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -790,6 +1026,8 @@ pub async fn get_retry_stats(
                 ))),
             )
         })?;
+
+    stats.filters_applied = filters.applied(&FILTER_DIMENSIONS);
 
     Ok(Json(stats))
 }
@@ -803,6 +1041,16 @@ pub struct RetrievalStatsQuery {
     pub end_time: Option<i64>,
     /// Maximum number of top queries to return (default 5, capped at 20)
     pub limit: Option<usize>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Get aggregated retrieval / RAG statistics across retriever spans.
@@ -825,11 +1073,12 @@ pub async fn get_retrieval_stats(
     State(state): State<AppState>,
     Query(query): Query<RetrievalStatsQuery>,
 ) -> Result<Json<RetrievalStats>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let limit = query.limit.unwrap_or(5).clamp(1, 20);
 
-    let stats = state
+    let mut stats = state
         .storage
-        .query_retrieval_stats(query.start_time, query.end_time, limit)
+        .query_retrieval_stats(query.start_time, query.end_time, &filters, limit)
         .await
         .map_err(|e| {
             (
@@ -840,6 +1089,8 @@ pub async fn get_retrieval_stats(
                 ))),
             )
         })?;
+
+    stats.filters_applied = filters.applied(&FILTER_DIMENSIONS);
 
     Ok(Json(stats))
 }
@@ -865,6 +1116,8 @@ pub struct PricingMetadata {
     pub license: &'static str,
     /// User-facing disclaimer text — safe to render inline.
     pub disclaimer: &'static str,
+    /// Filter dimensions the endpoint actually applied (global filter bar, #135)
+    pub filters_applied: Vec<String>,
 }
 
 /// Return the list of agent-framework recognizers (CrewAI, AutoGen, LangGraph).
@@ -879,8 +1132,21 @@ pub struct PricingMetadata {
     tag = "genai"
 )]
 pub async fn get_agent_framework_defs(
-) -> Json<&'static [otelite_core::agent_frameworks::AgentFrameworkRecognizer]> {
-    Json(otelite_core::agent_frameworks::AGENT_FRAMEWORKS)
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let items =
+        serde_json::to_value(otelite_core::agent_frameworks::AGENT_FRAMEWORKS).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize agent framework defs: {e}"
+                ))),
+            )
+        })?;
+    Ok(Json(GenAiItemsResponse {
+        items,
+        // Static reference data — the bar's dimensions don't apply to it.
+        filters_applied: Vec::new(),
+    }))
 }
 
 const PRICING_DISCLAIMER: &str =
@@ -914,6 +1180,7 @@ pub async fn get_pricing_metadata(State(state): State<AppState>) -> Json<Pricing
         source_url: otelite_core::pricing::LITELLM_SOURCE_URL,
         license: otelite_core::pricing::LITELLM_LICENSE,
         disclaimer: PRICING_DISCLAIMER,
+        filters_applied: Vec::new(),
     })
 }
 
@@ -922,7 +1189,16 @@ pub async fn get_pricing_metadata(State(state): State<AppState>) -> Json<Pricing
 pub struct ModelAnalyticsQuery {
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Query parameters for the cache hit rate / cache economics endpoint.
@@ -930,9 +1206,18 @@ pub struct ModelAnalyticsQuery {
 pub struct CacheQuery {
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
-    /// Model filter (only used without `by_model`; the economics payload is
-    /// always per-model).
+    // Filter dimensions: model only applies without `by_model`; the economics
+    // payload is always per-model.
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
     /// Pass `1` (or `true`) to return the cache-economics payload
     /// (per-model read/write split, hit rate, read:write ratio, estimated
     /// savings, plus a time-bucketed series). Without it, the original
@@ -952,6 +1237,16 @@ pub struct TimeSeriesQuery {
     pub bucket_secs: Option<u64>,
     /// Span filter: "llm" (default) = LLM spans only; "all" = all OTel spans grouped by name.
     pub span_filter: Option<String>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Query parameters for time-series endpoints that also accept a model filter.
@@ -962,7 +1257,16 @@ pub struct ModelTimeSeriesQuery {
     /// Bucket size in seconds (default 3600 = 1 hour).
     pub bucket_secs: Option<u64>,
     /// Optional model filter (e.g. "claude-opus-4-7").
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
     pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
     /// Span filter: "llm" (default) = LLM spans only; "all" = all OTel spans grouped by name.
     pub span_filter: Option<String>,
 }
@@ -972,6 +1276,16 @@ pub struct ModelTimeSeriesQuery {
 pub struct TimeRangeQuery {
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
+    /// Agent family filter: `claude`, `opencode`, or `codex`
+    pub agent: Option<String>,
+    /// Model name filter
+    pub model: Option<String>,
+    /// Provider filter
+    pub provider: Option<String>,
+    /// Project id filter (opencode data only)
+    pub project: Option<String>,
+    /// Session id filter
+    pub session: Option<String>,
 }
 
 /// Truncation rate (finish_reason = max_tokens / length) per model.
@@ -980,7 +1294,7 @@ pub struct TimeRangeQuery {
     path = "/api/genai/truncation_rate",
     params(ModelAnalyticsQuery),
     responses(
-        (status = 200, description = "Truncation rate by model", body = Vec<TruncationRateByModel>),
+        (status = 200, description = "Truncation rate by model", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -988,10 +1302,12 @@ pub struct TimeRangeQuery {
 pub async fn get_truncation_rate(
     State(state): State<AppState>,
     Query(query): Query<ModelAnalyticsQuery>,
-) -> Result<Json<Vec<TruncationRateByModel>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_truncation_rate(query.start_time, query.end_time, query.model.as_deref())
+        .query_truncation_rate(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1002,7 +1318,17 @@ pub async fn get_truncation_rate(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize truncation_rate: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// `by_model=1` (or `true`) enables the cache-economics payload.
@@ -1065,19 +1391,36 @@ pub async fn get_cache_hit_rate(
             m.est_savings_usd = r.cost;
             m.savings_known = r.cost.is_some();
         }
-        return Ok(Json(serde_json::to_value(response).map_err(|e| {
+        let value = serde_json::to_value(response).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::storage_error(format!(
                     "serialize cache economics: {e}"
                 ))),
             )
-        })?));
+        })?;
+        // The economics payload is always per-model and drawn from
+        // opencode metrics — nothing from the bar is applied to it.
+        let obj = value.as_object().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(
+                    "cache economics payload is not a JSON object".to_string(),
+                )),
+            )
+        })?;
+        let mut obj = obj.clone();
+        obj.insert(
+            "filters_applied".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+        return Ok(Json(serde_json::Value::Object(obj)));
     }
 
+    let filters = query.filters();
     let rows = state
         .storage
-        .query_cache_hit_rate(query.start_time, query.end_time, query.model.as_deref())
+        .query_cache_hit_rate(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1088,14 +1431,28 @@ pub async fn get_cache_hit_rate(
                 ))),
             )
         })?;
-    Ok(Json(serde_json::to_value(rows).map_err(|e| {
+    let value = serde_json::to_value(rows).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::storage_error(format!(
                 "serialize cache hit rate: {e}"
             ))),
         )
-    })?))
+    })?;
+    let obj = value.as_object().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::storage_error(
+                "cache hit rate payload is not a JSON object".to_string(),
+            )),
+        )
+    })?;
+    let mut obj = obj.clone();
+    obj.insert(
+        "filters_applied".to_string(),
+        serde_json::to_value(filters.applied(&FILTER_DIMENSIONS)).unwrap_or_default(),
+    );
+    Ok(Json(serde_json::Value::Object(obj)))
 }
 
 /// Reasoning ("thinking") token share per model, plus a global
@@ -1115,6 +1472,7 @@ pub async fn get_reasoning_share(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<ReasoningShareResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let mut response = state
         .storage
         .query_reasoning_share(query.start_time, query.end_time)
@@ -1142,6 +1500,11 @@ pub async fn get_reasoning_share(
             .compute_cost(Some(m.model.as_str()), usage, None)
             .cost;
     }
+    // The rollup mixes opencode metrics and codex spans; the filter bar's
+    // dimensions aren't addressable across both parts, so nothing is applied
+    // and the UI greys the whole bar for this section.
+    response.filters_applied = filters.applied(&[]);
+
     Ok(Json(response))
 }
 
@@ -1164,6 +1527,7 @@ pub async fn get_agents(
     State(state): State<AppState>,
     Query(query): Query<TimeSeriesQuery>,
 ) -> Result<Json<AgentRollupResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let bucket_secs = query.bucket_secs.unwrap_or(3600);
     if bucket_secs == 0 {
         return Err((
@@ -1197,7 +1561,10 @@ pub async fn get_agents(
             .then_with(|| a.agent.cmp(&b.agent))
     });
 
-    Ok(Json(AgentRollupResponse { agents }))
+    Ok(Json(AgentRollupResponse {
+        agents,
+        filters_applied: filters.applied(&[]),
+    }))
 }
 
 /// Per-project usage: which project/repo drove the bill. opencode
@@ -1218,6 +1585,7 @@ pub async fn get_projects(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<ProjectRollupResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let rollups = state
         .storage
         .query_project_rollup(query.start_time, query.end_time)
@@ -1241,7 +1609,10 @@ pub async fn get_projects(
             .then_with(|| a.project_id.cmp(&b.project_id))
     });
 
-    Ok(Json(ProjectRollupResponse { projects }))
+    Ok(Json(ProjectRollupResponse {
+        projects,
+        filters_applied: filters.applied(&[]),
+    }))
 }
 
 /// Sub-agent role attribution: cost and tokens per opencode `agent` label.
@@ -1259,6 +1630,7 @@ pub async fn get_agent_roles(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<AgentRolesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let mut response = state
         .storage
         .query_agent_roles(query.start_time, query.end_time)
@@ -1304,6 +1676,8 @@ pub async fn get_agent_roles(
             None
         };
     }
+    response.filters_applied = filters.applied(&[]);
+
     Ok(Json(response))
 }
 
@@ -1323,6 +1697,7 @@ pub async fn get_provider_mix(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<ProviderMixResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let mut response = state
         .storage
         .query_provider_mix(query.start_time, query.end_time)
@@ -1362,6 +1737,8 @@ pub async fn get_provider_mix(
         }
         provider.cost_usd = if any_priced { Some(total) } else { None };
     }
+    response.filters_applied = filters.applied(&[]);
+
     Ok(Json(response))
 }
 
@@ -1380,9 +1757,10 @@ pub async fn get_request_param_profile(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<RequestParamProfile>, (StatusCode, Json<ErrorResponse>)> {
-    let profile = state
+    let filters = query.filters();
+    let mut profile = state
         .storage
-        .query_request_param_profile(query.start_time, query.end_time)
+        .query_request_param_profile(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1393,6 +1771,8 @@ pub async fn get_request_param_profile(
                 ))),
             )
         })?;
+    profile.filters_applied = filters.applied(&FILTER_DIMENSIONS);
+
     Ok(Json(profile))
 }
 
@@ -1411,9 +1791,10 @@ pub async fn get_conversation_depth(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<ConversationDepthStats>, (StatusCode, Json<ErrorResponse>)> {
-    let stats = state
+    let filters = query.filters();
+    let mut stats = state
         .storage
-        .query_conversation_depth(query.start_time, query.end_time)
+        .query_conversation_depth(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1424,6 +1805,8 @@ pub async fn get_conversation_depth(
                 ))),
             )
         })?;
+    stats.filters_applied = filters.applied(&FILTER_DIMENSIONS);
+
     Ok(Json(stats))
 }
 
@@ -1433,7 +1816,7 @@ pub async fn get_conversation_depth(
     path = "/api/genai/latency_series",
     params(ModelTimeSeriesQuery),
     responses(
-        (status = 200, description = "Latency stats per time bucket", body = Vec<LatencySeriesPoint>),
+        (status = 200, description = "Latency stats per time bucket", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1441,7 +1824,8 @@ pub async fn get_conversation_depth(
 pub async fn get_latency_series(
     State(state): State<AppState>,
     Query(query): Query<ModelTimeSeriesQuery>,
-) -> Result<Json<Vec<LatencySeriesPoint>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let bucket_secs = query.bucket_secs.unwrap_or(3600).clamp(60, 86400);
     let all_spans = query.span_filter.as_deref() == Some("all");
     let rows = state
@@ -1450,7 +1834,7 @@ pub async fn get_latency_series(
             query.start_time,
             query.end_time,
             bucket_secs,
-            query.model.as_deref(),
+            &filters,
             all_spans,
         )
         .await
@@ -1463,7 +1847,17 @@ pub async fn get_latency_series(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize latency_series: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// LLM call volume over time (parallel to cost_series).
@@ -1472,7 +1866,7 @@ pub async fn get_latency_series(
     path = "/api/genai/calls_series",
     params(TimeSeriesQuery),
     responses(
-        (status = 200, description = "Calls per time bucket", body = Vec<CallsSeriesPoint>),
+        (status = 200, description = "Calls per time bucket", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1480,12 +1874,19 @@ pub async fn get_latency_series(
 pub async fn get_calls_series(
     State(state): State<AppState>,
     Query(query): Query<TimeSeriesQuery>,
-) -> Result<Json<Vec<CallsSeriesPoint>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
     let bucket_secs = query.bucket_secs.unwrap_or(3600).clamp(60, 86400);
     let all_spans = query.span_filter.as_deref() == Some("all");
     let rows = state
         .storage
-        .query_calls_series(query.start_time, query.end_time, bucket_secs, all_spans)
+        .query_calls_series(
+            query.start_time,
+            query.end_time,
+            &filters,
+            bucket_secs,
+            all_spans,
+        )
         .await
         .map_err(|e| {
             (
@@ -1496,7 +1897,17 @@ pub async fn get_calls_series(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize calls_series: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// LLM latency broken down by input-token context size bin × model.
@@ -1506,7 +1917,7 @@ pub async fn get_calls_series(
     path = "/api/genai/latency_by_context",
     params(ModelAnalyticsQuery),
     responses(
-        (status = 200, description = "Latency per context size bin", body = Vec<LatencyByContextBin>),
+        (status = 200, description = "Latency per context size bin", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1514,10 +1925,12 @@ pub async fn get_calls_series(
 pub async fn get_latency_by_context(
     State(state): State<AppState>,
     Query(query): Query<ModelAnalyticsQuery>,
-) -> Result<Json<Vec<LatencyByContextBin>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_latency_by_context(query.start_time, query.end_time, query.model.as_deref())
+        .query_latency_by_context(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1528,7 +1941,17 @@ pub async fn get_latency_by_context(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize latency_by_context: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Per-(model, error_type) breakdown of error spans, bucketed into actionable categories.
@@ -1537,7 +1960,7 @@ pub async fn get_latency_by_context(
     path = "/api/genai/error_types",
     params(ModelAnalyticsQuery),
     responses(
-        (status = 200, description = "Error type breakdown per model", body = Vec<ErrorTypeBreakdown>),
+        (status = 200, description = "Error type breakdown per model", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1545,10 +1968,12 @@ pub async fn get_latency_by_context(
 pub async fn get_error_types(
     State(state): State<AppState>,
     Query(query): Query<ModelAnalyticsQuery>,
-) -> Result<Json<Vec<ErrorTypeBreakdown>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_error_types(query.start_time, query.end_time, query.model.as_deref())
+        .query_error_types(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1559,7 +1984,17 @@ pub async fn get_error_types(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize error_types: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// All observed (request_model → response_model) pairs with a `differs` flag.
@@ -1569,7 +2004,7 @@ pub async fn get_error_types(
     path = "/api/genai/model_drift",
     params(TimeRangeQuery),
     responses(
-        (status = 200, description = "Request→response model pairs", body = Vec<ModelDriftPair>),
+        (status = 200, description = "Request→response model pairs", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1577,10 +2012,12 @@ pub async fn get_error_types(
 pub async fn get_model_drift(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
-) -> Result<Json<Vec<ModelDriftPair>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_model_drift(query.start_time, query.end_time)
+        .query_model_drift(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1591,7 +2028,17 @@ pub async fn get_model_drift(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize model_drift: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Tool approval/rejection summary (claude_code.tool.blocked_on_user spans).
@@ -1609,9 +2056,10 @@ pub async fn get_tool_approvals(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
 ) -> Result<Json<ToolApprovalStats>, (StatusCode, Json<ErrorResponse>)> {
-    let stats = state
+    let filters = query.filters();
+    let mut stats = state
         .storage
-        .query_tool_approvals(query.start_time, query.end_time)
+        .query_tool_approvals(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1622,6 +2070,8 @@ pub async fn get_tool_approvals(
                 ))),
             )
         })?;
+    stats.filters_applied = filters.applied(&FILTER_DIMENSIONS);
+
     Ok(Json(stats))
 }
 
@@ -1631,7 +2081,7 @@ pub async fn get_tool_approvals(
     path = "/api/genai/stop_reasons",
     params(TimeRangeQuery),
     responses(
-        (status = 200, description = "Stop reason distribution", body = Vec<StopReasonCount>),
+        (status = 200, description = "Stop reason distribution", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1639,10 +2089,12 @@ pub async fn get_tool_approvals(
 pub async fn get_stop_reasons(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
-) -> Result<Json<Vec<StopReasonCount>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_stop_reasons(query.start_time, query.end_time)
+        .query_stop_reasons(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1653,7 +2105,17 @@ pub async fn get_stop_reasons(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize stop_reasons: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Token usage broken down by llm_request.context type.
@@ -1662,7 +2124,7 @@ pub async fn get_stop_reasons(
     path = "/api/genai/context_type_split",
     params(TimeRangeQuery),
     responses(
-        (status = 200, description = "Context type token split", body = Vec<ContextTypeSplit>),
+        (status = 200, description = "Context type token split", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1670,10 +2132,12 @@ pub async fn get_stop_reasons(
 pub async fn get_context_type_split(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
-) -> Result<Json<Vec<ContextTypeSplit>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_context_type_split(query.start_time, query.end_time)
+        .query_context_type_split(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1684,7 +2148,17 @@ pub async fn get_context_type_split(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize context_type_split: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Top error messages from failed tool executions.
@@ -1693,7 +2167,7 @@ pub async fn get_context_type_split(
     path = "/api/genai/tool_errors",
     params(ToolUsageQuery),
     responses(
-        (status = 200, description = "Tool error messages", body = Vec<ToolErrorEntry>),
+        (status = 200, description = "Tool error messages", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1701,11 +2175,12 @@ pub async fn get_context_type_split(
 pub async fn get_tool_errors(
     State(state): State<AppState>,
     Query(query): Query<ToolUsageQuery>,
-) -> Result<Json<Vec<ToolErrorEntry>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let limit = query.limit.unwrap_or(30).clamp(1, 100);
+    let filters = query.filters();
     let rows = state
         .storage
-        .query_tool_errors(query.start_time, query.end_time, limit)
+        .query_tool_errors(query.start_time, query.end_time, &filters, limit)
         .await
         .map_err(|e| {
             (
@@ -1716,7 +2191,17 @@ pub async fn get_tool_errors(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize tool_errors: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
 
 /// Hour-of-day activity distribution (UTC).
@@ -1725,7 +2210,7 @@ pub async fn get_tool_errors(
     path = "/api/genai/hour_of_day",
     params(TimeRangeQuery),
     responses(
-        (status = 200, description = "Hour-of-day buckets", body = Vec<HourOfDayBucket>),
+        (status = 200, description = "Hour-of-day buckets", body = GenAiItemsResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
@@ -1733,10 +2218,12 @@ pub async fn get_tool_errors(
 pub async fn get_hour_of_day(
     State(state): State<AppState>,
     Query(query): Query<TimeRangeQuery>,
-) -> Result<Json<Vec<HourOfDayBucket>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GenAiItemsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let filters = query.filters();
+
     let rows = state
         .storage
-        .query_hour_of_day(query.start_time, query.end_time)
+        .query_hour_of_day(query.start_time, query.end_time, &filters)
         .await
         .map_err(|e| {
             (
@@ -1747,8 +2234,36 @@ pub async fn get_hour_of_day(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(GenAiItemsResponse {
+        items: serde_json::to_value(&rows).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize hour_of_day: {e}"
+                ))),
+            )
+        })?,
+        filters_applied: filters.applied(&FILTER_DIMENSIONS),
+    }))
 }
+
+genai_filter_impl!(TokenUsageQuery);
+genai_filter_impl!(CostSeriesQuery);
+genai_filter_impl!(FinishReasonsQuery);
+genai_filter_impl!(LatencyQuery);
+genai_filter_impl!(ErrorRateQuery);
+genai_filter_impl!(ModelAnalyticsQuery);
+genai_filter_impl!(CacheQuery);
+genai_filter_impl!(ModelTimeSeriesQuery);
+genai_filter_impl!(TopSpansQuery);
+genai_filter_impl!(TopGroupQuery);
+genai_filter_impl!(LatencyPercentileQuery);
+genai_filter_impl!(DistributionQuery);
+genai_filter_impl!(ToolUsageQuery);
+genai_filter_impl!(RetryStatsQuery);
+genai_filter_impl!(RetrievalStatsQuery);
+genai_filter_impl!(TimeRangeQuery);
+genai_filter_impl!(TimeSeriesQuery);
 
 #[cfg(test)]
 mod tests {

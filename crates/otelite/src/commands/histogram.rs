@@ -4,6 +4,7 @@
 use crate::commands::usage::{fetch_pricing, parse_time_range};
 use crate::error::{Error, Result};
 use clap::Args;
+use otelite_core::filters::GenAiFilters;
 use otelite_core::session_cost;
 use otelite_storage::StorageBackend;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ impl HistogramCommand {
                     &self.metric,
                     Some(start_time),
                     Some(end_time),
+                    &GenAiFilters::default(),
                     self.buckets,
                     &self.scale,
                 )

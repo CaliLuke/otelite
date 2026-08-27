@@ -3,6 +3,7 @@
 use crate::StorageConfig;
 use async_trait::async_trait;
 use chrono::Timelike;
+use otelite_core::filters::GenAiFilters;
 use otelite_core::storage::{
     PurgeAllStats, PurgeOptions, QueryParams, Result, StorageBackend, StorageError, StorageStats,
 };
@@ -300,15 +301,15 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<(
         otelite_core::api::TokenUsageSummary,
         Vec<otelite_core::api::ModelUsage>,
         Vec<otelite_core::api::SystemUsage>,
     )> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_token_usage(conn, start_time, end_time, model.as_deref())
+            reader::query_token_usage(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -319,11 +320,11 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_ns: i64,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::CostSeriesPoint>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_cost_series(conn, start_time, end_time, bucket_ns, model.as_deref())
+            reader::query_cost_series(conn, start_time, end_time, bucket_ns, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -333,13 +334,23 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
         sort_by: otelite_core::api::TopSpanSort,
         truncated_only: bool,
     ) -> Result<Vec<otelite_core::api::TopSpan>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_top_spans(conn, start_time, end_time, limit, sort_by, truncated_only)
-                .map_err(StorageError::from)
+            reader::query_top_spans(
+                conn,
+                start_time,
+                end_time,
+                &filters,
+                limit,
+                sort_by,
+                truncated_only,
+            )
+            .map_err(StorageError::from)
         })
         .await
     }
@@ -348,10 +359,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<otelite_core::api::SessionCostRow>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_top_sessions(conn, start_time, end_time, limit)
+            reader::query_top_sessions(conn, start_time, end_time, &filters, limit)
                 .map_err(StorageError::from)
         })
         .await
@@ -361,10 +374,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<otelite_core::api::ConversationCostRow>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_top_conversations(conn, start_time, end_time, limit)
+            reader::query_top_conversations(conn, start_time, end_time, &filters, limit)
                 .map_err(StorageError::from)
         })
         .await
@@ -374,11 +389,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::FinishReasonCount>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_finish_reasons(conn, start_time, end_time, model.as_deref())
+            reader::query_finish_reasons(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -388,11 +403,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::LatencyStats>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_latency_stats(conn, start_time, end_time, model.as_deref())
+            reader::query_latency_stats(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -402,14 +417,23 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         bucket_secs: u64,
         metrics: &[&str],
     ) -> Result<otelite_core::api::LatencyPercentilesResponse> {
+        let filters = filters.clone();
         let metrics: Vec<String> = metrics.iter().map(|m| m.to_string()).collect();
         self.read_query(move |conn| {
             let refs: Vec<&str> = metrics.iter().map(String::as_str).collect();
-            reader::query_latency_percentiles(conn, start_time, end_time, bucket_secs, &refs)
-                .map_err(StorageError::from)
+            reader::query_latency_percentiles(
+                conn,
+                start_time,
+                end_time,
+                bucket_secs,
+                &refs,
+                &filters,
+            )
+            .map_err(StorageError::from)
         })
         .await
     }
@@ -419,14 +443,18 @@ impl StorageBackend for SqliteBackend {
         metric: &str,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         buckets: usize,
         scale: &str,
     ) -> Result<otelite_core::api::DistributionResponse> {
+        let filters = filters.clone();
         let metric = metric.to_string();
         let scale = scale.to_string();
         self.read_query(move |conn| {
-            reader::query_distribution(conn, &metric, start_time, end_time, buckets, &scale)
-                .map_err(StorageError::from)
+            reader::query_distribution(
+                conn, &metric, start_time, end_time, buckets, &scale, &filters,
+            )
+            .map_err(StorageError::from)
         })
         .await
     }
@@ -450,11 +478,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<otelite_core::api::GenAiCapabilityResponse> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_genai_capabilities(conn, start_time, end_time, model.as_deref())
+            reader::query_genai_capabilities(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -464,11 +492,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::ErrorRateByModel>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_error_rate(conn, start_time, end_time, model.as_deref())
+            reader::query_error_rate(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -478,10 +506,13 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<otelite_core::api::ToolUsage>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_tool_usage(conn, start_time, end_time, limit).map_err(StorageError::from)
+            reader::query_tool_usage(conn, start_time, end_time, &filters, limit)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -490,9 +521,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<otelite_core::api::RetryStats> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_retry_stats(conn, start_time, end_time).map_err(StorageError::from)
+            reader::query_retry_stats(conn, start_time, end_time, &filters)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -501,10 +535,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         top_queries_limit: usize,
     ) -> Result<otelite_core::api::RetrievalStats> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_retrieval_stats(conn, start_time, end_time, top_queries_limit)
+            reader::query_retrieval_stats(conn, start_time, end_time, &filters, top_queries_limit)
                 .map_err(StorageError::from)
         })
         .await
@@ -514,11 +550,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::TruncationRateByModel>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_truncation_rate(conn, start_time, end_time, model.as_deref())
+            reader::query_truncation_rate(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -528,11 +564,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::CacheHitRateByModel>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_cache_hit_rate(conn, start_time, end_time, model.as_deref())
+            reader::query_cache_hit_rate(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -623,9 +659,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<otelite_core::api::RequestParamProfile> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_request_param_profile(conn, start_time, end_time)
+            reader::query_request_param_profile(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -635,9 +673,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<otelite_core::api::ConversationDepthStats> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_conversation_depth(conn, start_time, end_time).map_err(StorageError::from)
+            reader::query_conversation_depth(conn, start_time, end_time, &filters)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -647,17 +688,17 @@ impl StorageBackend for SqliteBackend {
         start_time: Option<i64>,
         end_time: Option<i64>,
         bucket_secs: u64,
-        model: Option<&str>,
+        filters: &GenAiFilters,
         all_spans: bool,
     ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
             reader::query_latency_series(
                 conn,
                 start_time,
                 end_time,
                 bucket_secs,
-                model.as_deref(),
+                &filters,
                 all_spans,
             )
             .map_err(StorageError::from)
@@ -669,11 +710,13 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         bucket_secs: u64,
         all_spans: bool,
     ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_calls_series(conn, start_time, end_time, bucket_secs, all_spans)
+            reader::query_calls_series(conn, start_time, end_time, &filters, bucket_secs, all_spans)
                 .map_err(StorageError::from)
         })
         .await
@@ -683,11 +726,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::LatencyByContextBin>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_latency_by_context(conn, start_time, end_time, model.as_deref())
+            reader::query_latency_by_context(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -697,11 +740,11 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
-        model: Option<&str>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::ErrorTypeBreakdown>> {
-        let model = model.map(str::to_string);
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_error_types(conn, start_time, end_time, model.as_deref())
+            reader::query_error_types(conn, start_time, end_time, &filters)
                 .map_err(StorageError::from)
         })
         .await
@@ -711,9 +754,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::ModelDriftPair>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_model_drift(conn, start_time, end_time).map_err(StorageError::from)
+            reader::query_model_drift(conn, start_time, end_time, &filters)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -722,9 +768,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<otelite_core::api::ToolApprovalStats> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_tool_approvals(conn, start_time, end_time).map_err(StorageError::from)
+            reader::query_tool_approvals(conn, start_time, end_time, &filters)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -733,9 +782,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::StopReasonCount>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_stop_reasons(conn, start_time, end_time).map_err(StorageError::from)
+            reader::query_stop_reasons(conn, start_time, end_time, &filters)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -744,9 +796,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::ContextTypeSplit>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_context_type_split(conn, start_time, end_time).map_err(StorageError::from)
+            reader::query_context_type_split(conn, start_time, end_time, &filters)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -755,10 +810,13 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
         limit: usize,
     ) -> Result<Vec<otelite_core::api::ToolErrorEntry>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_tool_errors(conn, start_time, end_time, limit).map_err(StorageError::from)
+            reader::query_tool_errors(conn, start_time, end_time, &filters, limit)
+                .map_err(StorageError::from)
         })
         .await
     }
@@ -767,9 +825,12 @@ impl StorageBackend for SqliteBackend {
         &self,
         start_time: Option<i64>,
         end_time: Option<i64>,
+        filters: &GenAiFilters,
     ) -> Result<Vec<otelite_core::api::HourOfDayBucket>> {
+        let filters = filters.clone();
         self.read_query(move |conn| {
-            reader::query_hour_of_day(conn, start_time, end_time).map_err(StorageError::from)
+            reader::query_hour_of_day(conn, start_time, end_time, &filters)
+                .map_err(StorageError::from)
         })
         .await
     }

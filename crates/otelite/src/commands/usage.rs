@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use clap::Args;
 use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
+use otelite_core::filters::GenAiFilters;
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use otelite_storage::StorageBackend;
 use std::collections::HashMap;
@@ -243,7 +244,7 @@ impl UsageCommand {
         let (start_time, end_time) = parse_time_range(&self.since)?;
 
         let (summary, by_model_raw, by_system_raw) = storage
-            .query_token_usage(Some(start_time), Some(end_time), None)
+            .query_token_usage(Some(start_time), Some(end_time), &GenAiFilters::default())
             .await
             .map_err(|e| Error::ApiError(format!("Failed to query token usage: {}", e)))?;
 
@@ -322,6 +323,7 @@ impl UsageCommand {
                 .query_top_spans(
                     Some(start_time),
                     Some(end_time),
+                    &GenAiFilters::default(),
                     n,
                     otelite_core::api::TopSpanSort::TotalTokens,
                     false,
@@ -356,7 +358,7 @@ impl UsageCommand {
         let latency_stats: Option<Vec<otelite_core::api::LatencyStats>> = if self.latency {
             Some(
                 storage
-                    .query_latency_stats(Some(start_time), Some(end_time), None)
+                    .query_latency_stats(Some(start_time), Some(end_time), &GenAiFilters::default())
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query latency stats: {}", e))
@@ -375,7 +377,7 @@ impl UsageCommand {
                             Some(start_time),
                             Some(end_time),
                             self.bucket_secs,
-                            self.model.as_deref(),
+                            &GenAiFilters::default(),
                             false,
                         )
                         .await
@@ -392,7 +394,11 @@ impl UsageCommand {
             if self.truncation {
                 Some(
                     storage
-                        .query_truncation_rate(Some(start_time), Some(end_time), None)
+                        .query_truncation_rate(
+                            Some(start_time),
+                            Some(end_time),
+                            &GenAiFilters::default(),
+                        )
                         .await
                         .map_err(|e| {
                             Error::ApiError(format!("Failed to query truncation rate: {}", e))
@@ -407,7 +413,11 @@ impl UsageCommand {
         {
             Some(
                 storage
-                    .query_cache_hit_rate(Some(start_time), Some(end_time), None)
+                    .query_cache_hit_rate(
+                        Some(start_time),
+                        Some(end_time),
+                        &GenAiFilters::default(),
+                    )
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query cache hit rate: {}", e))
@@ -422,7 +432,11 @@ impl UsageCommand {
             if self.request_params {
                 Some(
                     storage
-                        .query_request_param_profile(Some(start_time), Some(end_time))
+                        .query_request_param_profile(
+                            Some(start_time),
+                            Some(end_time),
+                            &GenAiFilters::default(),
+                        )
                         .await
                         .map_err(|e| {
                             Error::ApiError(format!("Failed to query request param profile: {}", e))
@@ -437,7 +451,11 @@ impl UsageCommand {
             if self.conv_depth {
                 Some(
                     storage
-                        .query_conversation_depth(Some(start_time), Some(end_time))
+                        .query_conversation_depth(
+                            Some(start_time),
+                            Some(end_time),
+                            &GenAiFilters::default(),
+                        )
                         .await
                         .map_err(|e| {
                             Error::ApiError(format!("Failed to query conversation depth: {}", e))
@@ -451,7 +469,12 @@ impl UsageCommand {
         let tool_usage: Option<Vec<otelite_core::api::ToolUsage>> = if self.tools {
             Some(
                 storage
-                    .query_tool_usage(Some(start_time), Some(end_time), 50)
+                    .query_tool_usage(
+                        Some(start_time),
+                        Some(end_time),
+                        &GenAiFilters::default(),
+                        50,
+                    )
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query tool usage: {}", e)))?,
             )
@@ -463,7 +486,7 @@ impl UsageCommand {
         let error_types: Option<Vec<otelite_core::api::ErrorTypeBreakdown>> = if self.error_types {
             Some(
                 storage
-                    .query_error_types(Some(start_time), Some(end_time), None)
+                    .query_error_types(Some(start_time), Some(end_time), &GenAiFilters::default())
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query error types: {}", e)))?,
             )
@@ -475,7 +498,7 @@ impl UsageCommand {
         let model_drift: Option<Vec<otelite_core::api::ModelDriftPair>> = if self.model_drift {
             Some(
                 storage
-                    .query_model_drift(Some(start_time), Some(end_time))
+                    .query_model_drift(Some(start_time), Some(end_time), &GenAiFilters::default())
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query model drift: {}", e)))?,
             )
@@ -491,7 +514,7 @@ impl UsageCommand {
                         .query_latency_by_context(
                             Some(start_time),
                             Some(end_time),
-                            self.model.as_deref(),
+                            &GenAiFilters::default(),
                         )
                         .await
                         .map_err(|e| {
@@ -510,6 +533,7 @@ impl UsageCommand {
                         .query_latency_percentiles(
                             Some(start_time),
                             Some(end_time),
+                            &GenAiFilters::default(),
                             self.bucket_secs,
                             &["duration", "ttft"],
                         )
@@ -526,7 +550,11 @@ impl UsageCommand {
         let tool_approvals: Option<otelite_core::api::ToolApprovalStats> = if self.tool_approvals {
             Some(
                 storage
-                    .query_tool_approvals(Some(start_time), Some(end_time))
+                    .query_tool_approvals(
+                        Some(start_time),
+                        Some(end_time),
+                        &GenAiFilters::default(),
+                    )
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query tool approvals: {}", e))
@@ -540,7 +568,7 @@ impl UsageCommand {
         let stop_reasons: Option<Vec<otelite_core::api::StopReasonCount>> = if self.stop_reasons {
             Some(
                 storage
-                    .query_stop_reasons(Some(start_time), Some(end_time))
+                    .query_stop_reasons(Some(start_time), Some(end_time), &GenAiFilters::default())
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query stop reasons: {}", e)))?,
             )
@@ -553,7 +581,11 @@ impl UsageCommand {
         {
             Some(
                 storage
-                    .query_context_type_split(Some(start_time), Some(end_time))
+                    .query_context_type_split(
+                        Some(start_time),
+                        Some(end_time),
+                        &GenAiFilters::default(),
+                    )
                     .await
                     .map_err(|e| {
                         Error::ApiError(format!("Failed to query context split: {}", e))
@@ -569,7 +601,12 @@ impl UsageCommand {
         {
             Some(
                 storage
-                    .query_tool_errors(Some(start_time), Some(end_time), n)
+                    .query_tool_errors(
+                        Some(start_time),
+                        Some(end_time),
+                        &GenAiFilters::default(),
+                        n,
+                    )
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query tool errors: {}", e)))?,
             )
@@ -581,7 +618,7 @@ impl UsageCommand {
         let hour_of_day: Option<Vec<otelite_core::api::HourOfDayBucket>> = if self.hour_of_day {
             Some(
                 storage
-                    .query_hour_of_day(Some(start_time), Some(end_time))
+                    .query_hour_of_day(Some(start_time), Some(end_time), &GenAiFilters::default())
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query hour of day: {}", e)))?,
             )
@@ -631,7 +668,13 @@ impl UsageCommand {
         let calls_series: Option<Vec<otelite_core::api::CallsSeriesPoint>> = if self.calls {
             Some(
                 storage
-                    .query_calls_series(Some(start_time), Some(end_time), self.bucket_secs, false)
+                    .query_calls_series(
+                        Some(start_time),
+                        Some(end_time),
+                        &GenAiFilters::default(),
+                        self.bucket_secs,
+                        false,
+                    )
                     .await
                     .map_err(|e| Error::ApiError(format!("Failed to query calls series: {}", e)))?,
             )
@@ -645,6 +688,7 @@ impl UsageCommand {
                 .query_top_spans(
                     Some(start_time),
                     Some(end_time),
+                    &GenAiFilters::default(),
                     200,
                     otelite_core::api::TopSpanSort::TotalTokens,
                     false,

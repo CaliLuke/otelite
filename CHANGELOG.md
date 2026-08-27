@@ -11,6 +11,19 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Global filter bar for GenAI analytics.** The GenAI tab and the Sessions
+  tab gain a shared filter bar — agent (claude / opencode / codex), model,
+  provider, project and session — that scopes every analytics section at
+  once. The active filters live in the URL (`#/analytics?agent=claude&model=…`),
+  so a filtered view round-trips as a link; Clear removes the filters but
+  keeps the time window. Each section shows which dimensions its data
+  actually honours — dimensions no loaded endpoint supports are greyed out,
+  based on the `filters_applied` echo every GenAI endpoint now returns.
+  Filter params an endpoint can't apply are ignored, never a 400. The
+  Sessions list honours all five dimensions; sessions costs echoes none.
+
 ## [0.1.76] - 2026-08-27
 
 ### Added
