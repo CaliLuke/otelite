@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.73] - 2026-08-27
+
 ### Added
 
 - **Reasoning ("thinking") token share by model and effort.** See how much
