@@ -210,6 +210,64 @@ fn test_cache_economics_opencode_in_window_reset() {
     assert_eq!(b1.cache_read, 60);
 }
 
+/// Regression: a flat counter (the same value repeated — opencode re-flushes
+/// resumed-session state verbatim) must contribute exactly the change, which
+/// is 0 when the baseline equals the flat value. Counting the full value on
+/// equal rows inflated live 7d figures by orders of magnitude.
+#[test]
+fn test_cache_economics_flat_counter_contributes_zero() {
+    let conn = setup_test_db();
+
+    // Baseline 1000, then the same value 1000 repeated 5 times in-window.
+    insert_metric_row(
+        &conn,
+        "opencode.token.usage",
+        T0 - 10,
+        1000,
+        &opencode_attrs("m", "cacheRead", "s1"),
+    );
+    for i in 0..5 {
+        insert_metric_row(
+            &conn,
+            "opencode.token.usage",
+            T0 + i * 100_000_000,
+            1000,
+            &opencode_attrs("m", "cacheRead", "s1"),
+        );
+    }
+    // A genuinely increasing series in the same window still counts.
+    insert_metric_row(
+        &conn,
+        "opencode.token.usage",
+        T0,
+        0,
+        &opencode_attrs("m", "input", "s1"),
+    );
+    insert_metric_row(
+        &conn,
+        "opencode.token.usage",
+        T0 + 200_000_000,
+        7,
+        &opencode_attrs("m", "input", "s1"),
+    );
+
+    let resp = reader::query_cache_economics(&conn, Some(T0), Some(END), BUCKET).unwrap();
+    let m = find_model(&resp, "m");
+    assert_eq!(
+        m.cache_read_tokens, 0,
+        "flat counter must not count its own value"
+    );
+    assert_eq!(m.input_tokens, 7);
+    assert_eq!(
+        resp.series
+            .iter()
+            .find(|p| p.timestamp == T0)
+            .unwrap()
+            .cache_read,
+        0
+    );
+}
+
 #[test]
 fn test_cache_economics_codex_histogram() {
     let conn = setup_test_db();

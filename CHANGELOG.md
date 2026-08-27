@@ -11,6 +11,14 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cache-economics token figures were inflated for some models.**
+  0.1.70/0.1.71 counted a resumed opencode session's re-flushed
+  (unchanged) cache counter as fresh usage, overstating cache reads —
+  by up to three orders of magnitude for models whose sessions were
+  resumed. Flat counters now contribute only their actual change.
+
 ## [0.1.71] - 2026-08-27
 
 ### Fixed

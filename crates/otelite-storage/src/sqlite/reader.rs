@@ -2907,12 +2907,12 @@ pub fn query_cache_economics(
                 None => {
                     // First in-window row of this series.
                     match baselines.get(&labels) {
-                        Some(base) if *base >= value => value, // reset: counts from zero
+                        Some(base) if value < *base => value, // reset: counts from zero
                         Some(base) => value - base,
                         None => value, // series did not exist before the window
                     }
                 },
-                Some(prev) if *prev >= value => value, // in-window reset
+                Some(prev) if value < *prev => value, // in-window reset
                 Some(prev) => value - prev,
             };
             last_by_series.insert(labels.clone(), value);
