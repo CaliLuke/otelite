@@ -11,6 +11,25 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Lower-tail throughput percentiles.** Latency stats (CLI `usage --latency`,
+  GenAI latency table, TUI latency panel) and the bucketed latency percentiles
+  now report derived end-to-end output throughput as p10/p50/p90 tok/s —
+  lower-tail, median, upper-reference — with the throughput sample count
+  (`N`) shown separately from total call count. Buckets with fewer than 10
+  eligible calls are flagged (†) because the p10 is a weak estimate at that
+  size. Duration/TTFT percentile series also expose the lower-tail p10.
+
+### Changed
+
+- Derived tok/s is now computed per call from the raw nanosecond span
+  duration (previously integer-millisecond durations truncated
+  sub-millisecond calls); values can shift slightly, and the label makes
+  explicit that span duration includes provider, queue and network time —
+  it is not pure generation throughput. p95/p99 throughput fields remain in
+  the API responses during a compatibility period.
+
 ## [0.1.78] - 2026-08-27
 
 ### Fixed

@@ -1140,12 +1140,16 @@ class AnalyticsView {
                 ? buffered
                 : (s.ttft_count > 0 ? this._formatDuration(s.ttft_p95_ms) : '—');
 
+            // p10/p50/p90 are the primary triple (#119): lower-tail,
+            // median, upper-reference. † marks weak lower tails (n < 10).
+            const tpsP10 = s.derived_tokens_per_sec_p10 != null ? Math.round(s.derived_tokens_per_sec_p10) : null;
             const tpsP50 = s.derived_tokens_per_sec_p50 != null ? Math.round(s.derived_tokens_per_sec_p50) : null;
-            const tpsP95 = s.derived_tokens_per_sec_p95 != null ? Math.round(s.derived_tokens_per_sec_p95) : null;
-            const tpsP99 = s.derived_tokens_per_sec_p99 != null ? Math.round(s.derived_tokens_per_sec_p99) : null;
-            const tpsCell = (tpsP50 != null && tpsP95 != null && tpsP99 != null)
-                ? `${tpsP50} / ${tpsP95} / ${tpsP99} tok/s`
+            const tpsP90 = s.derived_tokens_per_sec_p90 != null ? Math.round(s.derived_tokens_per_sec_p90) : null;
+            const tpsCell = (tpsP10 != null && tpsP50 != null && tpsP90 != null)
+                ? `${tpsP10} / ${tpsP50} / ${tpsP90} tok/s`
                 : '—';
+            const tpN = s.throughput_sample_count || 0;
+            const nCell = tpN > 0 ? (tpN < 10 ? `${tpN}†` : String(tpN)) : '—';
 
             const ctxP50 = this._formatTokensK(s.input_tokens_p50);
             const ctxP95 = this._formatTokensK(s.input_tokens_p95);
@@ -1167,17 +1171,19 @@ class AnalyticsView {
                     <td class="num">${this._esc(ttftP50)}</td>
                     <td class="num">${this._esc(ttftP95)}</td>
                     <td class="num">${this._esc(tpsCell)}</td>
+                    <td class="num">${this._esc(nCell)}</td>
                     <td class="num">${this._esc(ctxCell)}</td>
                     <td class="num">${this._esc(ratioCell)}</td>
                 </tr>`;
         }).join('');
         return `
             <h3>Latency by model</h3>
-            <p class="table-hint">TTFT is emitter-supplied. “Buffered” means most values were near complete request duration, so no stream was observed.</p>
+            <p class="table-hint">TTFT is emitter-supplied. “Buffered” means most values were near complete request duration, so no stream was observed. Tok/s is derived end-to-end — span duration includes provider, queue and network time, not pure generation rate. † = fewer than 10 throughput samples, so the p10 is a weak estimate.</p>
             <table class="data-table latency-table">
                 <thead><tr>
                     <th>Model</th><th>Calls</th><th>Avg</th><th>P50</th><th>P95</th><th>P99</th><th>TTFT P50</th><th>TTFT P95</th>
-                    <th title="Derived metric: span duration includes network and queue time, not pure generation throughput">Tok/s derived (p50/p95/p99)</th>
+                    <th title="Derived end-to-end output throughput per call: output tokens / span duration (raw ns). Span duration includes provider, queue and network time — not pure generation throughput. Lower-tail / median / upper-reference.">Tok/s* (p10/p50/p90)</th>
+                    <th title="Calls with positive output and duration — the throughput sample, distinct from Calls">N*</th>
                     <th>Context (p50/p95/p99)</th>
                     <th title="Output divided by uncached input, cache reads, and cache creation">Out/context ratio (p50/p95)</th>
                 </tr></thead>

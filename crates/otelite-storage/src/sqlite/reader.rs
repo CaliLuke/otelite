@@ -1834,7 +1834,8 @@ pub fn query_latency_stats(
             {output} AS output_tokens,
             {input} AS input_tokens,
             {cache_creation} AS cache_creation_tokens,
-            {cache_read} AS cache_read_tokens
+            {cache_read} AS cache_read_tokens,
+            (end_time - start_time) AS duration_ns
         FROM spans
         {where_clause}",
         model = exprs.model,
@@ -1860,6 +1861,7 @@ pub fn query_latency_stats(
         input_tokens: Option<i64>,
         cache_creation_tokens: Option<i64>,
         cache_read_tokens: Option<i64>,
+        duration_ns: i64,
     }
 
     let rows: Vec<Row> = stmt
@@ -1874,6 +1876,7 @@ pub fn query_latency_stats(
                 input_tokens: row.get::<_, Option<i64>>(6)?,
                 cache_creation_tokens: row.get::<_, Option<i64>>(7)?,
                 cache_read_tokens: row.get::<_, Option<i64>>(8)?,
+                duration_ns: row.get::<_, i64>(9)?,
             })
         })
         .map_err(|e| {
@@ -1897,12 +1900,11 @@ pub fn query_latency_stats(
                 r.custom_ttft_ms.as_deref(),
             ),
         );
-        if r.duration_ms > 0 {
-            if let Some(output_tokens) = r.output_tokens.filter(|tokens| *tokens > 0) {
-                entry
-                    .token_rates
-                    .push(output_tokens as f64 / (r.duration_ms as f64 / 1000.0));
-            }
+        // Per-call throughput from the raw nanosecond duration (#119);
+        // integer-ms division truncated sub-millisecond calls.
+        if let Some(rate) = throughput_rate_tok_s(r.duration_ns, r.output_tokens.map(|t| t as f64))
+        {
+            entry.token_rates.push(rate);
         }
         if let Some(input_tokens) = r.input_tokens {
             entry.input_tokens.push(input_tokens);
@@ -1953,11 +1955,14 @@ pub fn query_latency_stats(
             )
         };
 
-        let (tok_p50, tok_p95, tok_p99) = if token_rates.is_empty() {
-            (None, None, None)
+        let throughput_sample_count = token_rates.len();
+        let (tok_p10, tok_p50, tok_p90, tok_p95, tok_p99) = if token_rates.is_empty() {
+            (None, None, None, None, None)
         } else {
             (
+                Some(percentile_f64(&token_rates, 0.10)),
                 Some(percentile_f64(&token_rates, 0.50)),
+                Some(percentile_f64(&token_rates, 0.90)),
                 Some(percentile_f64(&token_rates, 0.95)),
                 Some(percentile_f64(&token_rates, 0.99)),
             )
@@ -1997,9 +2002,12 @@ pub fn query_latency_stats(
             ttft_p50_ms: ttft_p50,
             ttft_p95_ms: ttft_p95,
             ttft_p99_ms: ttft_p99,
+            derived_tokens_per_sec_p10: tok_p10,
             derived_tokens_per_sec_p50: tok_p50,
+            derived_tokens_per_sec_p90: tok_p90,
             derived_tokens_per_sec_p95: tok_p95,
             derived_tokens_per_sec_p99: tok_p99,
+            throughput_sample_count,
             input_tokens_p50: inp_p50,
             input_tokens_p95: inp_p95,
             input_tokens_p99: inp_p99,
@@ -2021,6 +2029,14 @@ fn percentile(sorted: &[i64], p: f64) -> i64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
+/// Percentile estimator used by every latency/throughput endpoint
+/// (documented in issue #119 so a change is an explicit API decision, not
+/// an accidental behaviour change): rounded-rank on the sorted values,
+/// `idx = round((n - 1) * p)` clamped to `[0, n - 1]`, returning the value
+/// at that index (`.round()` is half-away-from-zero). Worked examples:
+/// n=10, p=0.10 -> idx=1 (second smallest); n=10, p=0.50 -> idx=5;
+/// n=11, p=0.90 -> idx=9. Empty input returns 0.0 (callers guard emptiness
+/// before publishing, so 0.0 never reaches a response as a measured value).
 fn percentile_f64(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -2036,10 +2052,27 @@ struct LlmRequestValue {
     start_ns: i64,
     /// Span duration in ms; negative when `end_time < start_time`.
     duration_ms: f64,
+    /// Span duration in raw nanoseconds; the throughput rate divisor
+    /// (#119) — integer-ms division would truncate sub-millisecond calls.
+    duration_ns: i64,
     /// Validated normalized TTFT in ms, when the span carried a usable one.
     ttft_ms: Option<f64>,
     /// Requested output tokens, when the span carried a usable count.
     output_tokens: Option<f64>,
+}
+
+/// Per-call derived output throughput in tokens/second, or `None` when the
+/// call is not throughput-eligible (#119 default cohort: completed calls
+/// with positive output and duration — in practice output > 0 excludes
+/// failed/cancelled/truncated calls, which carry no usable output count).
+/// The rate divides by the raw nanosecond duration, never an integer-millisecond
+/// approximation.
+fn throughput_rate_tok_s(duration_ns: i64, output_tokens: Option<f64>) -> Option<f64> {
+    let tokens = output_tokens?;
+    if duration_ns <= 0 || tokens <= 0.0 || !tokens.is_finite() {
+        return None;
+    }
+    Some(tokens * 1e9 / duration_ns as f64)
 }
 
 /// Collect LLM request spans (all harnesses, `request_span_guard`) with
@@ -2073,7 +2106,8 @@ fn collect_llm_request_values(
             json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
             json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
             json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms,
-            {output} AS output_tokens
+            {output} AS output_tokens,
+            (end_time - start_time) AS duration_ns
          FROM spans
          {where_clause}",
         model = exprs.model,
@@ -2093,6 +2127,7 @@ fn collect_llm_request_values(
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<i64>>(6)?,
+                row.get::<_, i64>(7)?,
             ))
         })
         .map_err(|e| {
@@ -2104,7 +2139,7 @@ fn collect_llm_request_values(
         })?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for (duration_ms, model, start_ns, otel, llm, custom, output_tokens) in rows {
+    for (duration_ms, model, start_ns, otel, llm, custom, output_tokens, duration_ns) in rows {
         let mut ttft_ms = None;
         if let Some(Ok(ttft)) =
             normalized_ttft_ms(otel.as_deref(), llm.as_deref(), custom.as_deref())
@@ -2119,6 +2154,7 @@ fn collect_llm_request_values(
             model,
             start_ns,
             duration_ms: duration_ms as f64,
+            duration_ns,
             ttft_ms,
             output_tokens: output_tokens.map(|t| t as f64),
         });
@@ -2263,7 +2299,7 @@ pub fn query_latency_percentiles(
             }
         };
 
-    for v in span_values {
+    for v in &span_values {
         if v.duration_ms < 0.0 {
             continue;
         }
@@ -2278,7 +2314,7 @@ pub fn query_latency_percentiles(
         }
         if want_ttft {
             if let Some(ttft) = v.ttft_ms {
-                push(&mut groups, "ttft", v.model, v.start_ns, ttft);
+                push(&mut groups, "ttft", v.model.clone(), v.start_ns, ttft);
             }
         }
     }
@@ -2286,17 +2322,66 @@ pub fn query_latency_percentiles(
         push(&mut groups, "ttft", model, ts, v);
     }
 
+    // Per-call throughput rates for the same buckets (#119): output_tokens
+    // divided by the raw nanosecond duration, never aggregate tokens over
+    // aggregate duration. Collected over every request value (not just the
+    // requested metrics) so each bucket point carries the triple.
+    let mut rates: std::collections::BTreeMap<(Option<String>, i64), Vec<f64>> =
+        std::collections::BTreeMap::new();
+    for v in &span_values {
+        let Some(rate) = throughput_rate_tok_s(v.duration_ns, v.output_tokens) else {
+            continue;
+        };
+        let bucket = (v.start_ns / bucket_ns) * bucket_ns;
+        match &v.model {
+            Some(m) => {
+                rates
+                    .entry((Some(m.clone()), bucket))
+                    .or_default()
+                    .push(rate);
+                rates.entry((None, bucket)).or_default().push(rate);
+            },
+            None => {
+                rates.entry((None, bucket)).or_default().push(rate);
+            },
+        }
+    }
+
     let mut out = LatencyPercentilesResponse::default();
     for ((metric, model, bucket), values) in &groups {
         let mut values = values.clone();
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let rate_key = (model.clone(), *bucket);
+        let (
+            throughput_p10_tok_s,
+            throughput_p50_tok_s,
+            throughput_p90_tok_s,
+            throughput_sample_count,
+        ) = match rates.get(&rate_key) {
+            Some(bucket_rates) if !bucket_rates.is_empty() => {
+                let mut bucket_rates = bucket_rates.clone();
+                bucket_rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                (
+                    Some(percentile_f64(&bucket_rates, 0.10)),
+                    Some(percentile_f64(&bucket_rates, 0.50)),
+                    Some(percentile_f64(&bucket_rates, 0.90)),
+                    bucket_rates.len() as u64,
+                )
+            },
+            _ => (None, None, None, 0),
+        };
         let point = LatencyPercentilePoint {
             ts: *bucket,
+            p10_ms: percentile_f64(&values, 0.10),
             p50_ms: percentile_f64(&values, 0.50),
             p90_ms: percentile_f64(&values, 0.90),
             p95_ms: percentile_f64(&values, 0.95),
             p99_ms: percentile_f64(&values, 0.99),
             count: values.len() as u64,
+            throughput_p10_tok_s,
+            throughput_p50_tok_s,
+            throughput_p90_tok_s,
+            throughput_sample_count,
         };
         let series = out
             .metrics

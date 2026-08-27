@@ -666,12 +666,26 @@ pub struct LatencyStats {
     pub ttft_p50_ms: Option<i64>,
     pub ttft_p95_ms: Option<i64>,
     pub ttft_p99_ms: Option<i64>,
-    /// Derived output token throughput (output_tokens / span_duration_sec).
-    /// Span duration includes network + queue time, NOT pure generation time.
+    /// Derived end-to-end output throughput (output_tokens / span_duration),
+    /// computed per call from raw nanosecond durations. Span duration
+    /// includes provider, queue and network time — NOT pure generation
+    /// throughput. Lower-tail / median / upper-reference triple (#119);
+    /// p10 is a weak estimate when `throughput_sample_count < 10`.
     /// Only set for spans where both output_tokens > 0 and duration > 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_tokens_per_sec_p10: Option<f64>,
     pub derived_tokens_per_sec_p50: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_tokens_per_sec_p90: Option<f64>,
+    /// p95/p99 retained during a documented compatibility period; the
+    /// primary presentation is p10/p50/p90 (#119).
     pub derived_tokens_per_sec_p95: Option<f64>,
     pub derived_tokens_per_sec_p99: Option<f64>,
+    /// Number of calls eligible for throughput (output_tokens > 0 and
+    /// duration > 0). Separate from `count` (all request spans in the
+    /// group) — confidence warnings must use this, not `count`.
+    #[serde(default)]
+    pub throughput_sample_count: usize,
     /// Distribution of input token counts (context / prompt size).
     pub input_tokens_p50: Option<i64>,
     pub input_tokens_p95: Option<i64>,
@@ -1708,6 +1722,10 @@ pub struct LatencySeriesPoint {
 pub struct LatencyPercentilePoint {
     /// Bucket start timestamp in nanoseconds since Unix epoch.
     pub ts: i64,
+    /// 10th percentile in milliseconds (lower tail, #119). Weak estimate
+    /// when `count < 10`. Absent from pre-#119 server responses.
+    #[serde(default)]
+    pub p10_ms: f64,
     /// 50th percentile in milliseconds.
     pub p50_ms: f64,
     /// 90th percentile in milliseconds.
@@ -1718,6 +1736,21 @@ pub struct LatencyPercentilePoint {
     pub p99_ms: f64,
     /// Number of values in this bucket.
     pub count: u64,
+    /// Derived end-to-end output throughput percentiles in tokens/second,
+    /// computed per call from raw nanosecond durations (never aggregate
+    /// tokens / aggregate duration). `None` when the bucket has no
+    /// throughput-eligible calls (output_tokens > 0 and duration > 0).
+    /// Absent from pre-#119 server responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_p10_tok_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_p50_tok_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_p90_tok_s: Option<f64>,
+    /// Calls in this bucket eligible for throughput. Separate from
+    /// `count` — confidence warnings must use this.
+    #[serde(default)]
+    pub throughput_sample_count: u64,
 }
 
 /// Percentile series for one metric ("duration" or "ttft"): the "all"

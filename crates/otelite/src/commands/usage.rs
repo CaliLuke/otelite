@@ -1166,8 +1166,10 @@ fn display_latency_stats(stats: &[otelite_core::api::LatencyStats]) {
         Cell::new("p50 ms").fg(Color::Cyan),
         Cell::new("p95 ms").fg(Color::Cyan),
         Cell::new("p99 ms").fg(Color::Cyan),
+        Cell::new("Tok/s* p10").fg(Color::Yellow),
         Cell::new("Tok/s* p50").fg(Color::Yellow),
-        Cell::new("Tok/s* p95").fg(Color::Yellow),
+        Cell::new("Tok/s* p90").fg(Color::Yellow),
+        Cell::new("N*").fg(Color::Yellow),
         Cell::new("Context p50").fg(Color::Cyan),
         Cell::new("Context p95").fg(Color::Cyan),
         Cell::new("Out/Context p50").fg(Color::Cyan),
@@ -1197,16 +1199,23 @@ fn display_latency_stats(stats: &[otelite_core::api::LatencyStats]) {
         } else {
             "—".to_string()
         };
+        let tok_rate = |v: Option<f64>| v.map_or("—".to_string(), |x| format!("{x:.0}"));
+        // Weak lower-tail marker: p10 is untrustworthy under 10 samples.
+        let sample_count = if s.throughput_sample_count < 10 {
+            format!("{}†", s.throughput_sample_count)
+        } else {
+            s.throughput_sample_count.to_string()
+        };
         table.add_row(vec![
             model,
             &s.count.to_string(),
             &s.p50_ms.to_string(),
             &s.p95_ms.to_string(),
             &s.p99_ms.to_string(),
-            &s.derived_tokens_per_sec_p50
-                .map_or("—".to_string(), |v| format!("{:.0}", v)),
-            &s.derived_tokens_per_sec_p95
-                .map_or("—".to_string(), |v| format!("{:.0}", v)),
+            &tok_rate(s.derived_tokens_per_sec_p10),
+            &tok_rate(s.derived_tokens_per_sec_p50),
+            &tok_rate(s.derived_tokens_per_sec_p90),
+            &sample_count,
             &s.input_tokens_p50
                 .map_or("—".to_string(), |v| format_number(v as u64)),
             &s.input_tokens_p95
@@ -1218,8 +1227,11 @@ fn display_latency_stats(stats: &[otelite_core::api::LatencyStats]) {
         ]);
     }
 
-    println!("Latency Stats by Model (* = derived, span duration includes network+queue time):");
+    println!("Latency Stats by Model:");
     println!("{}", table);
+    println!(
+        "* Tok/s = derived end-to-end output throughput (output tokens / span duration, which includes provider, queue and network time — not pure generation rate); N = calls with positive output and duration. † p10 is a weak estimate below 10 samples."
+    );
     if stats.iter().any(|stats| stats.ttft_degenerate) {
         println!(
             "TTFT is emitter-supplied. “buffered” means most first-token values were near full request duration, so no stream was observed."
@@ -1386,26 +1398,39 @@ fn display_latency_percentiles<'a>(
             Cell::new("Bucket").fg(Color::Cyan),
             Cell::new("Model").fg(Color::Cyan),
             Cell::new("N").fg(Color::Cyan),
+            Cell::new("p10 ms").fg(Color::Green),
             Cell::new("p50 ms").fg(Color::Green),
             Cell::new("p90 ms").fg(Color::Yellow),
             Cell::new("p95 ms").fg(Color::Yellow),
             Cell::new("p99 ms").fg(Color::Red),
+            Cell::new("Tok/s* (p10/p50/p90)").fg(Color::Yellow),
         ]);
         for p in points {
             let dt = DateTime::<Utc>::from_timestamp_nanos(p.ts);
             let bucket_str = dt.with_timezone(&Local).format("%m-%d %H:%M").to_string();
+            let tok = match (
+                p.throughput_p10_tok_s,
+                p.throughput_p50_tok_s,
+                p.throughput_p90_tok_s,
+            ) {
+                (Some(a), Some(b), Some(c)) => format!("{a:.0}/{b:.0}/{c:.0}"),
+                _ => "—".to_string(),
+            };
             table.add_row(vec![
                 Cell::new(bucket_str),
                 Cell::new(&label),
                 Cell::new(p.count),
+                Cell::new(format!("{:.0}", p.p10_ms)),
                 Cell::new(format!("{:.0}", p.p50_ms)),
                 Cell::new(format!("{:.0}", p.p90_ms)),
                 Cell::new(format!("{:.0}", p.p95_ms)),
                 Cell::new(format!("{:.0}", p.p99_ms)),
+                Cell::new(tok),
             ]);
         }
         println!("Latency Percentiles ({metric}, {label}):");
         println!("{table}");
+        println!("* Tok/s = derived end-to-end output throughput per call (raw ns durations); N = calls, not the throughput sample.");
         println!();
     }
     if !any {

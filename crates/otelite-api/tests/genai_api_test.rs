@@ -1786,3 +1786,73 @@ async fn test_cache_hit_rate_envelope_and_filters() {
     assert!(v.get("items").is_none(), "{v}");
     assert_eq!(v["filters_applied"], serde_json::json!([]));
 }
+
+/// Issue #119/#140: latency stats and percentile series expose the
+/// per-call throughput triple (p10/p50/p90 tok/s) with a sample count
+/// distinct from the total call count, plus the lower-tail duration p10.
+#[tokio::test]
+async fn test_latency_throughput_fields_end_to_end() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    // Three 100 ms calls at 10, 100 and 1000 tok/s (1/10/100 output
+    // tokens), spaced 1 ms apart so every span fits the 1 s test window.
+    for (i, tokens) in [1i64, 10, 100].into_iter().enumerate() {
+        let mut span = llm_request_span(
+            &format!("tp-{i}"),
+            "modelA",
+            R0 + i as i64 * 1_000_000,
+            100,
+            None,
+        );
+        span.attributes
+            .insert("gen_ai.usage.output_tokens".to_string(), tokens.to_string());
+        storage.write_span(&span).await.unwrap();
+    }
+    // A duration-only call: in `count`, not in the throughput sample.
+    storage
+        .write_span(&llm_request_span(
+            "tp-nout",
+            "modelA",
+            R0 + 3_000_000,
+            100,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+
+    // Aggregate stats.
+    let (status, v) = get_json(
+        &app,
+        &format!("/api/genai/latency_stats?start_time={R0}&end_time={R1}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let row = v["items"].as_array().unwrap()[0].clone();
+    assert_eq!(row["count"], 4);
+    assert_eq!(row["throughput_sample_count"], 3);
+    assert_eq!(row["derived_tokens_per_sec_p10"], 10.0);
+    assert_eq!(row["derived_tokens_per_sec_p50"], 100.0);
+    assert_eq!(row["derived_tokens_per_sec_p90"], 1000.0);
+    // p95/p99 retained during the compatibility period.
+    assert_eq!(row["derived_tokens_per_sec_p95"], 1000.0);
+    assert_eq!(row["derived_tokens_per_sec_p99"], 1000.0);
+
+    // Percentile series: lower-tail p10 + throughput triple per bucket.
+    let (status, v) = get_json(
+        &app,
+        &format!(
+            "/api/genai/latency_percentiles?start_time={R0}&end_time={R1}&bucket_secs=3600&metrics=duration"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let point = v["metrics"]["duration"]["all"].as_array().unwrap()[0].clone();
+    assert_eq!(point["count"], 4);
+    assert_eq!(point["throughput_sample_count"], 3);
+    assert_eq!(point["throughput_p10_tok_s"], 10.0);
+    assert_eq!(point["throughput_p50_tok_s"], 100.0);
+    assert_eq!(point["throughput_p90_tok_s"], 1000.0);
+    assert!(point["p10_ms"].is_number());
+}

@@ -248,12 +248,18 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
+        // p10/p50/p90: lower-tail / median / upper-reference (#119).
+        Cell::from("tok/s p10").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Cell::from("tok/s p50").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from("tok/s p95").style(
+        Cell::from("tok/s p90").style(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -330,11 +336,15 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
                 Cell::from(s.p50_ms.to_string()),
                 p95_dur_cell,
                 Cell::from(
+                    s.derived_tokens_per_sec_p10
+                        .map_or("—".to_string(), |v| format!("{:.0}", v)),
+                ),
+                Cell::from(
                     s.derived_tokens_per_sec_p50
                         .map_or("—".to_string(), |v| format!("{:.0}", v)),
                 ),
                 Cell::from(
-                    s.derived_tokens_per_sec_p95
+                    s.derived_tokens_per_sec_p90
                         .map_or("—".to_string(), |v| format!("{:.0}", v)),
                 ),
                 Cell::from(
@@ -364,8 +374,9 @@ fn render_latency_table(frame: &mut Frame, area: Rect, state: &UsageState) {
             Constraint::Length(5), // N
             Constraint::Length(6), // p50ms
             Constraint::Length(6), // p95ms
+            Constraint::Length(9), // tok/s p10
             Constraint::Length(9), // tok/s p50
-            Constraint::Length(9), // tok/s p95
+            Constraint::Length(9), // tok/s p90
             Constraint::Length(7), // ctx p50
             Constraint::Length(7), // ctx p95
             Constraint::Length(9), // o/ctx p50
@@ -1197,9 +1208,12 @@ mod tests {
             ttft_invalid_count: 0,
             ttft_degenerate_count: 0,
             ttft_degenerate: false,
+            derived_tokens_per_sec_p10: None,
             derived_tokens_per_sec_p50: None,
+            derived_tokens_per_sec_p90: None,
             derived_tokens_per_sec_p95: None,
             derived_tokens_per_sec_p99: None,
+            throughput_sample_count: 0,
             input_tokens_p50: None,
             input_tokens_p95: None,
             input_tokens_p99: None,
