@@ -11,6 +11,7 @@ use otelite_core::telemetry::trace::{SpanKind, SpanStatus, StatusCode};
 use otelite_core::telemetry::{LogRecord, Metric, Resource, Span};
 use otelite_storage::sqlite::SqliteBackend;
 use otelite_storage::{QueryParams, StorageBackend, StorageConfig};
+use rusqlite::Connection;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -69,6 +70,36 @@ async fn test_data_persists_across_restarts() {
 
         backend.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn initialization_preserves_valid_existing_database_objects() {
+    let temp_dir = TempDir::new().unwrap();
+    let config = StorageConfig::default().with_data_dir(temp_dir.path().to_path_buf());
+    let database_path = temp_dir.path().join("otelite.db");
+
+    let mut first = SqliteBackend::new(config.clone());
+    first.initialize().await.unwrap();
+    first.close().await.unwrap();
+
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE external_metadata (value TEXT NOT NULL);
+             INSERT INTO external_metadata (value) VALUES ('preserved');",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut restarted = SqliteBackend::new(config);
+    restarted.initialize().await.unwrap();
+    restarted.close().await.unwrap();
+
+    let connection = Connection::open(database_path).unwrap();
+    let value: String = connection
+        .query_row("SELECT value FROM external_metadata", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "preserved");
 }
 
 #[tokio::test]

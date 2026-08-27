@@ -120,7 +120,7 @@ Only implementation: `SqliteBackend` (`src/sqlite/mod.rs`). Uses WAL mode, FTS5 
 
 **There is no mock implementation.** Tests use `SqliteBackend` with an in-memory or temp-dir database.
 
-**Data Retention:** By default, otelite retains 90 days of telemetry data. The retention window is configurable via the `OTELITE_RETENTION_DAYS` environment variable (set to `0` to disable automatic purging). A background task runs daily at 02:00 local time and deletes records older than the retention threshold in batches of 10,000 rows to avoid locking the database. Users can also trigger an immediate full purge via `POST /api/admin/purge` or the "Clear all data" button in the web UI status popover.
+**Data Retention:** By default, otelite retains 90 days of telemetry data. Configure the window with `OTELITE_RETENTION_DAYS`; `0` disables automatic retention and values above `365` are rejected. `OTELITE_AUTO_PURGE_ENABLED=false` also disables scheduled purging without changing the retention window. `OTELITE_PURGE_SCHEDULE` accepts a 5-, 6-, or 7-field cron expression and defaults to daily at 02:00 local time. Scheduled deletion uses bounded batches to avoid long write locks. Users can still trigger an immediate full purge via `POST /api/admin/purge` or the "Clear all data" button in the web UI status popover.
 
 ---
 

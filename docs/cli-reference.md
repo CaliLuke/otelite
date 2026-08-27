@@ -44,6 +44,20 @@ then loopback default. Pass an explicit `0.0.0.0:<PORT>` address for container
 or LAN access. Startup output, `otelite status`, `/api/health`, and the web
 status popover report the resolved receiver addresses.
 
+Storage settings use the same resolution for `serve`, `start`, and `restart`.
+`--storage-path <DIR>` overrides `OTELITE_DATA_DIR`; otherwise the database
+directory defaults to `~/.otelite/data`.
+
+| Environment variable | Default | Behavior |
+|---|---:|---|
+| `OTELITE_DATA_DIR` | `~/.otelite/data` | Directory containing `otelite.db` |
+| `OTELITE_RETENTION_DAYS` | `90` | Days retained; `0` disables automatic retention, maximum `365` |
+| `OTELITE_PURGE_SCHEDULE` | `0 2 * * *` | Cron schedule for automatic purge, in local time |
+| `OTELITE_AUTO_PURGE_ENABLED` | `true` | Set to `false` to disable scheduled purging |
+
+Otelite opens a valid existing `otelite.db` in place. Startup does not rotate,
+replace, or reset it.
+
 ---
 
 ## Logs

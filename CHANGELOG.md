@@ -18,6 +18,14 @@ have to work around), not implementation detail.
   `--grpc-addr` / `--http-addr` or environment variables, and see the resolved
   endpoints in startup, daemon status, health, and the web status popover.
 
+### Changed
+
+- Apply storage directory, retention, purge schedule, and auto-purge
+  environment settings consistently to foreground and daemon startup.
+  `--storage-path` overrides `OTELITE_DATA_DIR`, and setting retention to `0`
+  now explicitly disables scheduled retention without replacing an existing
+  database.
+
 ## [0.1.83] - 2026-08-27
 
 ### Added
