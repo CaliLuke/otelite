@@ -27,7 +27,7 @@ class ApiClient {
         '/genai/latency_series', '/genai/calls_series', '/genai/latency_by_context',
         '/genai/error_types', '/genai/model_drift', '/genai/stop_reasons',
         '/genai/context_type_split', '/genai/tool_errors', '/genai/hour_of_day',
-        '/genai/agent_framework_defs',
+        '/genai/agent_framework_defs', '/genai/cache_hit_rate',
     ]);
 
     /**

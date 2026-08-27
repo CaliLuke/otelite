@@ -1286,6 +1286,7 @@ class AnalyticsView {
         const hint = ttftPolyline
             ? 'Solid bar = avg; faded = p95; orange line = TTFT avg (own y-scale). Hover for per-model breakdown.'
             : 'Solid bar = avg; faded extension = p95. Hover for per-model breakdown.';
+        const brushAttrs = this._brushAttrs(buckets.map(b => b.timestamp), bucketSecs);
         return `
             <h3>Latency over time — peak p95 ${peakP95.toLocaleString()} ms ${ttftLegend}</h3>
             <p class="table-hint">${hint}</p>
@@ -1510,6 +1511,7 @@ class AnalyticsView {
                 </div>`;
         }
 
+        const brushAttrs = this._brushAttrs(buckets.map(b => b.timestamp), bucketSecs);
         return `
             <h3>Cost over time — total $${total.toFixed(4)} across ${buckets.length} bucket${buckets.length === 1 ? '' : 's'}</h3>
             <div class="cost-chart">

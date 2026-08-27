@@ -11,6 +11,15 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Fixed
+
+- The GenAI view's Cost and Latency charts no longer fail to load with a
+  `brushAttrs is not defined` console error; all four time-series charts
+  render and support brush-to-focus zoom again.
+- The cache hit rate endpoint no longer returns a 500 error on every
+  request. The per-model cache hit rate panel (and the TUI panels that read
+  the filter-wrapped GenAI list endpoints) work again.
+
 ## [0.1.77] - 2026-08-27
 
 ### Added

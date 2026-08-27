@@ -282,13 +282,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::LatencySeriesPoint>> {
         let url = format!("{}/api/genai/latency_series", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch latency series: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "latency series").await
     }
 
     pub async fn fetch_calls_series(
@@ -297,13 +291,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::CallsSeriesPoint>> {
         let url = format!("{}/api/genai/calls_series", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch calls series: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "calls series").await
     }
 
     pub async fn fetch_latency_by_context(
@@ -312,13 +300,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::LatencyByContextBin>> {
         let url = format!("{}/api/genai/latency_by_context", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch latency by context: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "latency by context").await
     }
 
     pub async fn fetch_latency_stats(
@@ -327,13 +309,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::LatencyStats>> {
         let url = format!("{}/api/genai/latency_stats", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch latency stats: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "latency stats").await
     }
 
     /// Fetch a generic distribution over a named metric cohort (issue #133).
@@ -389,13 +365,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::TruncationRateByModel>> {
         let url = format!("{}/api/genai/truncation_rate", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch truncation rate: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "truncation rate").await
     }
 
     pub async fn fetch_cache_hit_rate(
@@ -404,13 +374,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::CacheHitRateByModel>> {
         let url = format!("{}/api/genai/cache_hit_rate", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch cache hit rate: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "cache hit rate").await
     }
 
     pub async fn fetch_agent_roles(
@@ -557,13 +521,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::ToolUsage>> {
         let url = format!("{}/api/genai/tool_usage", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch tool usage: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "tool usage").await
     }
 
     pub async fn fetch_error_types(
@@ -572,13 +530,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::ErrorTypeBreakdown>> {
         let url = format!("{}/api/genai/error_types", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch error types: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "error types").await
     }
 
     pub async fn fetch_model_drift(
@@ -587,13 +539,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::ModelDriftPair>> {
         let url = format!("{}/api/genai/model_drift", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch model drift: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "model drift").await
     }
 
     pub async fn fetch_session_diagnose(
@@ -658,13 +604,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::StopReasonCount>> {
         let url = format!("{}/api/genai/stop_reasons", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch stop reasons: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "stop reasons").await
     }
 
     pub async fn fetch_context_type_split(
@@ -673,13 +613,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::ContextTypeSplit>> {
         let url = format!("{}/api/genai/context_type_split", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch context type split: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "context type split").await
     }
 
     pub async fn fetch_tool_errors(
@@ -688,13 +622,7 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::ToolErrorEntry>> {
         let url = format!("{}/api/genai/tool_errors", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::ApiError(format!(
-                "Failed to fetch tool errors: HTTP {}",
-                response.status()
-            )));
-        }
-        Ok(response.json().await?)
+        Self::read_items(response, "tool errors").await
     }
 
     pub async fn fetch_hour_of_day(
@@ -703,13 +631,28 @@ impl ApiClient {
     ) -> Result<Vec<otelite_core::api::HourOfDayBucket>> {
         let url = format!("{}/api/genai/hour_of_day", self.base_url);
         let response = self.client.get(&url).query(&params).send().await?;
+        Self::read_items(response, "hour of day").await
+    }
+
+    /// The GenAI list endpoints wrap their array payload in an
+    /// `{ items, filters_applied }` envelope (#135). Parse it and return
+    /// the items; the TUI has no filter bar, so the echo is discarded.
+    async fn read_items<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+        what: &str,
+    ) -> Result<Vec<T>> {
         if !response.status().is_success() {
             return Err(Error::ApiError(format!(
-                "Failed to fetch hour of day: HTTP {}",
+                "Failed to fetch {}: HTTP {}",
+                what,
                 response.status()
             )));
         }
-        Ok(response.json().await?)
+        let envelope: serde_json::Value = response.json().await?;
+        let items = envelope.get("items").ok_or_else(|| {
+            Error::ApiError(format!("{} response is missing its 'items' envelope", what))
+        })?;
+        Ok(serde_json::from_value(items.clone())?)
     }
 }
 
@@ -1214,7 +1157,7 @@ mod tests {
             .match_query(mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"reason":"tool_use","count":85},{"reason":"end_turn","count":15}]"#)
+            .with_body(r#"{"items":[{"reason":"tool_use","count":85},{"reason":"end_turn","count":15}],"filters_applied":[]}"#)
             .create_async()
             .await;
 
@@ -1237,7 +1180,7 @@ mod tests {
             .match_query(mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"context":"code","calls":42,"input_tokens":1000,"output_tokens":500,"avg_ms":120.5}]"#)
+            .with_body(r#"{"items":[{"context":"code","calls":42,"input_tokens":1000,"output_tokens":500,"avg_ms":120.5}],"filters_applied":[]}"#)
             .create_async()
             .await;
 
@@ -1260,7 +1203,7 @@ mod tests {
             .match_query(mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"tool_name":"bash","error_message":"Permission denied","count":3}]"#)
+            .with_body(r#"{"items":[{"tool_name":"bash","error_message":"Permission denied","count":3}],"filters_applied":[]}"#)
             .create_async()
             .await;
 
@@ -1279,11 +1222,11 @@ mod tests {
     async fn test_fetch_hour_of_day_success() {
         let mut server = Server::new_async().await;
         // Return 24 buckets as the real endpoint does
-        let body: String = (0u32..24)
+        let items: String = (0u32..24)
             .map(|h| format!(r#"{{"hour":{h},"llm_calls":{},"tool_calls":{}}}"#, h * 2, h))
             .collect::<Vec<_>>()
             .join(",");
-        let body = format!("[{body}]");
+        let body = format!(r#"{{"items":[{items}],"filters_applied":[]}}"#);
         let mock = server
             .mock("GET", "/api/genai/hour_of_day")
             .match_query(mockito::Matcher::Any)
@@ -1304,6 +1247,59 @@ mod tests {
         assert_eq!(buckets[0].llm_calls, 0);
         assert_eq!(buckets[23].hour, 23);
         assert_eq!(buckets[23].llm_calls, 46);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_cache_hit_rate_unwraps_items_envelope() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/cache_hit_rate")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"items":[{"model":"claude-sonnet-4-5","total_input_tokens":100,
+                        "total_cache_read_tokens":40,"total_cache_creation_tokens":10,
+                        "hit_rate":0.2857}],
+                    "filters_applied":["model"]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client
+            .fetch_cache_hit_rate(vec![("model", "claude-sonnet-4-5".into())])
+            .await;
+
+        mock.assert_async().await;
+        let rows = result.expect("envelope response must parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(rows[0].total_cache_read_tokens, 40);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_cache_hit_rate_missing_items_errors() {
+        // A bare array (pre-#135 shape) must fail loudly, not parse as empty.
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/genai/cache_hit_rate")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[]"#)
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), Duration::from_secs(30)).unwrap();
+        let result = client.fetch_cache_hit_rate(vec![]).await;
+
+        mock.assert_async().await;
+        let err = result.expect_err("bare array is not the envelope shape");
+        assert!(
+            err.to_string().contains("missing its 'items' envelope"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

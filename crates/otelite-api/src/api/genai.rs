@@ -1431,7 +1431,7 @@ pub async fn get_cache_hit_rate(
                 ))),
             )
         })?;
-    let value = serde_json::to_value(rows).map_err(|e| {
+    let items = serde_json::to_value(rows).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::storage_error(format!(
@@ -1439,20 +1439,14 @@ pub async fn get_cache_hit_rate(
             ))),
         )
     })?;
-    let obj = value.as_object().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::storage_error(
-                "cache hit rate payload is not a JSON object".to_string(),
-            )),
-        )
-    })?;
-    let mut obj = obj.clone();
-    obj.insert(
-        "filters_applied".to_string(),
-        serde_json::to_value(filters.applied(&FILTER_DIMENSIONS)).unwrap_or_default(),
-    );
-    Ok(Json(serde_json::Value::Object(obj)))
+    // The per-model rows are an array, so — like the other list endpoints —
+    // they are wrapped in the standard { items, filters_applied } envelope
+    // rather than merged into the payload (issue #139: merging required an
+    // object and 500'd on the array).
+    Ok(Json(serde_json::json!({
+        "items": items,
+        "filters_applied": filters.applied(&FILTER_DIMENSIONS),
+    })))
 }
 
 /// Reasoning ("thinking") token share per model, plus a global

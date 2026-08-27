@@ -1582,6 +1582,7 @@ async fn test_filters_applied_echoed_on_all_genai_endpoints() {
         "/api/genai/tool_errors",
         "/api/genai/hour_of_day",
         "/api/genai/agent_framework_defs",
+        "/api/genai/cache_hit_rate",
     ];
     for uri in wrapped_endpoints {
         let (status, v) = get_json(&app, uri).await;
@@ -1717,4 +1718,71 @@ async fn test_model_filter_scopes_top_spans() {
         .map(|x| x.as_str().unwrap().to_string())
         .collect();
     assert!(applied.iter().any(|d| d == "model"), "{applied:?}");
+}
+
+/// Issue #139: the default branch returns a `Vec`, i.e. a JSON array. #135
+/// merged `filters_applied` into the payload expecting an object, so every
+/// request 500'd. It must now use the standard { items, filters_applied }
+/// envelope, and the by_model=1 economics branch must stay an object.
+#[tokio::test]
+async fn test_cache_hit_rate_envelope_and_filters() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+
+    // One llm_span_guard cohort span with input + cache-read tokens.
+    let mut span = llm_request_span("ch-1", "modelA", R0, 100, None);
+    span.attributes
+        .insert("gen_ai.system".to_string(), "anthropic".to_string());
+    span.attributes
+        .insert("gen_ai.usage.input_tokens".to_string(), "100".to_string());
+    span.attributes.insert(
+        "gen_ai.usage.cache_read.input_tokens".to_string(),
+        "40".to_string(),
+    );
+    storage.write_span(&span).await.unwrap();
+
+    let app = server.build_router();
+
+    // Default branch: envelope, not a 500.
+    let (status, v) = get_json(
+        &app,
+        &format!("/api/genai/cache_hit_rate?start_time={R0}&end_time={R1}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{v}");
+    assert_eq!(items[0]["model"], "modelA");
+    assert_eq!(items[0]["total_input_tokens"], 100);
+    assert_eq!(items[0]["total_cache_read_tokens"], 40);
+    // hit_rate = 40 / (40 + 100)
+    let rate = items[0]["hit_rate"].as_f64().unwrap();
+    assert!((rate - 40.0 / 140.0).abs() < 1e-12);
+    assert_eq!(v["filters_applied"], serde_json::json!([]));
+
+    // Model filter applies and is echoed.
+    let (status, v) = get_json(
+        &app,
+        &format!("/api/genai/cache_hit_rate?start_time={R0}&end_time={R1}&model=modelA"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "{v}");
+    let applied: Vec<String> = v["filters_applied"]
+        .as_array()
+        .cloned()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert!(applied.iter().any(|d| d == "model"), "{applied:?}");
+
+    // by_model=1: economics object — no items key — with an empty echo.
+    let (status, v) = get_json(
+        &app,
+        &format!("/api/genai/cache_hit_rate?start_time={R0}&end_time={R1}&by_model=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v.get("items").is_none(), "{v}");
+    assert_eq!(v["filters_applied"], serde_json::json!([]));
 }
