@@ -1137,3 +1137,141 @@ async fn test_get_latency_percentiles_with_data() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+async fn distribution_body(
+    app: axum::Router,
+    uri: String,
+) -> (StatusCode, otelite_core::api::DistributionResponse) {
+    let response = app
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp: otelite_core::api::DistributionResponse = serde_json::from_slice(&body).unwrap();
+    (status, resp)
+}
+
+#[tokio::test]
+async fn test_get_distributions_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+
+    let (status, resp) = distribution_body(
+        app,
+        format!("/api/genai/distributions?metric=llm_duration&start_time={R0}&end_time={R1}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp.buckets.is_empty(), "empty DB -> no buckets: {resp:?}");
+    assert!(resp.stats.is_none());
+    assert_eq!(resp.metric, "llm_duration");
+    assert_eq!(resp.unit, "ms");
+    assert_eq!(resp.scale, "linear");
+
+    // session_cost is priced in the API layer; empty DB -> empty distribution.
+    let app = server.build_router();
+    let (status, resp) = distribution_body(
+        app,
+        format!(
+            "/api/genai/distributions?metric=session_cost&start_time={R0}&end_time={R1}&scale=log"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp.unit, "usd");
+    assert!(resp.buckets.is_empty());
+}
+
+#[tokio::test]
+async fn test_get_distributions_with_data() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+    storage
+        .write_span(&llm_request_span("sp1", "modelA", R0, 100, Some(20)))
+        .await
+        .unwrap();
+    storage
+        .write_span(&llm_request_span(
+            "sp2",
+            "modelA",
+            R0 + 100_000_000,
+            300,
+            Some(90),
+        ))
+        .await
+        .unwrap();
+    storage
+        .write_span(&llm_request_span(
+            "sp3",
+            "modelB",
+            R0 + 200_000_000,
+            500,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+    let (status, resp) = distribution_body(
+        app,
+        format!(
+            "/api/genai/distributions?metric=llm_duration&start_time={R0}&end_time={R1}&buckets=3&scale=log"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp.buckets.iter().map(|b| b.count).sum::<u64>(), 3);
+    let s = resp.stats.as_ref().expect("stats present");
+    assert_eq!(s.count, 3);
+    assert_eq!(s.min, 100.0);
+    assert_eq!(s.max, 500.0);
+    assert!((s.mean - (100.0 + 300.0 + 500.0) / 3.0).abs() < 1e-9);
+    // sorted [100, 300, 500]: p50 -> idx (3-1)*0.5=1 -> 300
+    assert_eq!(s.p50, 300.0);
+    assert_eq!(s.p95, 500.0);
+
+    // ttft cohort: two span values, third span has none.
+    let app = server.build_router();
+    let (status, resp) = distribution_body(
+        app,
+        format!("/api/genai/distributions?metric=ttft&start_time={R0}&end_time={R1}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let s = resp.stats.as_ref().unwrap();
+    assert_eq!(s.count, 2, "sp1 + sp2 carried valid ttft");
+    assert_eq!(s.min, 20.0);
+    assert_eq!(s.max, 90.0);
+
+    // Unknown metric → 400 (error body, not a distribution).
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/genai/distributions?metric=bogus&start_time={R0}&end_time={R1}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Bad scale → 400.
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/genai/distributions?metric=ttft&start_time={R0}&end_time={R1}&scale=exponential"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

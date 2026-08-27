@@ -1995,6 +1995,159 @@ fn percentile_f64(sorted: &[f64], p: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
+/// One LLM request span's latency values (issue #132/#133 cohort).
+#[derive(Debug, Clone)]
+struct LlmRequestValue {
+    model: Option<String>,
+    start_ns: i64,
+    /// Span duration in ms; negative when `end_time < start_time`.
+    duration_ms: f64,
+    /// Validated normalized TTFT in ms, when the span carried a usable one.
+    ttft_ms: Option<f64>,
+    /// Requested output tokens, when the span carried a usable count.
+    output_tokens: Option<f64>,
+}
+
+/// Collect LLM request spans (all harnesses, `request_span_guard`) with
+/// duration, validated TTFT and output tokens for the window.
+fn collect_llm_request_values(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<LlmRequestValue>> {
+    use otelite_core::telemetry::{classify_ttft_value, TtftValueQuality};
+
+    let exprs = token_exprs();
+    let mut where_clause = format!("WHERE {}", exprs.request_span_guard);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND start_time >= ?");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(" AND end_time <= ?");
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT
+            (end_time - start_time) / 1000000 AS duration_ms,
+            {model} AS model,
+            start_time,
+            json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
+            json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
+            json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms,
+            {output} AS output_tokens
+         FROM spans
+         {where_clause}",
+        model = exprs.model,
+        output = exprs.output,
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare llm request values query: {e}"))
+    })?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute llm request values query: {e}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse llm request value rows: {e}"))
+        })?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (duration_ms, model, start_ns, otel, llm, custom, output_tokens) in rows {
+        let mut ttft_ms = None;
+        if let Some(Ok(ttft)) =
+            normalized_ttft_ms(otel.as_deref(), llm.as_deref(), custom.as_deref())
+        {
+            if classify_ttft_value(Some(ttft as f64 / 1000.0), duration_ms as f64 / 1000.0)
+                == TtftValueQuality::Valid
+            {
+                ttft_ms = Some(ttft as f64);
+            }
+        }
+        out.push(LlmRequestValue {
+            model,
+            start_ns,
+            duration_ms: duration_ms as f64,
+            ttft_ms,
+            output_tokens: output_tokens.map(|t| t as f64),
+        });
+    }
+    Ok(out)
+}
+
+/// Collect codex turn TTFT histogram observations (issue #132/#133 cohort).
+/// Codex request spans carry no TTFT attribute, so this cohort is disjoint
+/// from the span TTFT values. `count == 1` rows are exact; larger rows
+/// expand each bucket's observations at the bucket midpoint.
+fn collect_codex_ttft_values(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<Vec<(Option<String>, i64, f64)>> {
+    use otelite_core::semconv::metric_names as mnames;
+
+    let mut where_clause =
+        String::from("WHERE name = ?1 AND json_valid(attributes) AND json_valid(value_histogram)");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(mnames::CODEX_TURN_TTFT.to_string())];
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND timestamp >= ?2");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+    let sql = format!(
+        "SELECT json_extract(attributes, '$.model'), timestamp, value_histogram          FROM metrics {where_clause}",
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!("Failed to prepare codex ttft histogram query: {e}"))
+    })?;
+    let hist_rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to execute codex ttft histogram query: {e}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to parse codex ttft histogram rows: {e}"))
+        })?;
+
+    let mut out: Vec<(Option<String>, i64, f64)> = Vec::new();
+    for (model, ts, hist_json) in hist_rows {
+        let Some(values) = expand_histogram_midpoints(&hist_json) else {
+            continue;
+        };
+        for v in values {
+            out.push((model.clone(), ts, v));
+        }
+    }
+    Ok(out)
+}
+
 /// Bucketed latency percentiles (issue #132).
 ///
 /// Cohorts, matching `query_latency_stats` so the two endpoints never
@@ -2017,8 +2170,6 @@ pub fn query_latency_percentiles(
     use otelite_core::api::{
         LatencyPercentilePoint, LatencyPercentileSeries, LatencyPercentilesResponse,
     };
-    use otelite_core::semconv::metric_names as mnames;
-    use otelite_core::telemetry::{classify_ttft_value, TtftValueQuality};
 
     if bucket_secs == 0 {
         return Err(StorageError::QueryError(
@@ -2034,52 +2185,12 @@ pub fn query_latency_percentiles(
     }
     let bucket_ns = bucket_secs as i64 * 1_000_000_000;
 
-    let exprs = token_exprs();
-    let mut where_clause = format!("WHERE {}", exprs.request_span_guard);
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(start) = start_time {
-        where_clause.push_str(" AND start_time >= ?");
-        params.push(Box::new(start));
-    }
-    if let Some(end) = end_time {
-        where_clause.push_str(" AND end_time <= ?");
-        params.push(Box::new(end));
-    }
-
-    let sql = format!(
-        "SELECT
-            (end_time - start_time) / 1000000 AS duration_ms,
-            {model} AS model,
-            start_time,
-            json_extract(attributes, '$.\"gen_ai.server.time_to_first_token\"') AS otel_ttft_secs,
-            json_extract(attributes, '$.\"llm.time_to_first_token\"') AS llm_ttft_secs,
-            json_extract(attributes, '$.\"ttft_ms\"') AS custom_ttft_ms
-         FROM spans
-         {where_clause}",
-        model = exprs.model,
-    );
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql).map_err(|e| {
-        StorageError::QueryError(format!("Failed to prepare latency_percentiles query: {e}"))
-    })?;
-    let span_rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })
-        .map_err(|e| {
-            StorageError::QueryError(format!("Failed to execute latency_percentiles query: {e}"))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| {
-            StorageError::QueryError(format!("Failed to parse latency_percentiles rows: {e}"))
-        })?;
+    let span_values = collect_llm_request_values(conn, start_time, end_time)?;
+    let codex_ttft = if want_ttft {
+        collect_codex_ttft_values(conn, start_time, end_time)?
+    } else {
+        Vec::new()
+    };
 
     // (metric, model|None, bucket) -> values in ms
     let mut groups: std::collections::BTreeMap<(&'static str, Option<String>, i64), Vec<f64>> =
@@ -2104,87 +2215,27 @@ pub fn query_latency_percentiles(
             }
         };
 
-    for (duration_ms, model, start_ns, otel, llm, custom) in span_rows {
-        if duration_ms < 0 {
+    for v in span_values {
+        if v.duration_ms < 0.0 {
             continue;
         }
         if want_duration {
             push(
                 &mut groups,
                 "duration",
-                model.clone(),
-                start_ns,
-                duration_ms as f64,
+                v.model.clone(),
+                v.start_ns,
+                v.duration_ms,
             );
         }
         if want_ttft {
-            let Some(quality) =
-                normalized_ttft_ms(otel.as_deref(), llm.as_deref(), custom.as_deref())
-            else {
-                continue;
-            };
-            let Ok(ttft_ms) = quality else {
-                continue;
-            };
-            if classify_ttft_value(Some(ttft_ms as f64 / 1000.0), duration_ms as f64 / 1000.0)
-                != TtftValueQuality::Valid
-            {
-                continue;
+            if let Some(ttft) = v.ttft_ms {
+                push(&mut groups, "ttft", v.model, v.start_ns, ttft);
             }
-            push(&mut groups, "ttft", model, start_ns, ttft_ms as f64);
         }
     }
-
-    // Codex TTFT histogram (disjoint cohort: codex request spans carry no
-    // TTFT attribute). count == 1 rows are exact; larger rows expand each
-    // bucket's observations at the bucket midpoint.
-    if want_ttft {
-        let mut hist_where = String::from(
-            "WHERE name = ?1 AND json_valid(attributes) AND json_valid(value_histogram)",
-        );
-        let mut hist_params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(mnames::CODEX_TURN_TTFT.to_string())];
-        if let Some(start) = start_time {
-            hist_where.push_str(" AND timestamp >= ?2");
-            hist_params.push(Box::new(start));
-        }
-        if let Some(end) = end_time {
-            hist_where.push_str(&format!(" AND timestamp <= ?{}", hist_params.len() + 1));
-            hist_params.push(Box::new(end));
-        }
-        let hist_sql = format!(
-            "SELECT json_extract(attributes, '$.model'), timestamp, value_histogram \
-             FROM metrics {hist_where}",
-        );
-        let hist_refs: Vec<&dyn rusqlite::ToSql> = hist_params.iter().map(|p| p.as_ref()).collect();
-        let mut hist_stmt = conn.prepare(&hist_sql).map_err(|e| {
-            StorageError::QueryError(format!("Failed to prepare codex ttft histogram query: {e}"))
-        })?;
-        let hist_rows = hist_stmt
-            .query_map(hist_refs.as_slice(), |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| {
-                StorageError::QueryError(format!(
-                    "Failed to execute codex ttft histogram query: {e}"
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                StorageError::QueryError(format!("Failed to parse codex ttft histogram rows: {e}"))
-            })?;
-        for (model, ts, hist_json) in hist_rows {
-            let Some(values) = expand_histogram_midpoints(&hist_json) else {
-                continue;
-            };
-            for v in values {
-                push(&mut groups, "ttft", model.clone(), ts, v);
-            }
-        }
+    for (model, ts, v) in codex_ttft {
+        push(&mut groups, "ttft", model, ts, v);
     }
 
     let mut out = LatencyPercentilesResponse::default();
@@ -2215,6 +2266,104 @@ pub fn query_latency_percentiles(
         }
     }
     Ok(out)
+}
+
+/// Generic distribution over a named metric cohort (issue #133).
+///
+/// Resolvers:
+/// - tool_duration: tool-span `(end_time - start_time)` in ms, all
+///   harnesses (`tool_span_guard`, same cohort as the tool-usage view).
+/// - llm_duration / ttft / output_tokens: the #132 LLM cohorts (span
+///   values UNION the codex TTFT histogram for ttft).
+/// - session_cost: requires pricing (the API layer prices claude sessions
+///   from tokens), so it is resolved there, not here.
+#[allow(clippy::too_many_arguments)]
+pub fn query_distribution(
+    conn: &Connection,
+    metric: &str,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    buckets: usize,
+    scale: &str,
+) -> Result<otelite_core::api::DistributionResponse> {
+    use otelite_core::distribution;
+
+    if scale != "linear" && scale != "log" {
+        return Err(StorageError::QueryError(format!(
+            "unknown scale '{scale}' — expected \"linear\" or \"log\""
+        )));
+    }
+
+    let values: Vec<f64> = match metric {
+        "tool_duration" => {
+            let mut where_clause =
+                format!("WHERE {}", otelite_core::semconv::tool_span_guard("attributes"));
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(start) = start_time {
+                where_clause.push_str(" AND start_time >= ?");
+                params.push(Box::new(start));
+            }
+            if let Some(end) = end_time {
+                where_clause.push_str(" AND end_time <= ?");
+                params.push(Box::new(end));
+            }
+            let sql = format!(
+                "SELECT (end_time - start_time) / 1000000 FROM spans {where_clause}"
+            );
+            let param_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql).map_err(|e| {
+                StorageError::QueryError(format!("Failed to prepare tool_duration query: {e}"))
+            })?;
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))
+                .map_err(|e| {
+                    StorageError::QueryError(format!("Failed to execute tool_duration query: {e}"))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    StorageError::QueryError(format!("Failed to parse tool_duration rows: {e}"))
+                })?;
+            rows.into_iter().filter(|v| *v >= 0).map(|v| v as f64).collect()
+        },
+        "llm_duration" | "ttft" | "output_tokens" => {
+            let reqs = collect_llm_request_values(conn, start_time, end_time)?;
+            match metric {
+                "llm_duration" => reqs
+                    .iter()
+                    .filter(|v| v.duration_ms >= 0.0)
+                    .map(|v| v.duration_ms)
+                    .collect(),
+                "ttft" => {
+                    let mut vals: Vec<f64> =
+                        reqs.iter().filter_map(|v| v.ttft_ms).collect();
+                    for (_, _, v) in collect_codex_ttft_values(conn, start_time, end_time)? {
+                        vals.push(v);
+                    }
+                    vals
+                },
+                _ => reqs.iter().filter_map(|v| v.output_tokens).collect(),
+            }
+        },
+        "session_cost" => {
+            return Err(StorageError::QueryError(
+                "session_cost is priced in the API layer (claude sessions are priced from \
+                 tokens); use the distributions endpoint"
+                    .to_string(),
+            ))
+        },
+        other => {
+            return Err(StorageError::QueryError(format!(
+                "unknown metric '{other}' — expected session_cost | tool_duration | llm_duration | ttft | output_tokens"
+            )))
+        },
+    };
+
+    let unit = match metric {
+        "tool_duration" | "llm_duration" | "ttft" => "ms",
+        _ => "tokens",
+    };
+    Ok(distribution::build(metric, unit, scale, buckets, values))
 }
 
 /// Expand one OTel histogram data point into per-observation values in ms.
@@ -8301,12 +8450,15 @@ mod tests {
         span_id: &str,
         model: &str,
         start_ns: i64,
-        values: (i64, Option<i64>),
+        values: (i64, Option<i64>, Option<i64>),
     ) {
-        let (duration_ms, ttft_ms) = values;
+        let (duration_ms, ttft_ms, output_tokens) = values;
         let mut attrs = format!("{{\"session.id\":\"s1\",\"model\":\"{model}\"");
         if let Some(ttft) = ttft_ms {
             attrs.push_str(&format!(",\"ttft_ms\":\"{ttft}\""));
+        }
+        if let Some(toks) = output_tokens {
+            attrs.push_str(&format!(",\"output_tokens\":{toks}"));
         }
         attrs.push('}');
         let end_ns = start_ns + duration_ms * 1_000_000;
@@ -8377,11 +8529,29 @@ mod tests {
         let conn = setup_test_db();
         // bucket = 10s. Two buckets: T0..T0+10s and T0+10s..T0+20s.
         // modelA: durations 100ms, 300ms (bucket 1) and 500ms (bucket 2)
-        insert_llm_request_span(&conn, "a1", "modelA", T0, (100, Some(20)));
-        insert_llm_request_span(&conn, "a2", "modelA", T0 + 5_000_000_000, (300, Some(90)));
-        insert_llm_request_span(&conn, "a3", "modelA", T0 + 12_000_000_000, (500, None));
+        insert_llm_request_span(&conn, "a1", "modelA", T0, (100, Some(20), Some(10)));
+        insert_llm_request_span(
+            &conn,
+            "a2",
+            "modelA",
+            T0 + 5_000_000_000,
+            (300, Some(90), None),
+        );
+        insert_llm_request_span(
+            &conn,
+            "a3",
+            "modelA",
+            T0 + 12_000_000_000,
+            (500, None, Some(30)),
+        );
         // modelB: duration 400ms, ttft 150ms (bucket 1)
-        insert_llm_request_span(&conn, "b1", "modelB", T0 + 2_000_000_000, (400, Some(150)));
+        insert_llm_request_span(
+            &conn,
+            "b1",
+            "modelB",
+            T0 + 2_000_000_000,
+            (400, Some(150), None),
+        );
 
         let resp = query_latency_percentiles(&conn, None, None, 10, &["duration", "ttft"]).unwrap();
 
@@ -8479,5 +8649,145 @@ mod tests {
             !resp.metrics.contains_key("duration"),
             "duration not requested"
         );
+    }
+
+    fn insert_tool_span(conn: &Connection, span_id: &str, start_ns: i64, duration_ms: i64) {
+        let attrs = r#"{"session.id":"s1","name":"Bash"}"#;
+        let end_ns = start_ns + duration_ms * 1_000_000;
+        conn.execute(
+            "INSERT INTO spans (trace_id, span_id, name, kind, start_time, end_time, attributes, status_code)
+             VALUES ('t', ?1, 'claude_code.tool.execution', 0, ?2, ?3, ?4, 1)",
+            rusqlite::params![span_id, start_ns, end_ns, attrs],
+        )
+        .unwrap();
+    }
+
+    fn dist_count(resp: &otelite_core::api::DistributionResponse) -> u64 {
+        resp.buckets.iter().map(|b| b.count).sum()
+    }
+
+    #[test]
+    fn distribution_empty_db() {
+        let conn = setup_test_db();
+        // session_cost is priced in the API layer, so it errors here by
+        // design — only the storage-resolved cohorts are covered.
+        for metric in ["tool_duration", "llm_duration", "ttft", "output_tokens"] {
+            let resp = query_distribution(&conn, metric, None, None, 20, "linear").unwrap();
+            assert!(
+                resp.buckets.is_empty() && resp.stats.is_none(),
+                "{metric}: expected empty"
+            );
+            assert_eq!(resp.metric, metric);
+        }
+        assert!(query_distribution(&conn, "session_cost", None, None, 20, "linear").is_err());
+    }
+
+    #[test]
+    fn distribution_rejects_bad_inputs() {
+        let conn = setup_test_db();
+        assert!(query_distribution(&conn, "bogus", None, None, 20, "linear").is_err());
+        assert!(query_distribution(&conn, "ttft", None, None, 20, "exponential").is_err());
+    }
+
+    #[test]
+    fn distribution_span_resolvers() {
+        let conn = setup_test_db();
+        // durations 100/300/500/400 ms; ttft 20/90/—/150; output tokens 10/—/30/—
+        insert_llm_request_span(&conn, "a1", "modelA", T0, (100, Some(20), Some(10)));
+        insert_llm_request_span(
+            &conn,
+            "a2",
+            "modelA",
+            T0 + 5_000_000_000,
+            (300, Some(90), None),
+        );
+        insert_llm_request_span(
+            &conn,
+            "a3",
+            "modelA",
+            T0 + 12_000_000_000,
+            (500, None, Some(30)),
+        );
+        insert_llm_request_span(
+            &conn,
+            "b1",
+            "modelB",
+            T0 + 2_000_000_000,
+            (400, Some(150), None),
+        );
+        // codex ttft histogram: one exact 777ms observation
+        insert_raw_histogram_row(
+            &conn,
+            plmnames::CODEX_TURN_TTFT,
+            T0,
+            r#"[1, 777.0, []]"#,
+            r#"{"model":"gpt-x"}"#,
+        );
+        insert_tool_span(&conn, "t1", T0, 25);
+        insert_tool_span(&conn, "t2", T0 + 1_000_000_000, 900);
+
+        let d = |m: &str, scale: &str| query_distribution(&conn, m, None, None, 4, scale).unwrap();
+
+        let llm = d("llm_duration", "linear");
+        assert_eq!(llm.unit, "ms");
+        assert_eq!(dist_count(&llm), 4);
+        let s = llm.stats.as_ref().unwrap();
+        assert_eq!(s.min, 100.0);
+        assert_eq!(s.max, 500.0);
+        assert!((s.mean - 325.0).abs() < 1e-9);
+        // sorted [100,300,400,500]: p95 -> idx (4-1)*0.95=2.85.round()=3 -> 500
+        assert_eq!(s.p95, 500.0);
+
+        // ttft = 3 span values + 1 codex histogram observation
+        let tt = d("ttft", "linear");
+        assert_eq!(dist_count(&tt), 4);
+        let s = tt.stats.as_ref().unwrap();
+        assert_eq!(s.min, 20.0);
+        assert_eq!(s.max, 777.0);
+
+        let ot = d("output_tokens", "linear");
+        assert_eq!(ot.unit, "tokens");
+        assert_eq!(dist_count(&ot), 2, "only spans carrying output_tokens");
+        let s = ot.stats.as_ref().unwrap();
+        assert_eq!(s.min, 10.0);
+        assert_eq!(s.max, 30.0);
+
+        let tool = d("tool_duration", "linear");
+        assert_eq!(dist_count(&tool), 2);
+        let s = tool.stats.as_ref().unwrap();
+        assert_eq!(s.min, 25.0);
+        assert_eq!(s.max, 900.0);
+
+        // log scale bins the same values without error; counts are preserved
+        let llm_log = d("llm_duration", "log");
+        assert_eq!(llm_log.buckets.len(), 4);
+        assert_eq!(dist_count(&llm_log), 4);
+    }
+
+    #[test]
+    fn distribution_respects_window() {
+        let conn = setup_test_db();
+        insert_llm_request_span(&conn, "a1", "modelA", T0, (100, Some(20), None));
+        insert_llm_request_span(
+            &conn,
+            "a2",
+            "modelA",
+            T0 + 40_000_000_000,
+            (300, None, None),
+        );
+
+        let resp = query_distribution(
+            &conn,
+            "llm_duration",
+            Some(T0 + 10_000_000_000),
+            None,
+            4,
+            "linear",
+        )
+        .unwrap();
+        assert_eq!(dist_count(&resp), 1, "only the later span is in the window");
+        let s = resp.stats.as_ref().unwrap();
+        assert_eq!(s.min, 300.0);
+        assert_eq!(s.max, 300.0);
     }
 }

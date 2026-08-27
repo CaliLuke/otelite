@@ -1295,6 +1295,48 @@ pub struct CostDistributionResponse {
     pub buckets: Vec<CostBucket>,
 }
 
+/// One bin of a generic distribution (issue #133).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DistributionBucket {
+    /// Inclusive lower bound.
+    pub min: f64,
+    /// Exclusive upper bound (inclusive for the last bin).
+    pub max: f64,
+    pub count: u64,
+}
+
+/// Summary statistics of a distribution's values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DistributionStats {
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub p50: f64,
+    pub p95: f64,
+    pub p99: f64,
+    pub count: u64,
+}
+
+/// `GET /api/genai/distributions` response: one named cohort binned
+/// linearly or log-spaced, with summary stats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DistributionResponse {
+    /// Metric name: session_cost | tool_duration | llm_duration | ttft | output_tokens.
+    pub metric: String,
+    /// Unit of the values: usd | ms | tokens.
+    pub unit: String,
+    /// Binning scale: linear | log.
+    pub scale: String,
+    #[serde(default)]
+    pub buckets: Vec<DistributionBucket>,
+    /// None when the window has no values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<DistributionStats>,
+}
+
 /// Storage-layer per-session cost: token detail per model (the API layer
 /// prices it) plus the harness cost counter where one exists. Not a wire
 /// type — see [`SessionCostResponse`].

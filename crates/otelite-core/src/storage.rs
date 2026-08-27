@@ -10,11 +10,12 @@ use thiserror::Error;
 use crate::api::{
     AgentRolesResponse, AgentRollupStorage, CacheEconomicsResponse, CacheHitRateByModel,
     CallsSeriesPoint, ConversationCostRow, ConversationDepthStats, CostSeriesPoint,
-    ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse,
-    LatencyByContextBin, LatencyPercentilesResponse, LatencySeriesPoint, LatencyStats,
-    ModelDriftPair, ModelUsage, ProjectRollupStorage, ProviderMixResponse, ReasoningShareResponse,
-    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, SessionCostStorage,
-    SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
+    DistributionResponse, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount,
+    GenAiCapabilityResponse, LatencyByContextBin, LatencyPercentilesResponse, LatencySeriesPoint,
+    LatencyStats, ModelDriftPair, ModelUsage, ProjectRollupStorage, ProviderMixResponse,
+    ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
+    SessionCostStorage, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
+    TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -248,6 +249,18 @@ pub trait StorageBackend: Send + Sync {
         bucket_secs: u64,
         metrics: &[&str],
     ) -> Result<LatencyPercentilesResponse>;
+
+    /// Generic distribution over a named metric cohort (issue #133):
+    /// session_cost | tool_duration | llm_duration | ttft | output_tokens.
+    #[allow(clippy::too_many_arguments)]
+    async fn query_distribution(
+        &self,
+        metric: &str,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        buckets: usize,
+        scale: &str,
+    ) -> Result<DistributionResponse>;
 
     /// Native GenAI telemetry capability coverage and quality.
     ///

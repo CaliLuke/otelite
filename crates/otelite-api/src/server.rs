@@ -43,6 +43,7 @@ use utoipa::OpenApi;
         crate::api::genai::get_top_sessions,
         crate::api::genai::get_top_conversations,
         crate::api::genai::get_finish_reasons,
+        crate::api::genai::get_distributions,
         crate::api::genai::get_latency_stats,
         crate::api::genai::get_latency_percentiles,
         crate::api::genai::get_genai_capabilities,
@@ -98,6 +99,9 @@ use utoipa::OpenApi;
             otelite_core::api::LatencyPercentilePoint,
             otelite_core::api::LatencyPercentileSeries,
             otelite_core::api::LatencyPercentilesResponse,
+            otelite_core::api::DistributionBucket,
+            otelite_core::api::DistributionStats,
+            otelite_core::api::DistributionResponse,
             otelite_core::api::GenAiMetricCapability,
             otelite_core::api::GenAiCorrelationProvenance,
             otelite_core::api::GenAiCapabilityReport,
@@ -293,6 +297,7 @@ impl DashboardServer {
                 "/api/genai/latency_percentiles",
                 get(crate::api::genai::get_latency_percentiles),
             )
+            .route("/api/genai/distributions", get(crate::api::genai::get_distributions))
             .route("/api/genai/capabilities", get(crate::api::genai::get_genai_capabilities))
             .route("/api/genai/error_rate", get(crate::api::genai::get_error_rate))
             .route("/api/genai/tool_usage", get(crate::api::genai::get_tool_usage))

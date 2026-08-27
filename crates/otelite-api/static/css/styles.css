@@ -2467,6 +2467,25 @@ body {
     margin-right: 0.4em;
     vertical-align: baseline;
 }
+/* Distribution charts (#133) */
+.distribution-chart {
+    margin-bottom: 1.5rem;
+}
+
+.hist-bar {
+    fill: var(--accent-color, #4c9aff);
+    opacity: 0.85;
+}
+
+.hist-bar:hover {
+    opacity: 1;
+}
+
+.distribution-stats {
+    margin-top: 0.25rem;
+    font-size: 0.85em;
+}
+
 /* Latency percentile charts (#132): p50 solid, p90/p95/p99 dashed */
 .latency-percentile-chart {
     margin-bottom: 1.5rem;

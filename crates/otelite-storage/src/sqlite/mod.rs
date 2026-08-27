@@ -414,6 +414,23 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_distribution(
+        &self,
+        metric: &str,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        buckets: usize,
+        scale: &str,
+    ) -> Result<otelite_core::api::DistributionResponse> {
+        let metric = metric.to_string();
+        let scale = scale.to_string();
+        self.read_query(move |conn| {
+            reader::query_distribution(conn, &metric, start_time, end_time, buckets, &scale)
+                .map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_genai_capabilities(
         &self,
         start_time: Option<i64>,

@@ -187,6 +187,7 @@ class ApiClient {
 
     async getLatencyStats(params = {}) { return this.get('/genai/latency_stats', params); }
     async getLatencyPercentiles(params = {}) { return this.get('/genai/latency_percentiles', { bucket_secs: 3600, metrics: 'duration,ttft', ...params }); }
+    async getDistribution(params = {}) { return this.get('/genai/distributions', { buckets: 20, ...params }); }
     async getErrorRate(params = {}) { return this.get('/genai/error_rate', params); }
     async getToolUsage(params = {}) { return this.get('/genai/tool_usage', params); }
     async getRetryStats(params = {}) { return this.get('/genai/retry_stats', params); }

@@ -593,12 +593,13 @@ class AnalyticsView {
         try {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
-            const [latencyStats, latencySeries, latencyByContext, conversationDepth, latencyPercentiles] = await Promise.all([
+            const [latencyStats, latencySeries, latencyByContext, conversationDepth, latencyPercentiles, durationDist] = await Promise.all([
                 this.api.getLatencyStats(params),
                 this.api.getLatencySeries(params).catch(() => null),
                 this.api.getLatencyByContext(params).catch(() => null),
                 this.api.getConversationDepth(params).catch(() => null),
                 this.api.getLatencyPercentiles(params).catch(() => null),
+                this.api.getDistribution({ metric: 'llm_duration', scale: 'log', ...params }).catch(() => null),
             ]);
 
             const convCard = this._buildConversationDepthCard(conversationDepth);
@@ -611,6 +612,7 @@ class AnalyticsView {
                 this._buildLatencyTable(latencyStats || []),
                 this._buildLatencySeriesChart(latencySeries || [], bucket),
                 this._buildLatencyPercentilesChart(latencyPercentiles),
+                this._buildDistributionChart('Request duration distribution', durationDist),
                 this._buildLatencyByContext(latencyByContext || []),
             ].filter(Boolean).join('');
 
@@ -1932,7 +1934,92 @@ class AnalyticsView {
                     el.querySelector('.latency-percentile-model').addEventListener('change', e => render(e.target.value));
                     render('all');
                 });
+                document.querySelectorAll('.distribution-chart').forEach(el => {
+                    window.analyticsView && window.analyticsView._bindDistributionScale(el);
+                });
             </script>`;
+    }
+
+    /** Re-bind the scale-toggle listener on a freshly rendered distribution chart. */
+    _bindDistributionScale(el) {
+        const view = window.analyticsView;
+        const sel = el && el.querySelector('.distribution-scale');
+        if (!view || !sel) return;
+        sel.addEventListener('change', async () => {
+            try {
+                const params = Object.assign({}, JSON.parse(el.dataset.distributionParams || '{}'));
+                const resp = await view.api.getDistribution({
+                    metric: el.dataset.distributionMetric,
+                    scale: sel.value,
+                    ...params,
+                });
+                const html = view._buildDistributionChart(el.dataset.distributionTitle || '', resp);
+                if (html) {
+                    el.outerHTML = html;
+                    view._bindDistributionScale(el.parentElement.querySelector('.distribution-chart'));
+                }
+            } catch (e) { /* keep current chart on fetch error */ }
+        });
+    }
+
+    /**
+     * Generic distribution chart from /api/genai/distributions (issue #133):
+     * vertical bars (log-spaced buckets render as equal-width decades), a
+     * stats line, and a scale toggle that re-fetches.
+     * @param {string} title - Section heading text
+     * @param {?object} resp - DistributionResponse (may be null/empty)
+     */
+    _buildDistributionChart(title, resp) {
+        if (!resp || !resp.buckets || !resp.buckets.length) return '';
+        const metric = resp.metric;
+        const titleEl = this._esc(title);
+        const stats = resp.stats || {};
+        const statsLine = stats.count
+            ? `n=${stats.count} · min ${this._fmtDistValue(resp.unit, stats.min)} · p50 ${this._fmtDistValue(resp.unit, stats.p50)} · p95 ${this._fmtDistValue(resp.unit, stats.p95)} · p99 ${this._fmtDistValue(resp.unit, stats.p99)} · max ${this._fmtDistValue(resp.unit, stats.max)}`
+            : 'no values in window';
+        const width = 100, height = 60;
+        const maxCount = Math.max(...resp.buckets.map(b => b.count), 1);
+        const n = resp.buckets.length;
+        const barW = width / n;
+        const bars = resp.buckets.map((b, i) => {
+            const h = b.count === 0 ? 0 : Math.max(2, (b.count / maxCount) * (height - 8));
+            const x = i * barW + barW * 0.08;
+            const w = barW * 0.84;
+            const y = height - h;
+            const tip = `${this._esc(this._fmtDistValue(resp.unit, b.min))}–${this._esc(this._fmtDistValue(resp.unit, b.max))}: ${b.count}`;
+            return `<rect class="hist-bar" x="${x.toFixed(3)}" y="${y.toFixed(3)}" width="${w.toFixed(3)}" height="${h.toFixed(3)}" rx="0.4"><title>${tip}</title></rect>`;
+        }).join('');
+        const first = resp.buckets[0], last = resp.buckets[n - 1];
+        return `
+            <div class="distribution-chart" data-distribution-metric="${this._esc(metric)}" data-distribution-title="${titleEl}" data-distribution-params="${this._esc(JSON.stringify(this._baseParams()))}">
+                <h4>${titleEl}
+                    <select class="distribution-scale" aria-label="Bin scale" style="margin-left:0.5rem;font-size:0.7em">
+                        <option value="linear"${resp.scale === 'linear' ? ' selected' : ''}>linear</option>
+                        <option value="log"${resp.scale === 'log' ? ' selected' : ''}>log</option>
+                    </select>
+                </h4>
+                <div class="cost-chart">
+                    <svg class="cost-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${bars}</svg>
+                    <div class="cost-chart-axis-labels">
+                        <span class="cost-chart-axis-left">${this._esc(this._fmtDistValue(resp.unit, first.min))}</span>
+                        <span class="cost-chart-axis-mid"></span>
+                        <span class="cost-chart-axis-right">${this._esc(this._fmtDistValue(resp.unit, last.max))}</span>
+                    </div>
+                </div>
+                <p class="table-hint distribution-stats">${this._esc(statsLine)}</p>
+            </div>`;
+    }
+
+    _fmtDistValue(unit, v) {
+        if (v === null || v === undefined || Number.isNaN(v)) return '—';
+        if (unit === 'usd') return v >= 0.01 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`;
+        if (unit === 'ms') return v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`;
+        if (unit === 'tokens') {
+            if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+            if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+            return `${Math.round(v)}`;
+        }
+        return String(Math.round(v * 100) / 100);
     }
 
     /**

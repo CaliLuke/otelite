@@ -519,6 +519,122 @@ pub async fn get_latency_percentiles(
     Ok(Json(rows))
 }
 
+/// Query parameters for the generic distribution endpoint.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct DistributionQuery {
+    /// Metric cohort: session_cost | tool_duration | llm_duration | ttft | output_tokens.
+    pub metric: String,
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+    /// Number of buckets (default 20, cap 100).
+    pub buckets: Option<usize>,
+    /// Binning scale: linear | log (default linear).
+    pub scale: Option<String>,
+}
+
+/// Generic distribution over a named metric cohort (issue #133). One
+/// endpoint serving chart, table and CLI from the same JSON.
+/// `session_cost` is resolved here (claude sessions are priced from tokens);
+/// the span/metric cohorts are resolved in the storage layer.
+#[utoipa::path(
+    get,
+    path = "/api/genai/distributions",
+    params(DistributionQuery),
+    responses(
+        (status = 200, description = "Distribution buckets + summary stats", body = otelite_core::api::DistributionResponse),
+        (status = 400, description = "Invalid metric, scale or buckets", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "genai"
+)]
+pub async fn get_distributions(
+    State(state): State<AppState>,
+    Query(query): Query<DistributionQuery>,
+) -> Result<Json<otelite_core::api::DistributionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use otelite_core::distribution;
+    use otelite_core::session_cost;
+
+    const KNOWN: &[&str] = &[
+        "session_cost",
+        "tool_duration",
+        "llm_duration",
+        "ttft",
+        "output_tokens",
+    ];
+    if !KNOWN.contains(&query.metric.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(format!(
+                "unknown metric '{}' — expected one of: {}",
+                query.metric,
+                KNOWN.join(" | ")
+            ))),
+        ));
+    }
+    let scale = query.scale.as_deref().unwrap_or("linear");
+    if scale != "linear" && scale != "log" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(format!(
+                "unknown scale '{scale}' — expected \"linear\" or \"log\""
+            ))),
+        ));
+    }
+    let buckets = query.buckets.unwrap_or(20);
+    if buckets == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "buckets must be a positive integer",
+            )),
+        ));
+    }
+
+    let resp = if query.metric == "session_cost" {
+        // Same source as the sessions cost panel (#126): opencode's own cost
+        // counter ("actual") plus claude sessions priced from tokens.
+        let rows = state
+            .storage
+            .query_session_costs(query.start_time, query.end_time)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::storage_error(format!(
+                        "query session costs: {e}"
+                    ))),
+                )
+            })?;
+        let pricing = state.pricing.snapshot().await;
+        let sessions = session_cost::build_session_costs(rows, &pricing.db);
+        let values: Vec<f64> = sessions.iter().filter_map(|s| s.cost_usd).collect();
+        distribution::build("session_cost", "usd", scale, buckets, values)
+    } else {
+        state
+            .storage
+            .query_distribution(
+                &query.metric,
+                query.start_time,
+                query.end_time,
+                buckets,
+                scale,
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::storage_error(format!(
+                        "query distribution: {e}"
+                    ))),
+                )
+            })?
+    };
+
+    Ok(Json(resp))
+}
+
 /// Get native GenAI telemetry capability coverage and provenance.
 #[utoipa::path(
     get,

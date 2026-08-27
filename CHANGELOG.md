@@ -30,6 +30,14 @@ have to work around), not implementation detail.
   p50/p90/p95/p99 per time bucket, all models and per model. TTFT includes
   the codex turn histogram, which is the only TTFT source for codex.
 
+- **Distributions: the shape of any of five cohorts.** One new endpoint,
+  `GET /api/genai/distributions?metric=<session_cost|tool_duration|llm_duration|ttft|output_tokens>`,
+  returns binned values (linear or log-spaced, up to 100 buckets) plus
+  min/mean/p50/p95/p99/max, and the CLI gains
+  `otelite histogram <metric> [--since 24h] [--buckets 20] [--scale log]`
+  with ASCII bars and the stats line. The GenAI latency section shows the
+  request-duration distribution with a linear/log toggle.
+
 ## [0.1.75] - 2026-08-27
 
 ### Added

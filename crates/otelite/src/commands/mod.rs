@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod cache;
 pub mod diagnose;
+pub mod histogram;
 pub mod import;
 pub mod logs;
 pub mod metrics;

@@ -336,6 +336,22 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    /// Fetch a generic distribution over a named metric cohort (issue #133).
+    pub async fn fetch_distribution(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::DistributionResponse> {
+        let url = format!("{}/api/genai/distributions", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch distribution: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     /// Fetch bucketed latency percentiles (issue #132).
     pub async fn fetch_latency_percentiles(
         &self,

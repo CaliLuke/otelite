@@ -24,6 +24,9 @@ pub mod pricing;
 // Per-session cost analysis helpers (anomaly rule, log-spaced buckets)
 pub mod session_cost;
 
+// Generic distribution binning + summary stats (issue #133)
+pub mod distribution;
+
 // Agent-framework attribute recognizers (CrewAI, AutoGen, LangGraph, ...)
 pub mod agent_frameworks;
 
