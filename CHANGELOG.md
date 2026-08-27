@@ -11,6 +11,8 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+## [0.1.68] - 2026-08-27
+
 ### Added
 
 - **See which sub-agent drove your spend.** The new *Agent Roles* section on
