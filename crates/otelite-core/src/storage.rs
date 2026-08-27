@@ -8,12 +8,12 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::api::{
-    AgentRolesResponse, CacheHitRateByModel, CallsSeriesPoint, ConversationCostRow,
-    ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorTypeBreakdown,
-    FinishReasonCount, GenAiCapabilityResponse, LatencyByContextBin, LatencySeriesPoint,
-    LatencyStats, ModelDriftPair, ModelUsage, ProviderMixResponse, RequestParamProfile,
-    RetrievalStats, RetryStats, SessionCostRow, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan,
-    TopSpanSort, TruncationRateByModel,
+    AgentRolesResponse, CacheEconomicsResponse, CacheHitRateByModel, CallsSeriesPoint,
+    ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel,
+    ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, LatencyByContextBin,
+    LatencySeriesPoint, LatencyStats, ModelDriftPair, ModelUsage, ProviderMixResponse,
+    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, SystemUsage,
+    TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -298,6 +298,17 @@ pub trait StorageBackend: Send + Sync {
         end_time: Option<i64>,
         model: Option<&str>,
     ) -> Result<Vec<CacheHitRateByModel>>;
+
+    /// Cache economics (read/write split, hit rate, read:write ratio) per
+    /// model and per time bucket, combining the three harness sources
+    /// (opencode counters, codex turn histograms, claude llm_request spans).
+    /// Savings fields are left unenriched (None / false) for the API layer.
+    async fn query_cache_economics(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_ns: i64,
+    ) -> Result<CacheEconomicsResponse>;
 
     /// Sub-agent role attribution (cost and tokens per opencode `agent`
     /// label) over the time window.

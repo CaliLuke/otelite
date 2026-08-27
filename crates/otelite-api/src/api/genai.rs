@@ -7,13 +7,12 @@ use axum::{
     response::Json,
 };
 use otelite_core::api::{
-    AgentRolesResponse, CacheHitRateByModel, CallsSeriesPoint, ContextTypeSplit,
-    ConversationCostRow, ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse,
-    ErrorTypeBreakdown, FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket,
-    LatencyByContextBin, LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse,
-    RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow, StopReasonCount,
-    TokenUsageResponse, ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    AgentRolesResponse, CallsSeriesPoint, ContextTypeSplit, ConversationCostRow,
+    ConversationDepthStats, CostSeriesPoint, ErrorRateByModel, ErrorResponse, ErrorTypeBreakdown,
+    FinishReasonCount, GenAiCapabilityResponse, HourOfDayBucket, LatencyByContextBin,
+    LatencySeriesPoint, LatencyStats, ModelDriftPair, ProviderMixResponse, RequestParamProfile,
+    RetrievalStats, RetryStats, SessionCostRow, StopReasonCount, TokenUsageResponse,
+    ToolApprovalStats, ToolErrorEntry, ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 use otelite_core::pricing::{PricingDatabase, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -723,6 +722,24 @@ pub struct ModelAnalyticsQuery {
     pub model: Option<String>,
 }
 
+/// Query parameters for the cache hit rate / cache economics endpoint.
+#[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct CacheQuery {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    /// Model filter (only used without `by_model`; the economics payload is
+    /// always per-model).
+    pub model: Option<String>,
+    /// Pass `1` to return the cache-economics payload (per-model read/write
+    /// split, hit rate, read:write ratio, estimated savings, plus a
+    /// time-bucketed series). Without it, the original per-model hit-rate
+    /// list is returned unchanged.
+    pub by_model: Option<bool>,
+    /// Bucket size in seconds for the economics series (default 3600).
+    /// Only used with `by_model=1`.
+    pub bucket_secs: Option<u64>,
+}
+
 /// Query parameters for time-series endpoints.
 #[derive(Debug, Deserialize, Serialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct TimeSeriesQuery {
@@ -785,21 +802,71 @@ pub async fn get_truncation_rate(
     Ok(Json(rows))
 }
 
-/// Cache token hit rate per model.
+/// Cache token hit rate per model; with `by_model=1` returns the full cache
+/// economics payload instead (`CacheEconomicsResponse`).
 #[utoipa::path(
     get,
     path = "/api/genai/cache_hit_rate",
-    params(ModelAnalyticsQuery),
+    params(CacheQuery),
     responses(
-        (status = 200, description = "Cache hit rate by model", body = Vec<CacheHitRateByModel>),
+        (status = 200, description = "Per-model cache hit rate (default) or cache economics with by_model=1", body = serde_json::Value),
+        (status = 400, description = "Invalid bucket_secs", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "genai"
 )]
 pub async fn get_cache_hit_rate(
     State(state): State<AppState>,
-    Query(query): Query<ModelAnalyticsQuery>,
-) -> Result<Json<Vec<CacheHitRateByModel>>, (StatusCode, Json<ErrorResponse>)> {
+    Query(query): Query<CacheQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if query.by_model == Some(true) {
+        let bucket_secs = query.bucket_secs.unwrap_or(3600);
+        if bucket_secs == 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(
+                    "bucket_secs must be a positive number of seconds",
+                )),
+            ));
+        }
+        let mut response = state
+            .storage
+            .query_cache_economics(
+                query.start_time,
+                query.end_time,
+                (bucket_secs as i64) * 1_000_000_000,
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::storage_error(format!(
+                        "query cache economics: {}",
+                        e
+                    ))),
+                )
+            })?;
+        // Enrich per-model estimated savings. The cache-read price is
+        // unknown when the pricing table has no entry or no cache-read rate
+        // for the model — savings stay null and savings_known is false.
+        let pricing = state.pricing.snapshot().await;
+        for m in &mut response.models {
+            let r = pricing
+                .db
+                .compute_cache_savings(Some(&m.model), m.cache_read_tokens, None);
+            m.est_savings_usd = r.cost;
+            m.savings_known = r.cost.is_some();
+        }
+        return Ok(Json(serde_json::to_value(response).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "serialize cache economics: {e}"
+                ))),
+            )
+        })?));
+    }
+
     let rows = state
         .storage
         .query_cache_hit_rate(query.start_time, query.end_time, query.model.as_deref())
@@ -813,7 +880,14 @@ pub async fn get_cache_hit_rate(
                 ))),
             )
         })?;
-    Ok(Json(rows))
+    Ok(Json(serde_json::to_value(rows).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::storage_error(format!(
+                "serialize cache hit rate: {e}"
+            ))),
+        )
+    })?))
 }
 
 /// Sub-agent role attribution: cost and tokens per opencode `agent` label.

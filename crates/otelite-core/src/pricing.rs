@@ -313,6 +313,52 @@ impl PricingDatabase {
 
         CostResult::none(Some(model), system)
     }
+
+    /// Estimated savings from prompt-cache reads: every cached-read token is
+    /// billed at the cache-read rate instead of the full input rate, so
+    /// `savings = cache_read_tokens × (input_rate − cache_read_rate)`.
+    ///
+    /// Returns `cost: None` when either rate is unknown — no LiteLLM entry,
+    /// or the entry lacks a cache-read rate — and never fabricates a rate.
+    /// A zero rate difference (free model) is a known zero, not unknown.
+    pub fn compute_cache_savings(
+        &self,
+        model: Option<&str>,
+        cache_read_tokens: u64,
+        system: Option<&str>,
+    ) -> CostResult {
+        let Some(model) = model else {
+            return CostResult::none(None, system);
+        };
+
+        let pricing_model = pricing_model_name(model);
+        if let Some(entry) = self.lookup(pricing_model, system) {
+            let Some(crt) = entry.cache_read_input_token_cost else {
+                let reason = Some(format!("no cache-read price for {pricing_model}"));
+                return CostResult {
+                    cost: None,
+                    source: CostSource::None,
+                    reason,
+                };
+            };
+            let per_token = entry.input_cost_per_token - crt;
+            return CostResult {
+                cost: Some((cache_read_tokens as f64) * per_token),
+                source: CostSource::Litellm,
+                reason: None,
+            };
+        }
+
+        if let Some(fb) = claude_fallback(pricing_model) {
+            return CostResult {
+                cost: Some((cache_read_tokens as f64) * (fb.input - fb.cache_read)),
+                source: CostSource::Fallback,
+                reason: None,
+            };
+        }
+
+        CostResult::none(Some(model), system)
+    }
 }
 
 #[cfg(test)]
@@ -506,5 +552,72 @@ mod tests {
     fn cost_source_serializes_lowercase() {
         let json = serde_json::to_string(&CostSource::Litellm).unwrap();
         assert_eq!(json, "\"litellm\"");
+    }
+
+    #[test]
+    fn cache_savings_litellm_known_rates() {
+        let json = r#"{
+            "gpt-4o": {
+                "input_cost_per_token": 2.5e-6,
+                "output_cost_per_token": 1.0e-5,
+                "cache_read_input_token_cost": 0.25e-6
+            }
+        }"#;
+        let db = PricingDatabase::from_litellm_json(json).unwrap();
+        // 1M reads × (2.5e-6 − 0.25e-6) = 2.25
+        let result = db.compute_cache_savings(Some("gpt-4o"), 1_000_000, None);
+        assert_eq!(result.source, CostSource::Litellm);
+        assert!((result.cost.unwrap() - 2.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_savings_unknown_cache_read_rate_returns_none() {
+        // Entry exists but carries no cache-read rate — must not fabricate
+        // one (e.g. assuming reads are free).
+        let json = r#"{
+            "gpt-4o": {
+                "input_cost_per_token": 2.5e-6,
+                "output_cost_per_token": 1.0e-5
+            }
+        }"#;
+        let db = PricingDatabase::from_litellm_json(json).unwrap();
+        let result = db.compute_cache_savings(Some("gpt-4o"), 1_000_000, None);
+        assert_eq!(result.source, CostSource::None);
+        assert!(result.cost.is_none());
+        assert!(result.reason.unwrap().contains("cache-read"));
+    }
+
+    #[test]
+    fn cache_savings_no_entry_returns_none() {
+        let db =
+            PricingDatabase::from_litellm_json(r#"{"gpt-4o": {"input_cost_per_token": 2.5e-6}}"#)
+                .unwrap();
+        let result = db.compute_cache_savings(Some("mystery-model"), 1_000_000, None);
+        assert_eq!(result.source, CostSource::None);
+        assert!(result.cost.is_none());
+    }
+
+    #[test]
+    fn cache_savings_fallback_claude_rates() {
+        let db = PricingDatabase::empty();
+        // Sonnet: input $3/M, cache read $0.30/M → 1M reads save $2.70
+        let result = db.compute_cache_savings(Some("claude-sonnet-4"), 1_000_000, None);
+        assert_eq!(result.source, CostSource::Fallback);
+        assert!((result.cost.unwrap() - 2.70).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_savings_zero_reads_is_known_zero() {
+        let db = PricingDatabase::empty();
+        let result = db.compute_cache_savings(Some("claude-sonnet-4"), 0, None);
+        assert_eq!(result.source, CostSource::Fallback);
+        assert_eq!(result.cost.unwrap(), 0.0);
+    }
+
+    #[test]
+    fn cache_savings_missing_model_returns_none() {
+        let db = PricingDatabase::empty();
+        let result = db.compute_cache_savings(None, 1_000_000, None);
+        assert!(result.cost.is_none());
     }
 }

@@ -2725,6 +2725,435 @@ pub(crate) fn counter_window_deltas(
     Ok(out)
 }
 
+/// Cache economics per model and per time bucket.
+///
+/// Combines the three harness sources, one per harness so nothing is
+/// double-counted:
+/// - opencode: windowed per-row deltas of the cumulative
+///   `opencode.token.usage` counter (reset-safe: a value below the previous
+///   one restarts that series' running total, same semantics as
+///   [`counter_window_deltas`]);
+/// - codex: per-turn sums of the `codex.turn.token_usage` histogram
+///   (`value_histogram[1]`); the `total` category is the sum of the parts
+///   and is never counted;
+/// - claude_code: token sums on `claude_code.llm_request` spans (per-request
+///   events, no counter semantics). The `claude_code.token.usage` metric is
+///   deliberately NOT a fourth source: its counter does not line up with the
+///   span totals (verified on the live DB, 2026-08-27) and adding it would
+///   miscount.
+///
+/// `hit_rate` is `cache_read / (cache_read + input)` everywhere (same
+/// definition as `query_cache_hit_rate`). Savings are enriched by the API
+/// layer.
+pub fn query_cache_economics(
+    conn: &Connection,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    bucket_ns: i64,
+) -> Result<otelite_core::api::CacheEconomicsResponse> {
+    if bucket_ns <= 0 {
+        return Err(StorageError::QueryError(format!(
+            "bucket_ns must be positive, got {bucket_ns}"
+        )));
+    }
+
+    use otelite_core::semconv::codex_token_types as ctt;
+    use otelite_core::semconv::metric_labels as lbl;
+    use otelite_core::semconv::metric_names as mnames;
+    use otelite_core::semconv::opencode_token_types as otypes;
+
+    #[derive(Default)]
+    struct CacheAcc {
+        input: u64,
+        cache_read: u64,
+        cache_write: u64,
+    }
+
+    const UNKNOWN_MODEL: &str = "(unknown)";
+    let mut models: HashMap<String, CacheAcc> = HashMap::new();
+    let mut buckets: HashMap<i64, CacheAcc> = HashMap::new();
+
+    let add_model =
+        |m: &mut HashMap<String, CacheAcc>, model: Option<&str>, input: u64, cr: u64, cw: u64| {
+            let acc = m
+                .entry(model.unwrap_or(UNKNOWN_MODEL).to_string())
+                .or_default();
+            acc.input += input;
+            acc.cache_read += cr;
+            acc.cache_write += cw;
+        };
+    let add_bucket =
+        |b: &mut HashMap<i64, CacheAcc>, ts: i64, bucket_ns: i64, input: u64, cr: u64, cw: u64| {
+            let acc = b.entry((ts / bucket_ns) * bucket_ns).or_default();
+            acc.input += input;
+            acc.cache_read += cr;
+            acc.cache_write += cw;
+        };
+    // ── opencode: cumulative counter, window fetch + per-series baseline ──
+    let label_paths = [lbl::AGENT, lbl::MODEL, lbl::TYPE, lbl::SESSION_ID];
+    let label_exprs: Vec<String> = label_paths
+        .iter()
+        .map(|p| {
+            format!("CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{p}') END")
+        })
+        .collect();
+
+    let mut where_clause = String::from("WHERE name = ?1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(mnames::OPENCODE_TOKEN_USAGE.to_string())];
+    if let Some(start) = start_time {
+        where_clause.push_str(" AND timestamp >= ?2");
+        params.push(Box::new(start));
+    }
+    if let Some(end) = end_time {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+        params.push(Box::new(end));
+    }
+
+    let sql = format!(
+        "SELECT {}, timestamp, \
+         COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics {}",
+        label_exprs.join(", "),
+        where_clause
+    );
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        StorageError::QueryError(format!(
+            "Failed to prepare cache economics opencode query: {e}"
+        ))
+    })?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let labels = (0..label_paths.len())
+                .map(|i| row.get::<_, Option<String>>(i))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let ts = row.get::<_, i64>(label_paths.len())?;
+            let value = row
+                .get::<_, Option<i64>>(label_paths.len() + 1)?
+                .unwrap_or(0);
+            Ok((labels, ts, value))
+        })
+        .map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to execute cache economics opencode query: {e}"
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to parse cache economics opencode results: {e}"
+            ))
+        })?;
+
+    // Per-series baseline: last value strictly before the window start
+    // (same covering-index pattern as counter_window_deltas — the predicate
+    // must use the index's expression columns verbatim).
+    let mut baselines: HashMap<Vec<Option<String>>, i64> = HashMap::new();
+    if let Some(start) = start_time {
+        let mut predicate = String::new();
+        for (i, expr) in label_exprs.iter().enumerate() {
+            predicate.push_str(&format!(" AND {expr} IS ?{}", 3 + i));
+        }
+        let baseline_sql = format!(
+            "SELECT COALESCE(value_int, CAST(value_double AS INTEGER)) FROM metrics \
+             WHERE name = ?1 AND timestamp < ?2{predicate} \
+             ORDER BY timestamp DESC, \
+               COALESCE(value_int, CAST(value_double AS INTEGER)) DESC \
+             LIMIT 1"
+        );
+        let known_series: Vec<Vec<Option<String>>> =
+            rows.iter().map(|(l, _, _)| l.clone()).collect();
+        let mut seen: std::collections::HashSet<Vec<Option<String>>> =
+            std::collections::HashSet::new();
+        let mut baseline_stmt = conn.prepare(&baseline_sql).map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to prepare cache economics baseline query: {e}"
+            ))
+        })?;
+        for labels in known_series.into_iter().filter(|l| seen.insert(l.clone())) {
+            let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(mnames::OPENCODE_TOKEN_USAGE.to_string()),
+                Box::new(start),
+            ];
+            binds.extend(
+                labels
+                    .iter()
+                    .map(|l| Box::new(l.clone()) as Box<dyn rusqlite::ToSql>),
+            );
+            let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+            match baseline_stmt.query_row(refs.as_slice(), |row| row.get::<_, Option<i64>>(0)) {
+                Ok(Some(v)) => {
+                    baselines.insert(labels, v);
+                },
+                Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => {},
+                Err(e) => {
+                    return Err(StorageError::QueryError(format!(
+                        "Failed to execute cache economics baseline query: {e}"
+                    )))
+                },
+            }
+        }
+    }
+
+    // Per-row pass in timestamp order: clamp each row's delta to the series'
+    // running total (a value below the previous one means the counter
+    // restarted, so that row's full value counts).
+    {
+        let mut last_by_series: HashMap<Vec<Option<String>>, i64> = HashMap::new();
+        for (labels, ts, value) in rows {
+            let model = labels.get(1).and_then(|m| m.clone());
+            let kind = labels.get(2).and_then(|k| k.clone());
+            let delta = match last_by_series.get(&labels) {
+                None => {
+                    // First in-window row of this series.
+                    match baselines.get(&labels) {
+                        Some(base) if *base >= value => value, // reset: counts from zero
+                        Some(base) => value - base,
+                        None => value, // series did not exist before the window
+                    }
+                },
+                Some(prev) if *prev >= value => value, // in-window reset
+                Some(prev) => value - prev,
+            };
+            last_by_series.insert(labels.clone(), value);
+            if delta == 0 {
+                continue;
+            }
+            let d = delta as u64;
+            match kind.as_deref() {
+                Some(k) if k == otypes::INPUT => {
+                    add_model(&mut models, model.as_deref(), d, 0, 0);
+                    add_bucket(&mut buckets, ts, bucket_ns, d, 0, 0);
+                },
+                Some(k) if k == otypes::CACHE_READ => {
+                    add_model(&mut models, model.as_deref(), 0, d, 0);
+                    add_bucket(&mut buckets, ts, bucket_ns, 0, d, 0);
+                },
+                Some(k) if k == otypes::CACHE_WRITE => {
+                    add_model(&mut models, model.as_deref(), 0, 0, d);
+                    add_bucket(&mut buckets, ts, bucket_ns, 0, 0, d);
+                },
+                _ => {}, // output/reasoning/unknown are not cache economics
+            }
+        }
+    }
+
+    // ── codex: per-turn histogram sums, bucketed in SQL ──
+    {
+        let model_expr = format!(
+            "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END",
+            lbl::MODEL
+        );
+        let type_expr = format!(
+            "CASE WHEN json_valid(attributes) THEN json_extract(attributes, '{}') END",
+            lbl::TOKEN_TYPE
+        );
+        let mut where_clause = String::from(&format!(
+            "WHERE name = ?3 AND json_valid(attributes) \
+             AND {model_expr} IS NOT NULL AND {type_expr} IS NOT NULL"
+        ));
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(bucket_ns),
+            Box::new(bucket_ns),
+            Box::new(mnames::CODEX_TURN_TOKEN_USAGE.to_string()),
+        ];
+        if let Some(start) = start_time {
+            where_clause.push_str(&format!(" AND timestamp >= ?{}", params.len() + 1));
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            where_clause.push_str(&format!(" AND timestamp <= ?{}", params.len() + 1));
+            params.push(Box::new(end));
+        }
+        let sql = format!(
+            "SELECT (timestamp / ?1) * ?1 AS bucket, {model_expr} AS model, \
+             {type_expr} AS token_type, \
+             SUM(CASE WHEN json_valid(value_histogram) \
+                 THEN json_extract(value_histogram, '$[1]') ELSE 0 END) AS sum_tokens \
+             FROM metrics {where_clause} GROUP BY bucket, model, token_type"
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to prepare cache economics codex query: {e}"
+            ))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to execute cache economics codex query: {e}"
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to parse cache economics codex results: {e}"
+                ))
+            })?;
+        for (bucket, model, token_type, sum) in rows {
+            let tokens = sum.round().max(0.0) as u64;
+            if tokens == 0 {
+                continue;
+            }
+            let (input, cr, cw) = match token_type.as_str() {
+                t if t == ctt::INPUT => (tokens, 0, 0),
+                t if t == ctt::CACHE_READ => (0, tokens, 0),
+                t if t == ctt::CACHE_WRITE => (0, 0, tokens),
+                _ => continue, // output/reasoning_output/total are not cache economics
+            };
+            add_model(&mut models, model.as_deref(), input, cr, cw);
+            add_bucket(&mut buckets, bucket, bucket_ns, input, cr, cw);
+        }
+    }
+
+    // ── claude_code: llm_request span token sums, bucketed in SQL ──
+    {
+        let exprs = token_exprs();
+        let mut where_clause = format!(
+            "WHERE name = '{}' AND json_valid(attributes)",
+            otelite_core::semconv::LLM_REQUEST_SPAN_NAME
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(bucket_ns), Box::new(bucket_ns)];
+        if let Some(start) = start_time {
+            where_clause.push_str(&format!(" AND start_time >= ?{}", params.len() + 1));
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            where_clause.push_str(&format!(" AND end_time <= ?{}", params.len() + 1));
+            params.push(Box::new(end));
+        }
+        let sql = format!(
+            "SELECT (start_time / ?1) * ?1 AS bucket, {model} AS model, \
+             COALESCE(SUM({input}), 0) AS input_tokens, \
+             COALESCE(SUM({cache_creation}), 0) AS cache_creation, \
+             COALESCE(SUM({cache_read}), 0) AS cache_read \
+             FROM spans {where_clause} GROUP BY bucket, model",
+            model = exprs.model,
+            input = exprs.input,
+            cache_creation = exprs.cache_creation,
+            cache_read = exprs.cache_read,
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            StorageError::QueryError(format!(
+                "Failed to prepare cache economics claude query: {e}"
+            ))
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to execute cache economics claude query: {e}"
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StorageError::QueryError(format!(
+                    "Failed to parse cache economics claude results: {e}"
+                ))
+            })?;
+        for (bucket, model, input, cache_creation, cache_read) in rows {
+            add_model(
+                &mut models,
+                model.as_deref(),
+                input.max(0) as u64,
+                cache_read.max(0) as u64,
+                cache_creation.max(0) as u64,
+            );
+            add_bucket(
+                &mut buckets,
+                bucket,
+                bucket_ns,
+                input.max(0) as u64,
+                cache_read.max(0) as u64,
+                cache_creation.max(0) as u64,
+            );
+        }
+    }
+
+    // ── assembly ──
+    let mut model_entries: Vec<otelite_core::api::CacheEconModelEntry> = models
+        .iter()
+        .map(|(model, acc)| {
+            let hit_rate = cache_hit_rate(acc.cache_read, acc.input);
+            let read_write_ratio = cache_read_write_ratio(acc.cache_read, acc.cache_write);
+            otelite_core::api::CacheEconModelEntry {
+                model: model.clone(),
+                input_tokens: acc.input,
+                cache_read_tokens: acc.cache_read,
+                cache_write_tokens: acc.cache_write,
+                hit_rate,
+                read_write_ratio,
+                est_savings_usd: None,
+                savings_known: false,
+            }
+        })
+        .collect();
+    model_entries.sort_by(|a, b| {
+        b.cache_read_tokens
+            .cmp(&a.cache_read_tokens)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+
+    let mut series_points: Vec<otelite_core::api::CacheEconSeriesPoint> = buckets
+        .iter()
+        .map(|(ts, acc)| {
+            let hit_rate = cache_hit_rate(acc.cache_read, acc.input);
+            otelite_core::api::CacheEconSeriesPoint {
+                timestamp: *ts,
+                input: acc.input,
+                cache_read: acc.cache_read,
+                cache_write: acc.cache_write,
+                hit_rate,
+            }
+        })
+        .collect();
+    series_points.sort_by_key(|p| p.timestamp);
+
+    Ok(otelite_core::api::CacheEconomicsResponse {
+        series: series_points,
+        models: model_entries,
+    })
+}
+
+/// Cache hit rate: `cache_read / (cache_read + input)`, `None` when the
+/// denominator is 0 (no prompt tokens at all in the window).
+fn cache_hit_rate(cache_read: u64, input: u64) -> Option<f64> {
+    let denom = cache_read + input;
+    if denom == 0 {
+        None
+    } else {
+        Some(cache_read as f64 / denom as f64)
+    }
+}
+
+/// Read:write ratio: `cache_read / cache_write`, `None` when there were no
+/// cache writes (an infinite ratio is not a useful number to surface).
+fn cache_read_write_ratio(cache_read: u64, cache_write: u64) -> Option<f64> {
+    if cache_write == 0 {
+        None
+    } else {
+        Some(cache_read as f64 / cache_write as f64)
+    }
+}
+
 /// Add `v` tokens of category `kind` (an `opencode.token.usage` `type`
 /// label) to a token-usage accumulator. Unknown categories are ignored, not
 /// misfiled.
@@ -5716,5 +6145,32 @@ mod tests {
     fn attribute_model_no_providers_yields_empty() {
         let out = attribute_model_to_providers(sample_tokens(), Some(1.0), &[]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn cache_hit_rate_definition() {
+        // 8 of 10 prompt tokens served from cache
+        assert_eq!(cache_hit_rate(8, 2), Some(0.8));
+    }
+
+    #[test]
+    fn cache_hit_rate_zero_denominator_is_none() {
+        // no prompt tokens at all (reads and input both zero)
+        assert_eq!(cache_hit_rate(0, 0), None);
+    }
+
+    #[test]
+    fn cache_hit_rate_all_reads() {
+        assert_eq!(cache_hit_rate(500, 0), Some(1.0));
+    }
+
+    #[test]
+    fn cache_read_write_ratio_value() {
+        assert_eq!(cache_read_write_ratio(8, 2), Some(4.0));
+    }
+
+    #[test]
+    fn cache_read_write_ratio_no_writes_is_none() {
+        assert_eq!(cache_read_write_ratio(100, 0), None);
     }
 }

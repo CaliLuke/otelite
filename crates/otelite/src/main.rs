@@ -156,6 +156,11 @@ enum Commands {
         after_help = "Examples:\n  otelite providers --since 24h\n  otelite providers --since 7d --format json"
     )]
     Providers(commands::providers::ProvidersCommand),
+    /// Show cache economics (read/write split, hit rate, estimated savings)
+    #[command(
+        after_help = "Examples:\n  otelite cache --since 24h\n  otelite cache --since 7d --series --bucket-secs 86400"
+    )]
+    Cache(commands::cache::CacheCommand),
     /// Launch the Terminal User Interface
     #[command(
         after_help = "Examples:\n  otelite tui\n  otelite tui --api-url http://localhost:3000\n  otelite tui --view traces --refresh-interval 5"
@@ -533,6 +538,11 @@ async fn run_cli() -> Result<()> {
             Ok(())
         },
         Some(Commands::Providers(cmd)) => {
+            let storage = create_storage(&config).await?;
+            cmd.execute(storage, config.format).await?;
+            Ok(())
+        },
+        Some(Commands::Cache(cmd)) => {
             let storage = create_storage(&config).await?;
             cmd.execute(storage, config.format).await?;
             Ok(())

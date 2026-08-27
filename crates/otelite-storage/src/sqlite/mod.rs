@@ -512,6 +512,19 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_cache_economics(
+        &self,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        bucket_ns: i64,
+    ) -> Result<otelite_core::api::CacheEconomicsResponse> {
+        self.read_query(move |conn| {
+            reader::query_cache_economics(conn, start_time, end_time, bucket_ns)
+                .map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_request_param_profile(
         &self,
         start_time: Option<i64>,

@@ -832,6 +832,57 @@ pub struct CacheHitRateByModel {
     pub hit_rate: Option<f64>,
 }
 
+/// Cache economics for one time bucket (all models combined).
+///
+/// `hit_rate` uses the same definition as the model table:
+/// `cache_read / (cache_read + input)`, `None` when the denominator is 0.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CacheEconSeriesPoint {
+    /// Bucket start timestamp in nanoseconds since Unix epoch
+    pub timestamp: i64,
+    pub input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_rate: Option<f64>,
+}
+
+/// Cache economics for one model over the whole window.
+///
+/// `hit_rate` = `cache_read / (cache_read + input)` (same definition as
+/// [`CacheHitRateByModel`]); `read_write_ratio` = `cache_read / cache_write`,
+/// `None` when there were no cache writes. `est_savings_usd` /
+/// `savings_known` are enriched by the API layer from the pricing table —
+/// `savings_known` is false (and savings null) when the model's cache-read
+/// price is unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CacheEconModelEntry {
+    pub model: String,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_write_ratio: Option<f64>,
+    /// Estimated savings from cache reads: `cache_read × (input_rate −
+    /// cache_read_rate)`. `None` when the cache-read price is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est_savings_usd: Option<f64>,
+    pub savings_known: bool,
+}
+
+/// Response for `GET /api/genai/cache_hit_rate?by_model=1` — per-model cache
+/// economics plus a time-bucketed read/write series.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CacheEconomicsResponse {
+    pub series: Vec<CacheEconSeriesPoint>,
+    pub models: Vec<CacheEconModelEntry>,
+}
+
 /// Token usage split for one sub-agent role.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

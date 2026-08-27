@@ -411,6 +411,24 @@ impl ApiClient {
         Ok(response.json().await?)
     }
 
+    /// Cache economics (per-model read/write split, hit rate, read:write
+    /// ratio, estimated savings, time-bucketed series). Pass
+    /// `("by_model", "1".into())` in `params`.
+    pub async fn fetch_cache_economics(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<otelite_core::api::CacheEconomicsResponse> {
+        let url = format!("{}/api/genai/cache_hit_rate", self.base_url);
+        let response = self.client.get(&url).query(&params).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::ApiError(format!(
+                "Failed to fetch cache economics: HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn fetch_conversation_depth(
         &self,
         params: Vec<(&str, String)>,

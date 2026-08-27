@@ -499,11 +499,12 @@ class AnalyticsView {
         try {
             const params = this._baseParams();
             const bucket = this._chooseBucket();
-            const [costSeries, topSpans, cacheHitRate, retryStats, errorRate,
-                   contextTypeSplit] = await Promise.all([
+            const [costSeries, topSpans, cacheHitRate, cacheEconomics,
+                   retryStats, errorRate, contextTypeSplit] = await Promise.all([
                 this.api.getCostSeries({ ...params, bucket }),
                 this.api.getTopSpans({ ...params, limit: 20 }),
                 this.api.getCacheHitRate(params).catch(() => null),
+                this.api.getCacheEconomics({ ...params, bucket_secs: bucket }).catch(() => null),
                 this.api.getRetryStats(params).catch(() => null),
                 this.api.getErrorRate(params).catch(() => []),
                 this.api.getContextTypeSplit(params).catch(() => null),
@@ -532,7 +533,7 @@ class AnalyticsView {
                 cacheCard,
                 this._buildCostChart(costSeries || [], bucket),
                 this._buildTopNSection(topSpans || [], errorRate || []),
-                this._buildCacheHitRate(cacheHitRate || []),
+                this._buildCacheEconomics(cacheEconomics, cacheHitRate || [], bucket),
                 this._buildByModelByProvider(summary),
                 this._buildContextTypeSplit(contextTypeSplit || []),
             ].filter(Boolean).join('');
@@ -1654,6 +1655,76 @@ class AnalyticsView {
                     <th>Model</th><th>Input tokens</th><th>Cache read</th><th>Cache created</th><th>Hit rate</th>
                 </tr></thead>
                 <tbody>${tableRows}</tbody>
+            </table>`;
+    }
+
+    /**
+     * Cache economics: per-model read/write split with estimated savings
+     * (from the by_model=1 response) plus a read:write stacked bar over the
+     * time series. Falls back to the legacy span-based hit-rate table when
+     * the economics payload is unavailable.
+     */
+    _buildCacheEconomics(econ, legacyRows, bucketSecs) {
+        const models = econ && Array.isArray(econ.models) ? econ.models : [];
+        if (!models.length) return this._buildCacheHitRate(legacyRows || []);
+        const fmt = n => Number(n).toLocaleString();
+        const fmtUsd = v => v == null ? '—' : `$${Number(v).toFixed(2)}`;
+        const fmtRatio = r => r == null ? '—' : `${Number(r).toFixed(1)}:1`;
+
+        const totalRead = models.reduce((s, m) => s + (m.cache_read_tokens || 0), 0);
+        const totalWrite = models.reduce((s, m) => s + (m.cache_write_tokens || 0), 0);
+        const allKnown = models.every(m => m.savings_known);
+        const totalSavings = models
+            .filter(m => m.savings_known)
+            .reduce((s, m) => s + (m.est_savings_usd || 0), 0);
+
+        const modelRows = models.map(m => `
+            <tr>
+                <td>${this._esc(m.model)}</td>
+                <td>${fmt(m.cache_read_tokens || 0)}</td>
+                <td>${fmt(m.cache_write_tokens || 0)}</td>
+                <td>${fmtRatio(m.read_write_ratio)}</td>
+                <td>${m.hit_rate == null ? '—' : (m.hit_rate * 100).toFixed(1)}%</td>
+                <td>${fmtUsd(m.est_savings_usd)}${m.savings_known ? '' : ' <span class="pm-savings-unknown" title="No known cache-read price for this model">?</span>'}</td>
+            </tr>`).join('');
+
+        const series = econ && Array.isArray(econ.series) ? econ.series : [];
+        let chart = '';
+        if (series.length > 1 && series.length <= 48) {
+            const maxTotal = Math.max(...series.map(p => (p.cache_read || 0) + (p.cache_write || 0)), 1);
+            const segs = series.map(p => {
+                const read = p.cache_read || 0, write = p.cache_write || 0;
+                const height = Math.max(2, Math.round(((read + write) / maxTotal) * 100));
+                const readH = read + write > 0 ? Math.round((read / (read + write)) * height) : 0;
+                const ts = new Date(p.timestamp / 1e6).toISOString().slice(5, 16).replace('T', ' ');
+                return `
+                    <div class="ce-col" title="${ts} — read ${fmt(read)}, write ${fmt(write)}">
+                        <div class="ce-stack" style="height:${height}px">
+                            <div class="ce-read" style="height:${readH}px"></div>
+                            <div class="ce-write" style="height:${height - readH}px"></div>
+                        </div>
+                    </div>`;
+            }).join('');
+            chart = `
+                <div class="ce-chart" title="Cache reads (blue) vs writes (amber) per ${bucketSecs}s bucket">
+                    ${segs}
+                </div>
+                <div class="ce-legend">
+                    <span><span class="ce-swatch ce-read"></span>cache read</span>
+                    <span><span class="ce-swatch ce-write"></span>cache write</span>
+                </div>`;
+        }
+
+        return `
+            <h3>Cache economics by model</h3>
+            <p class="section-hint">${fmt(totalRead)} tokens served from cache vs ${fmt(totalWrite)} written — estimated savings ${fmtUsd(totalSavings)}${allKnown ? '' : ' (partial: some models have no known cache-read price)'}</p>
+            ${chart}
+            <table class="data-table">
+                <thead><tr>
+                    <th>Model</th><th>Cache read</th><th>Cache write</th>
+                    <th>Read:write</th><th>Hit rate</th><th>Est. savings</th>
+                </tr></thead>
+                <tbody>${modelRows}</tbody>
             </table>`;
     }
 

@@ -11,6 +11,19 @@ have to work around), not implementation detail.
 
 ## [Unreleased]
 
+### Added
+
+- **Quantify what prompt caching is saving you.** The *Cache economics by
+  model* section on the GenAI Analytics page (and `otelite cache --since 7d`)
+  shows, per model: tokens served from cache vs tokens written to it, the
+  read:write ratio (how long the cache pays for itself), the hit rate, and
+  an estimated savings in dollars (`cache reads × (input price − cache-read
+  price)`). Models without a known cache-read price show `—` instead of a
+  fabricated number. `otelite cache --series` adds a time-bucketed
+  read/write chart. The API exposes this as
+  `GET /api/genai/cache_hit_rate?by_model=1` (the endpoint's original
+  per-model hit-rate list is unchanged without that flag).
+
 ## [0.1.69] - 2026-08-27
 
 ### Added
