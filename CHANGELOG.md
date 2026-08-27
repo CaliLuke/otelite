@@ -38,6 +38,18 @@ have to work around), not implementation detail.
   with ASCII bars and the stats line. The GenAI latency section shows the
   request-duration distribution with a linear/log toggle.
 
+- **Zoom into one session.** The Session Report modal now includes a
+  session-context section: every span and log for the session (with totals
+  when truncated), per-metric aggregates (counts, sums, min/max), and a
+  merged timeline — plus "Spans → Traces" and "Logs → Logs view" cross-links
+  that open the filtered views. The CLI gains
+  `otelite sessions context <session-id> [--start <ns>] [--end <ns>]
+  [--limit 500]` and the API gains
+  `GET /api/sessions/{id}/context`. Coverage is reported honestly per agent:
+  claude is full; opencode spans are partial (only llm/tool spans are
+  session-labelled) and codex only exposes `mcp.tools.call` spans, its logs
+  via `conversation.id`, and no per-session metrics.
+
 ## [0.1.75] - 2026-08-27
 
 ### Added

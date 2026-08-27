@@ -1337,6 +1337,103 @@ pub struct DistributionResponse {
     pub stats: Option<DistributionStats>,
 }
 
+/// Session header for the session context endpoint (issue #134).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionContextSession {
+    pub id: String,
+    /// Detected agent: claude | opencode | codex (None when unrecognised).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// opencode's `project.id` label; absent for claude/codex (they emit no
+    /// project label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// "full" | "partial": how much of this agent's span set carries
+    /// session.id. opencode labels only llm/tool spans; codex labels only
+    /// `mcp.tools.call` spans. claude labels its whole span set.
+    pub span_coverage: String,
+}
+
+/// One span in the session context (issue #134).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionContextSpan {
+    pub trace_id: String,
+    pub span_id: String,
+    pub name: String,
+    pub start_time: i64,
+    pub duration_ns: i64,
+    /// `model` attribute when present (timeline labels).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// One log in the session context (issue #134). Body is truncated to
+/// 512 chars.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionContextLog {
+    pub timestamp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    pub body: String,
+}
+
+/// Aggregated metric series for one metric name in the session context
+/// (issue #134) — counts and scalar stats, not raw points.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionContextMetric {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// OTel metric type: 0 gauge, 1 counter, 2 histogram (see MetricType).
+    pub metric_type: u8,
+    pub count: u64,
+    /// Sum/min/max over scalar (gauge/counter) points; None when the
+    /// series has no scalar values (e.g. histograms only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    pub first_ts: i64,
+    pub last_ts: i64,
+}
+
+/// One merged span/log event on the session timeline (issue #134).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionContextTimelineEvent {
+    pub ts: i64,
+    /// "span" | "log".
+    pub kind: String,
+    /// e.g. "llm_request claude-opus-5[1m]" or "api_request WARN".
+    pub label: String,
+}
+
+/// GET /api/sessions/:id/context — everything observed for one session on
+/// one timeline (issue #134). Spans and logs are truncated to `limit` with
+/// `*_total` counts; metrics are aggregated per name, not raw-dumped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SessionContextResponse {
+    pub session: SessionContextSession,
+    #[serde(default)]
+    pub spans: Vec<SessionContextSpan>,
+    pub spans_total: u64,
+    #[serde(default)]
+    pub logs: Vec<SessionContextLog>,
+    pub logs_total: u64,
+    #[serde(default)]
+    pub metrics: Vec<SessionContextMetric>,
+    /// Spans and logs merged, ascending by ts, capped at `limit`.
+    #[serde(default)]
+    pub timeline: Vec<SessionContextTimelineEvent>,
+}
+
 /// Storage-layer per-session cost: token detail per model (the API layer
 /// prices it) plus the harness cost counter where one exists. Not a wire
 /// type — see [`SessionCostResponse`].

@@ -16,6 +16,21 @@ pub enum SessionsCommand {
     Costs(CostsArgs),
     /// Log-spaced histogram of per-session costs (ASCII)
     CostHist(CostHistArgs),
+    /// Everything observed for one session: spans, logs and metric
+    /// aggregates on one timeline (issue #134)
+    Context {
+        /// Session id (from `otelite sessions costs` or the web Sessions tab)
+        session: String,
+        /// Window start (ns since epoch; default: no lower bound)
+        #[arg(long)]
+        start: Option<i64>,
+        /// Window end (ns since epoch; default: no upper bound)
+        #[arg(long)]
+        end: Option<i64>,
+        /// Max spans and logs to show (default 500, cap 5000)
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -87,7 +102,128 @@ impl SessionsCommand {
                 }
                 Ok(())
             },
+            SessionsCommand::Context {
+                session,
+                start,
+                end,
+                limit,
+            } => {
+                let resp = storage
+                    .query_session_context(session, *start, *end, *limit as u64)
+                    .await
+                    .map_err(|e| Error::ApiError(format!("Failed to query session context: {e}")))?
+                    .ok_or_else(|| {
+                        Error::ApiError(format!(
+                            "No spans, logs or metrics found for session {session}"
+                        ))
+                    })?;
+                match format {
+                    crate::config::OutputFormat::Json
+                    | crate::config::OutputFormat::JsonCompact => {
+                        print_json(&resp, format)?;
+                    },
+                    crate::config::OutputFormat::Pretty => display_context(&resp),
+                }
+                Ok(())
+            },
         }
+    }
+}
+
+fn fmt_ns(ts: i64) -> String {
+    chrono::DateTime::from_timestamp_nanos(ts)
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S%.3f")
+        .to_string()
+}
+
+fn fmt_ns_duration(ns: i64) -> String {
+    let ms = ns as f64 / 1_000_000.0;
+    if ms < 1.0 {
+        format!("{ms:.0}µs")
+    } else if ms < 1000.0 {
+        format!("{ms:.0}ms")
+    } else {
+        format!("{:.2}s", ms / 1000.0)
+    }
+}
+
+fn display_context(resp: &otelite_core::api::SessionContextResponse) {
+    let s = &resp.session;
+    println!(
+        "Session {} — agent: {} — span coverage: {}{}",
+        s.id,
+        s.agent.as_deref().unwrap_or("unknown"),
+        s.span_coverage,
+        s.project_id
+            .as_ref()
+            .map(|p| format!(" — project: {p}"))
+            .unwrap_or_default()
+    );
+    println!(
+        "\nSpans ({} shown of {}):",
+        resp.spans.len(),
+        resp.spans_total
+    );
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["time", "span", "model", "duration"]);
+    for span in &resp.spans {
+        table.add_row(vec![
+            fmt_ns(span.start_time),
+            span.name.clone(),
+            span.model.clone().unwrap_or_default(),
+            fmt_ns_duration(span.duration_ns),
+        ]);
+    }
+    println!("{table}");
+    println!("\nLogs ({} shown of {}):", resp.logs.len(), resp.logs_total);
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["time", "severity", "body"]);
+    for log in &resp.logs {
+        table.add_row(vec![
+            fmt_ns(log.timestamp),
+            log.severity.clone().unwrap_or_default(),
+            log.body.chars().take(100).collect::<String>(),
+        ]);
+    }
+    println!("{table}");
+    if !resp.metrics.is_empty() {
+        println!("\nMetrics (aggregated):");
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+        table.set_header(vec!["name", "type", "count", "sum", "min", "max"]);
+        for m in &resp.metrics {
+            table.add_row(vec![
+                m.name.clone(),
+                match m.metric_type {
+                    0 => "gauge".to_string(),
+                    1 => "counter".to_string(),
+                    _ => "histogram".to_string(),
+                },
+                m.count.to_string(),
+                m.sum.map(|v| format!("{v:.2}")).unwrap_or_default(),
+                m.min.map(|v| format!("{v:.2}")).unwrap_or_default(),
+                m.max.map(|v| format!("{v:.2}")).unwrap_or_default(),
+            ]);
+        }
+        println!("{table}");
+    }
+    println!("\nTimeline ({} events):", resp.timeline.len());
+    for e in &resp.timeline {
+        println!(
+            "  {}  {:>4}  {}",
+            fmt_ns(e.ts),
+            e.kind,
+            e.label.chars().take(100).collect::<String>()
+        );
     }
 }
 

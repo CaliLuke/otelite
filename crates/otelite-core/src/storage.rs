@@ -13,9 +13,9 @@ use crate::api::{
     DistributionResponse, ErrorRateByModel, ErrorTypeBreakdown, FinishReasonCount,
     GenAiCapabilityResponse, LatencyByContextBin, LatencyPercentilesResponse, LatencySeriesPoint,
     LatencyStats, ModelDriftPair, ModelUsage, ProjectRollupStorage, ProviderMixResponse,
-    ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats, SessionCostRow,
-    SessionCostStorage, SystemUsage, TokenUsageSummary, ToolUsage, TopSpan, TopSpanSort,
-    TruncationRateByModel,
+    ReasoningShareResponse, RequestParamProfile, RetrievalStats, RetryStats,
+    SessionContextResponse, SessionCostRow, SessionCostStorage, SystemUsage, TokenUsageSummary,
+    ToolUsage, TopSpan, TopSpanSort, TruncationRateByModel,
 };
 // New types referenced via crate::api:: in the trait methods below.
 use crate::query::QueryPredicate;
@@ -261,6 +261,18 @@ pub trait StorageBackend: Send + Sync {
         buckets: usize,
         scale: &str,
     ) -> Result<DistributionResponse>;
+
+    /// Session context (issue #134): spans, logs and aggregated metrics for
+    /// one session id over the window. Spans/logs truncated to `limit`
+    /// (counts in `*_total`); metrics aggregated per name. 404-able:
+    /// `None` response when the session has no data in any store.
+    async fn query_session_context(
+        &self,
+        session_id: &str,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: u64,
+    ) -> Result<Option<SessionContextResponse>>;
 
     /// Native GenAI telemetry capability coverage and quality.
     ///

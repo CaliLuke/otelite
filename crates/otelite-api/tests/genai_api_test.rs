@@ -6,6 +6,7 @@ use axum::{
 };
 use otelite_api::{DashboardConfig, DashboardServer};
 use otelite_core::api::{AgentRollupResponse, TokenUsageResponse};
+use otelite_core::telemetry::log::{LogRecord, SeverityLevel};
 use otelite_core::telemetry::metric::{Metric, MetricType};
 use otelite_core::telemetry::trace::{Span, SpanKind, SpanStatus, StatusCode as SpanStatusCode};
 use otelite_storage::sqlite::SqliteBackend;
@@ -1274,4 +1275,198 @@ async fn test_get_distributions_with_data() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── session context (issue #134) ──────────────────────────────────────────
+
+fn ctx_span(span_id: &str, session_id: &str, start: i64, duration_ms: i64) -> Span {
+    let mut attributes: HashMap<String, String> = HashMap::new();
+    attributes.insert("session.id".to_string(), session_id.to_string());
+    attributes.insert("model".to_string(), "claude-sonnet-5".to_string());
+    Span {
+        trace_id: "t".to_string(),
+        span_id: span_id.to_string(),
+        parent_span_id: None,
+        name: "claude_code.llm_request".to_string(),
+        kind: SpanKind::Internal,
+        start_time: start,
+        end_time: start + duration_ms * 1_000_000,
+        attributes,
+        status: SpanStatus {
+            code: SpanStatusCode::Ok,
+            message: None,
+        },
+        events: Vec::new(),
+        resource: None,
+    }
+}
+
+fn ctx_log(ts: i64, body: &str, severity: i32, attributes: &[(&str, &str)]) -> LogRecord {
+    let mut log = LogRecord::new(SeverityLevel::from_i32(severity).unwrap(), body, ts);
+    for (k, v) in attributes {
+        log.attributes.insert(k.to_string(), v.to_string());
+    }
+    log
+}
+
+#[tokio::test]
+async fn test_get_session_context_empty() {
+    let (server, _storage, _temp_dir) = setup_test_server().await;
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/no-such-session/context")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_session_context_mixed_session() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+    let sid = "ses_ctx_1";
+    storage
+        .write_span(&ctx_span("c1", sid, R0, 100))
+        .await
+        .unwrap();
+    storage
+        .write_span(&ctx_span("c2", sid, R0 + 900_000_000, 300))
+        .await
+        .unwrap();
+    storage
+        .write_log(&ctx_log(
+            R0 + 100_000_000,
+            "claude_code.api_request",
+            13,
+            &[("session.id", sid), ("event.name", "api_request")],
+        ))
+        .await
+        .unwrap();
+    storage
+        .write_log(&ctx_log(
+            R0 + 200_000_000,
+            "claude_code.tool_result",
+            17,
+            &[("session.id", sid)],
+        ))
+        .await
+        .unwrap();
+    // opencode metric for this session (gauge points)
+    storage
+        .write_metric(&agent_metric(
+            "opencode.message.count",
+            R0 + 300_000_000,
+            Some(3),
+            None,
+            &[("session.id", sid), ("project.id", "proj-7")],
+        ))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{sid}/context"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let ctx: otelite_core::api::SessionContextResponse = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(ctx.session.id, sid);
+    // claude spans present → agent claude, full span coverage
+    assert_eq!(ctx.session.agent.as_deref(), Some("claude"));
+    assert_eq!(ctx.session.span_coverage, "full");
+    // project.id leaks in from the opencode metric row — it is
+    // scoped to opencode.* metric names only
+    assert_eq!(ctx.session.project_id.as_deref(), Some("proj-7"));
+    assert_eq!(ctx.spans_total, 2);
+    assert_eq!(ctx.logs_total, 2);
+    assert_eq!(ctx.spans[0].duration_ns, 100_000_000);
+    assert_eq!(ctx.logs[0].severity.as_deref(), Some("WARN"));
+    assert_eq!(ctx.logs[1].severity.as_deref(), Some("ERROR"));
+    assert_eq!(ctx.metrics.len(), 1);
+    assert_eq!(ctx.metrics[0].count, 1);
+    assert_eq!(ctx.metrics[0].sum, Some(3.0));
+    // timeline: 2 spans + 2 logs merged ascending
+    assert_eq!(ctx.timeline.len(), 4);
+    assert_eq!(ctx.timeline[0].kind, "span");
+    assert_eq!(ctx.timeline[0].ts, R0);
+    assert_eq!(
+        ctx.timeline
+            .iter()
+            .find(|e| e.kind == "span")
+            .unwrap()
+            .label,
+        "claude_code.llm_request claude-sonnet-5"
+    );
+
+    // limit caps rows, not totals
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{sid}/context?limit=1"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let ctx: otelite_core::api::SessionContextResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ctx.spans.len(), 1);
+    assert_eq!(ctx.spans_total, 2);
+    assert_eq!(ctx.timeline.len(), 1);
+}
+
+#[tokio::test]
+async fn test_get_session_context_window_filter() {
+    let (server, storage, _temp_dir) = setup_test_server().await;
+    let sid = "ses_ctx_2";
+    storage
+        .write_span(&ctx_span("c1", sid, R0, 100))
+        .await
+        .unwrap();
+    storage
+        .write_span(&ctx_span("c2", sid, R0 + 900_000_000, 300))
+        .await
+        .unwrap();
+
+    let app = server.build_router();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{sid}/context?start_time={}",
+                    R0 + 500_000_000
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let ctx: otelite_core::api::SessionContextResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        ctx.spans.len(),
+        1,
+        "only the later span starts in the window"
+    );
+    assert_eq!(ctx.spans_total, 2, "total ignores the window");
 }

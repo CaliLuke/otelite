@@ -179,7 +179,7 @@ enum Commands {
     /// Session cost analysis: top-cost sessions and the cost distribution
     #[command(
         subcommand,
-        after_help = "Examples:\n  otelite sessions costs --since 24h --top 20\n  otelite sessions cost-hist --since 7d --buckets 30 --format json"
+        after_help = "Examples:\n  otelite sessions costs --since 24h --top 20\n  otelite sessions cost-hist --since 7d --buckets 30 --format json\n  otelite sessions context <session-id> --start 1787000000000000000"
     )]
     Sessions(commands::sessions::SessionsCommand),
     /// Distribution of a named metric: session_cost | tool_duration | llm_duration | ttft | output_tokens

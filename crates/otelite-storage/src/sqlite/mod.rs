@@ -431,6 +431,21 @@ impl StorageBackend for SqliteBackend {
         .await
     }
 
+    async fn query_session_context(
+        &self,
+        session_id: &str,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+        limit: u64,
+    ) -> Result<Option<otelite_core::api::SessionContextResponse>> {
+        let session_id = session_id.to_string();
+        self.read_query(move |conn| {
+            reader::query_session_context(conn, &session_id, start_time, end_time, limit)
+                .map_err(StorageError::from)
+        })
+        .await
+    }
+
     async fn query_genai_capabilities(
         &self,
         start_time: Option<i64>,

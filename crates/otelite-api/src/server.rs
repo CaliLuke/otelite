@@ -74,6 +74,7 @@ use utoipa::OpenApi;
         crate::api::genai::get_hour_of_day,
         crate::api::sessions::get_session_costs,
         crate::api::sessions::get_session_cost_distribution,
+        crate::api::sessions::get_session_context,
     ),
     components(
         schemas(
@@ -145,6 +146,13 @@ use utoipa::OpenApi;
             otelite_core::api::ProjectRollup,
             otelite_core::api::ProjectTopModel,
             otelite_core::api::ProjectRollupResponse,
+            otelite_core::api::SessionContextResponse,
+            otelite_core::api::SessionContextSession,
+            otelite_core::api::SessionContextSpan,
+            otelite_core::api::SessionContextLog,
+            otelite_core::api::SessionContextMetric,
+            otelite_core::api::SessionContextTimelineEvent,
+            crate::api::sessions::SessionContextQuery,
         )
     ),
     tags(
@@ -335,6 +343,10 @@ impl DashboardServer {
                 get(crate::api::sessions::get_session_cost_distribution),
             )
             .route("/api/sessions/{session_id}/diagnose", get(crate::api::sessions::get_session_diagnose))
+            .route(
+                "/api/sessions/{session_id}/context",
+                get(crate::api::sessions::get_session_context),
+            )
             // OpenAPI spec endpoint
             .route("/api/openapi.json", get(|| async {
                 axum::Json(ApiDoc::openapi())

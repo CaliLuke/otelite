@@ -224,6 +224,7 @@ class ApiClient {
     /**
      * Fetch session diagnose report
      */
+    async getSessionContext(sessionId, params = {}) { return this.get(`/sessions/${sessionId}/context`, { limit: 500, ...params }); }
     async getSessionDiagnose(sessionId) {
         return this.get(`/sessions/${encodeURIComponent(sessionId)}/diagnose`);
     }

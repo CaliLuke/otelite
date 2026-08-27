@@ -512,3 +512,63 @@ pub async fn get_session_cost_distribution(
         &sessions, buckets,
     )))
 }
+
+/// GET /api/sessions/:session_id/context
+///
+/// Everything observed for one session on one timeline (issue #134):
+/// spans and logs truncated to `limit` (true counts in `*_total`) and
+/// per-name metric aggregates. 404 when the session has no data in any
+/// of the three stores.
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{session_id}/context",
+    params(
+        ("session_id" = String, Path, description = "Session id"),
+        SessionContextQuery,
+    ),
+    responses(
+        (status = 200, description = "Session context", body = otelite_core::api::SessionContextResponse),
+        (status = 400, description = "Invalid query parameters"),
+        (status = 404, description = "No data for this session", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    )
+)]
+pub async fn get_session_context(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<SessionContextQuery>,
+) -> Result<Json<otelite_core::api::SessionContextResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // No "exists" check needed: the storage layer returns None when the
+    // session has no data in spans, logs or metrics.
+    let limit = params.limit.unwrap_or(500).min(5000) as u64;
+    let resp = state
+        .storage
+        .query_session_context(&session_id, params.start_time, params.end_time, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::storage_error(format!(
+                    "query session context: {e}"
+                ))),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!("session {}", session_id))),
+            )
+        })?;
+
+    Ok(Json(resp))
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct SessionContextQuery {
+    /// Start time (nanoseconds since Unix epoch)
+    pub start_time: Option<i64>,
+    /// End time (nanoseconds since Unix epoch)
+    pub end_time: Option<i64>,
+    /// Max spans and logs to return (default 500, cap 5000)
+    pub limit: Option<usize>,
+}

@@ -527,12 +527,89 @@ class TracesView {
         modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
 
         try {
-            const data = await this.apiClient.getSessionDiagnose(sessionId);
-            document.getElementById('session-diagnose-body').innerHTML = this._renderSessionDiagnose(data);
+            // Context (spans/logs/metrics, issue #134) is best-effort: the
+            // diagnose report still renders if the context endpoint is down.
+            const [data, context] = await Promise.all([
+                this.apiClient.getSessionDiagnose(sessionId),
+                this.apiClient.getSessionContext(sessionId).catch(() => null),
+            ]);
+            document.getElementById('session-diagnose-body').innerHTML =
+                this._renderSessionDiagnose(data) + this._renderSessionContext(sessionId, context);
         } catch (e) {
             document.getElementById('session-diagnose-body').innerHTML =
                 `<div style="color:var(--error-color);padding:1rem;">Failed to load session report: ${this.escapeHtml(e.message)}</div>`;
         }
+    }
+
+    /**
+     * Session Context section (issue #134): the full span/log/metric cohort
+     * behind one session — beyond the LLM interactions in the diagnose
+     * report — with cross-links into the filtered Traces and Logs views.
+     * @param {string} sessionId
+     * @param {?object} ctx - SessionContextResponse (null when unavailable)
+     */
+    _renderSessionContext(sessionId, ctx) {
+        if (!ctx) return '';
+        const esc = s => this.escapeHtml(String(s ?? ''));
+        const fmtNs = ts => new Date(ts / 1e6).toLocaleTimeString([], { hour12: false }) +
+            '.' + String(Math.floor(ts / 1000) % 1000).padStart(3, '0');
+        const fmtDur = ns => ns >= 1_000_000 ? `${(ns / 1e6).toFixed(2)}s` : `${Math.round(ns / 1000)}ms`;
+        const s = ctx.session || {};
+        const spanRows = (ctx.spans || []).slice(0, 50).map(sp => `
+            <tr style="border-bottom:1px solid var(--border-color);font-size:0.8rem;">
+                <td style="padding:0.3rem 0.5rem;color:var(--text-secondary);">${fmtNs(sp.start_time)}</td>
+                <td style="padding:0.3rem 0.5rem;font-family:monospace;">${esc(sp.name)}</td>
+                <td style="padding:0.3rem 0.5rem;">${esc(sp.model)}</td>
+                <td style="padding:0.3rem 0.5rem;">${fmtDur(sp.duration_ns)}</td>
+            </tr>`).join('');
+        const logRows = (ctx.logs || []).slice(0, 50).map(lg => `
+            <tr style="border-bottom:1px solid var(--border-color);font-size:0.8rem;">
+                <td style="padding:0.3rem 0.5rem;color:var(--text-secondary);">${fmtNs(lg.timestamp)}</td>
+                <td style="padding:0.3rem 0.5rem;color:${(lg.severity || '').startsWith('ERROR') || (lg.severity || '').startsWith('FATAL') ? 'var(--error-color)' : (lg.severity || '').startsWith('WARN') ? 'var(--warning-color)' : 'inherit'};">${esc(lg.severity)}</td>
+                <td style="padding:0.3rem 0.5rem;font-family:monospace;">${esc(lg.body)}</td>
+            </tr>`).join('');
+        const metricChips = (ctx.metrics || []).map(m => `
+            <div class="sd-chip" title="${esc(m.name)} · ${m.count} points">
+                <div class="sd-chip-val">${esc(m.name.replace('opencode.', '').replace('codex.', ''))}</div>
+                <div class="sd-chip-lbl">${m.count} pts · sum ${m.sum != null ? Number(m.sum).toFixed(1) : '—'} · max ${m.max != null ? Number(m.max).toFixed(1) : '—'}</div>
+            </div>`).join('');
+        const timelineRows = (ctx.timeline || []).slice(0, 30).map(ev => `
+            <div style="display:flex;gap:0.6rem;font-size:0.78rem;padding:0.15rem 0;">
+                <span style="color:var(--text-secondary);min-width:9rem;">${fmtNs(ev.ts)}</span>
+                <span style="min-width:2.5rem;color:${ev.kind === 'span' ? 'var(--accent-color)' : 'var(--text-secondary)'};">${esc(ev.kind)}</span>
+                <span style="font-family:monospace;word-break:break-all;">${esc(ev.label)}</span>
+            </div>`).join('');
+
+        return `
+            <details style="margin-top:1.5rem;" open>
+                <summary style="cursor:pointer;font-weight:600;font-size:0.95rem;margin-bottom:0.75rem;">
+                    Session context — agent: ${esc(s.agent) || 'unknown'}
+                    ${s.project_id ? ` · project: ${esc(s.project_id)}` : ''}
+                    · span coverage: ${esc(s.span_coverage)}
+                </summary>
+                <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-bottom:1rem;">
+                    <button class="btn btn-secondary btn-sm" onclick="window.app.navigateToTracesBySession('${esc(sessionId)}');return false;">Spans → Traces view</button>
+                    <button class="btn btn-secondary btn-sm" onclick="window.app.navigateToLogsBySession('${esc(sessionId)}');return false;">Logs → Logs view</button>
+                </div>
+                <div style="display:flex;gap:1.5rem;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:320px;">
+                        <div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.35rem;">Spans (${(ctx.spans || []).length} of ${ctx.spans_total})</div>
+                        <table style="width:100%;border-collapse:collapse;">
+                            <tr><th></th><th style="text-align:left;padding:0 0.5rem;">Span</th><th style="text-align:left;padding:0 0.5rem;">Model</th><th style="text-align:left;padding:0 0.5rem;">Duration</th></tr>
+                            ${spanRows}
+                        </table>
+                    </div>
+                    <div style="flex:1;min-width:320px;">
+                        <div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.35rem;">Logs (${(ctx.logs || []).length} of ${ctx.logs_total})</div>
+                        <table style="width:100%;border-collapse:collapse;">
+                            <tr><th></th><th style="text-align:left;padding:0 0.5rem;">Severity</th><th style="text-align:left;padding:0 0.5rem;">Body</th></tr>
+                            ${logRows}
+                        </table>
+                    </div>
+                </div>
+                ${metricChips ? `<div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-top:1rem;">${metricChips}</div>` : ''}
+                ${timelineRows ? `<div style="margin-top:1rem;font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.35rem;">Timeline (first ${(ctx.timeline || []).length})</div>${timelineRows}` : ''}
+            </details>`;
     }
 
     _renderSessionDiagnose(data) {

@@ -4957,6 +4957,329 @@ fn attribute_model_to_providers(
         .collect()
 }
 
+/// Session context (issue #134): spans, logs and aggregated metrics for one
+/// session id over the window.
+///
+/// Session addressing per harness (verified against the live DB):
+/// - claude: `session.id` on all `claude_code.*` spans and on the
+///   `com.anthropic.claude_code.events` logs; claude emits no metrics.
+/// - opencode: `session.id` on llm/tool spans, `com.opencode` logs (100%)
+///   and all `opencode.*` metrics.
+/// - codex: `session.id` on `mcp.tools.call` spans only; `conversation.id`
+///   on `codex_otel.log_only` logs (100%); codex metrics carry
+///   `session_source` (cli/exec/subagent_*), which is NOT a session id —
+///   codex has no per-session metrics.
+///
+/// Spans and logs are truncated to `limit` (true counts in `*_total`);
+/// metrics are aggregated per name in SQL (count/sum/min/max, first/last
+/// ts) — never raw-dumped, since an opencode session carries hundreds of
+/// thousands of points. Returns `None` when the session has no data in any
+/// of the three stores (the API maps that to 404).
+#[allow(clippy::too_many_arguments)]
+pub fn query_session_context(
+    conn: &Connection,
+    session_id: &str,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    limit: u64,
+) -> Result<Option<otelite_core::api::SessionContextResponse>> {
+    use otelite_core::api::{
+        SessionContextLog, SessionContextMetric, SessionContextResponse, SessionContextSession,
+        SessionContextSpan, SessionContextTimelineEvent,
+    };
+
+    let sess_pred = format!(
+        "json_extract(attributes, '$.\"{key}\"') = ?1",
+        key = semconv::SESSION_ID_KEY
+    );
+    // Codex logs address the session via conversation.id (verified: 100% of
+    // codex_otel.log_only logs carry it; session.id is absent there).
+    // Both predicates share the single ?1 binding below.
+    let conv_pred = "json_extract(attributes, '$.\"conversation.id\"') = ?1".to_string();
+    let window = |col: &str, q: &mut String, p: &mut Vec<Box<dyn rusqlite::ToSql>>| {
+        if let Some(start) = start_time {
+            q.push_str(&format!(" AND {col} >= ?"));
+            p.push(Box::new(start));
+        }
+        if let Some(end) = end_time {
+            q.push_str(&format!(" AND {col} <= ?"));
+            p.push(Box::new(end));
+        }
+    };
+
+    // ── spans (seek idx_spans_session_id; the partial-index predicate is a
+    // required conjunct for the planner, semantically implied by the eq) ──
+    let sess_expr = semconv::session_id_expr("attributes");
+    let mut q = format!(
+        "SELECT trace_id, span_id, name, start_time, end_time, \
+         CASE WHEN json_valid(attributes) THEN json_extract(attributes, '$.\"model\"') END \
+         FROM spans WHERE {expr} = ?1 AND {pred} AND json_valid(attributes)",
+        expr = sess_expr,
+        pred = semconv::session_id_index_predicate("attributes")
+    );
+    let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session_id.to_string())];
+    window("start_time", &mut q, &mut p);
+    q.push_str(" ORDER BY start_time LIMIT ?");
+    p.push(Box::new(limit + 1));
+    let mut stmt = conn
+        .prepare(&q)
+        .map_err(|e| StorageError::QueryError(format!("Failed to query session spans: {e}")))?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+    let spans: Vec<(String, String, String, i64, i64, Option<String>)> = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to read session spans: {e}")))?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| StorageError::QueryError(format!("Failed to parse session spans: {e}")))?;
+    let spans_total = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM spans WHERE {expr} = ?1 AND {pred} AND json_valid(attributes)",
+                expr = sess_expr,
+                pred = semconv::session_id_index_predicate("attributes")
+            ),
+            rusqlite::params![session_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| {
+            StorageError::QueryError(format!("Failed to count session spans: {e}"))
+        })?;
+
+    // ── logs (window-bounded scan; no session index on logs) ──
+    let mut q = format!(
+        "SELECT timestamp, severity_number, body FROM logs \
+         WHERE json_valid(attributes) AND ({sess} OR {conv})",
+        sess = sess_pred,
+        conv = conv_pred
+    );
+    let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session_id.to_string())];
+    window("timestamp", &mut q, &mut p);
+    q.push_str(" ORDER BY timestamp LIMIT ?");
+    p.push(Box::new(limit + 1));
+    let mut stmt = conn
+        .prepare(&q)
+        .map_err(|e| StorageError::QueryError(format!("Failed to query session logs: {e}")))?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+    let logs: Vec<(i64, Option<i32>, String)> = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i32>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to read session logs: {e}")))?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| StorageError::QueryError(format!("Failed to parse session logs: {e}")))?;
+    let logs_total = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM logs WHERE json_valid(attributes) AND ({sess} OR {conv})",
+                sess = sess_pred,
+                conv = conv_pred
+            ),
+            rusqlite::params![session_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| StorageError::QueryError(format!("Failed to count session logs: {e}")))?;
+
+    // ── metrics (aggregated in SQL; session.id addressing) ──
+    let mut q = format!(
+        "SELECT name, unit, metric_type AS mtype, COUNT(*), \
+         SUM(COALESCE(value_double, CAST(value_int AS REAL))), \
+         MIN(COALESCE(value_double, CAST(value_int AS REAL))), \
+         MAX(COALESCE(value_double, CAST(value_int AS REAL))), \
+         MIN(timestamp), MAX(timestamp) \
+         FROM metrics WHERE json_valid(attributes) AND {sess}",
+        sess = sess_pred
+    );
+    let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session_id.to_string())];
+    window("timestamp", &mut q, &mut p);
+    q.push_str(" GROUP BY name, unit, metric_type ORDER BY name");
+    let mut stmt = conn
+        .prepare(&q)
+        .map_err(|e| StorageError::QueryError(format!("Failed to query session metrics: {e}")))?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+    // (name, unit, metric_type, count, sum, min, max, first_ts, last_ts)
+    #[allow(clippy::type_complexity)]
+    type MetricAggRow = (
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        i64,
+        i64,
+    );
+    let metrics: Vec<MetricAggRow> = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<f64>>(4)?,
+                r.get::<_, Option<f64>>(5)?,
+                r.get::<_, Option<f64>>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(|e| StorageError::QueryError(format!("Failed to read session metrics: {e}")))?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| StorageError::QueryError(format!("Failed to parse session metrics: {e}")))?;
+
+    if spans.is_empty() && logs.is_empty() && metrics.is_empty() {
+        return Ok(None);
+    }
+
+    // ── agent detection + span coverage ──
+    let has_claude = spans.iter().any(|s| s.2.starts_with("claude_code."))
+        || logs.iter().any(|l| l.2.starts_with("claude_code."));
+    let has_opencode = spans.iter().any(|s| s.2.starts_with("opencode."))
+        || metrics.iter().any(|m| m.0.starts_with("opencode."));
+    let has_codex = logs.iter().any(|l| l.2.starts_with("codex_otel"))
+        || metrics.iter().any(|m| m.0.starts_with("codex."));
+    // NOTE: claude event logs put the event name in the body
+    // ("claude_code.api_request"); opencode log bodies are free text, so
+    // claude detection also checks span names (done above).
+    let agent = if has_claude {
+        Some("claude".to_string())
+    } else if has_opencode {
+        Some("opencode".to_string())
+    } else if has_codex {
+        Some("codex".to_string())
+    } else {
+        None
+    };
+    // Verified coverage: claude labels its whole span set ("full");
+    // opencode labels only llm/tool spans and codex only mcp.tools.call
+    // ("partial" for both).
+    let span_coverage = match agent.as_deref() {
+        Some("claude") => "full".to_string(),
+        _ => "partial".to_string(),
+    };
+    // opencode carries project.id on its metrics; claude/codex don't.
+    // (Scoped to opencode.* names so a foreign metric row for the same
+    // session id can't leak another project label in.)
+    let project_id = conn
+        .query_row(
+            "SELECT json_extract(attributes, '$.\"project.id\"') FROM metrics \
+             WHERE json_valid(attributes) AND name LIKE 'opencode.%' \
+             AND json_extract(attributes, '$.\"session.id\"') = ? \
+             AND json_extract(attributes, '$.\"project.id\"') IS NOT NULL \
+             LIMIT 1",
+            rusqlite::params![session_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+
+    let spans_out: Vec<SessionContextSpan> = spans
+        .iter()
+        .take(limit as usize)
+        .map(
+            |(trace_id, span_id, name, start, end, model)| SessionContextSpan {
+                trace_id: trace_id.clone(),
+                span_id: span_id.clone(),
+                name: name.clone(),
+                start_time: *start,
+                duration_ns: *end - *start,
+                model: model.clone(),
+            },
+        )
+        .collect();
+    let logs_out: Vec<SessionContextLog> = logs
+        .iter()
+        .take(limit as usize)
+        .map(|(ts, sev, body)| SessionContextLog {
+            timestamp: *ts,
+            severity: sev
+                .and_then(SeverityLevel::from_i32)
+                .map(|s| s.as_str().to_string()),
+            body: body.chars().take(512).collect(),
+        })
+        .collect();
+    let metrics_out: Vec<SessionContextMetric> = metrics
+        .iter()
+        .map(
+            |(name, unit, mtype, count, sum, min, max, first_ts, last_ts)| SessionContextMetric {
+                name: name.clone(),
+                unit: unit.clone(),
+                metric_type: *mtype as u8,
+                count: *count as u64,
+                sum: *sum,
+                min: *min,
+                max: *max,
+                first_ts: *first_ts,
+                last_ts: *last_ts,
+            },
+        )
+        .collect();
+
+    // ── timeline: spans + logs merged, ascending, capped at limit ──
+    let mut events: Vec<(i64, u8, String)> = Vec::with_capacity(spans.len() + logs.len());
+    for s in &spans_out {
+        let label = match &s.model {
+            Some(m) if !m.is_empty() => format!("{} {}", s.name, m),
+            _ => s.name.clone(),
+        };
+        events.push((s.start_time, 0, label));
+    }
+    for l in &logs_out {
+        let severity = l.severity.clone().unwrap_or_default();
+        let label = if severity.is_empty() {
+            l.body.chars().take(80).collect()
+        } else {
+            format!(
+                "{} {}",
+                l.body.chars().take(80).collect::<String>(),
+                severity
+            )
+        };
+        events.push((l.timestamp, 1, label));
+    }
+    events.sort_by_key(|(ts, ..)| *ts);
+    let timeline: Vec<SessionContextTimelineEvent> = events
+        .into_iter()
+        .take(limit as usize)
+        .map(|(ts, kind, label)| SessionContextTimelineEvent {
+            ts,
+            kind: if kind == 0 {
+                "span".to_string()
+            } else {
+                "log".to_string()
+            },
+            label,
+        })
+        .collect();
+
+    Ok(Some(SessionContextResponse {
+        session: SessionContextSession {
+            id: session_id.to_string(),
+            agent,
+            project_id,
+            span_coverage,
+        },
+        spans: spans_out,
+        spans_total: spans_total as u64,
+        logs: logs_out,
+        logs_total: logs_total as u64,
+        metrics: metrics_out,
+        timeline,
+    }))
+}
+
 /// Sub-agent role attribution (opencode `agent` label).
 ///
 /// Tokens come from windowed deltas of `opencode.token.usage` (a cumulative
@@ -8762,6 +9085,249 @@ mod tests {
         let llm_log = d("llm_duration", "log");
         assert_eq!(llm_log.buckets.len(), 4);
         assert_eq!(dist_count(&llm_log), 4);
+    }
+
+    // ── session context (#134) ────────────────────────────────────────
+
+    fn insert_ctx_log(conn: &Connection, ts: i64, body: &str, severity: i32, attrs: &str) {
+        conn.execute(
+            "INSERT INTO logs (timestamp, severity_number, body, attributes)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![ts, severity, body, attrs],
+        )
+        .unwrap();
+    }
+
+    fn insert_ctx_metric(conn: &Connection, name: &str, ts: i64, value: f64, attrs: &str) {
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_double, attributes)
+             VALUES (?1, 0, ?2, ?3, ?4)",
+            rusqlite::params![name, ts, value, attrs],
+        )
+        .unwrap();
+    }
+
+    fn insert_ctx_metric_int(conn: &Connection, name: &str, ts: i64, value: i64, attrs: &str) {
+        conn.execute(
+            "INSERT INTO metrics (name, metric_type, timestamp, value_int, attributes)
+             VALUES (?1, 1, ?2, ?3, ?4)",
+            rusqlite::params![name, ts, value, attrs],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn session_context_empty_db_returns_none() {
+        let conn = setup_test_db();
+        assert!(query_session_context(&conn, "nope", None, None, 500)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn session_context_mixed_session() {
+        let conn = setup_test_db();
+        // claude-style spans carrying session.id + model (helper hardcodes
+        // session "s1" — relabel to the test session)
+        insert_llm_request_span(
+            &conn,
+            "c1",
+            "claude-sonnet-5",
+            T0,
+            (100, Some(20), Some(10)),
+        );
+        insert_llm_request_span(
+            &conn,
+            "c2",
+            "claude-sonnet-5",
+            T0 + 9_000_000_000,
+            (300, None, None),
+        );
+        conn.execute(
+            "UPDATE spans SET attributes = json_set(attributes, '$.\"session.id\"', 'c-1') WHERE span_id IN ('c1', 'c2')",
+            [],
+        )
+        .unwrap();
+        // claude event log: event name in the body, session in attributes
+        insert_ctx_log(
+            &conn,
+            T0 + 1_000_000_000,
+            "claude_code.api_request",
+            13,
+            r#"{"session.id":"c-1","event.name":"api_request","model":"claude-sonnet-5"}"#,
+        );
+        insert_ctx_log(
+            &conn,
+            T0 + 2_000_000_000,
+            "claude_code.tool_result",
+            17,
+            r#"{"session.id":"c-1","event.name":"tool_result"}"#,
+        );
+        // claude emits no metrics: metrics for this session are empty,
+        // which must not break the response.
+        let resp = query_session_context(&conn, "c-1", None, None, 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.session.id, "c-1");
+        assert_eq!(resp.session.agent.as_deref(), Some("claude"));
+        assert_eq!(resp.session.span_coverage, "full");
+        assert_eq!(resp.spans_total, 2);
+        assert_eq!(resp.logs_total, 2);
+        assert!(resp.metrics.is_empty());
+        assert_eq!(resp.spans[0].model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(resp.spans[0].duration_ns, 100_000_000);
+        assert_eq!(resp.logs[0].severity.as_deref(), Some("WARN"));
+        assert_eq!(resp.logs[1].severity.as_deref(), Some("ERROR"));
+        // timeline: 2 spans + 2 logs merged ascending, capped at limit
+        assert_eq!(resp.timeline.len(), 4);
+        assert_eq!(resp.timeline[0].kind, "span");
+        assert_eq!(resp.timeline[0].ts, T0);
+        assert_eq!(resp.timeline[1].kind, "log");
+        assert_eq!(resp.timeline[1].ts, T0 + 1_000_000_000);
+        assert_eq!(
+            resp.timeline
+                .iter()
+                .find(|e| e.kind == "span")
+                .unwrap()
+                .label,
+            "claude_code.llm_request claude-sonnet-5"
+        );
+    }
+
+    #[test]
+    fn session_context_opencode_partial_coverage_and_metrics() {
+        let conn = setup_test_db();
+        let sid = "ses_abc";
+        // opencode llm span (labeled) — the span cohort is partial by design.
+        // The helper writes a claude-shaped span (name + model attr), so
+        // rename it to the opencode span shape for agent detection.
+        insert_llm_request_span(&conn, "o1", "qwen-3.8", T0, (100, None, Some(42)));
+        conn.execute(
+            "UPDATE spans SET name = 'opencode.llm' WHERE span_id = 'o1'",
+            [],
+        )
+        .unwrap();
+        // relabel that span's session
+        conn.execute(
+            "UPDATE spans SET attributes = json_set(attributes, '$.\"session.id\"', ?1) WHERE span_id = 'o1'",
+            rusqlite::params![sid],
+        )
+        .unwrap();
+        insert_ctx_log(
+            &conn,
+            T0 + 1_000_000_000,
+            "opencode tool finished",
+            9,
+            &format!("{{\"session.id\":\"{sid}\",\"event.name\":\"tool_result\"}}"),
+        );
+        insert_ctx_metric_int(
+            &conn,
+            "opencode.message.count",
+            T0,
+            5,
+            &format!("{{\"session.id\":\"{sid}\",\"project.id\":\"proj-1\"}}"),
+        );
+        insert_ctx_metric_int(
+            &conn,
+            "opencode.message.count",
+            T0 + 100_000_000,
+            9,
+            &format!("{{\"session.id\":\"{sid}\",\"project.id\":\"proj-1\"}}"),
+        );
+        insert_ctx_metric(
+            &conn,
+            "opencode.tool.duration",
+            T0 + 200_000_000,
+            12.5,
+            &format!("{{\"session.id\":\"{sid}\"}}"),
+        );
+
+        let resp = query_session_context(&conn, sid, None, None, 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.session.agent.as_deref(), Some("opencode"));
+        assert_eq!(resp.session.span_coverage, "partial");
+        assert_eq!(resp.session.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(resp.metrics.len(), 2);
+        let msg = resp
+            .metrics
+            .iter()
+            .find(|m| m.name == "opencode.message.count")
+            .unwrap();
+        assert_eq!(msg.count, 2);
+        assert_eq!(msg.sum, Some(14.0));
+        assert_eq!(msg.min, Some(5.0));
+        assert_eq!(msg.max, Some(9.0));
+        assert_eq!(msg.metric_type, 1);
+        assert_eq!(msg.first_ts, T0);
+        assert_eq!(msg.last_ts, T0 + 100_000_000);
+    }
+
+    #[test]
+    fn session_context_codex_logs_via_conversation_id() {
+        let conn = setup_test_db();
+        // codex session: logs carry conversation.id (not session.id);
+        // metrics carry no session identifier at all.
+        let sid = "01a00000-0000-0000-0000-000000000000";
+        insert_ctx_log(
+            &conn,
+            T0,
+            "codex_otel",
+            9,
+            &format!("{{\"event.name\":\"user_prompt\",\"conversation.id\":\"{sid}\"}}"),
+        );
+        insert_ctx_metric(
+            &conn,
+            "codex.turn.token_usage",
+            T0,
+            100.0,
+            r#"{"session_source":"cli"}"#,
+        );
+        let resp = query_session_context(&conn, sid, None, None, 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.session.agent.as_deref(), Some("codex"));
+        assert_eq!(resp.session.span_coverage, "partial");
+        assert_eq!(resp.logs_total, 1);
+        // the codex metric has no session id — it must not leak in
+        assert!(resp.metrics.is_empty());
+    }
+
+    #[test]
+    fn session_context_limit_and_window() {
+        let conn = setup_test_db();
+        let sid = "lim-1";
+        for i in 0..6 {
+            insert_llm_request_span(
+                &conn,
+                &format!("l{i}"),
+                "m",
+                T0 + i * 1_000_000_000,
+                (10, None, None),
+            );
+            conn.execute(
+                "UPDATE spans SET attributes = json_set(attributes, '$.\"session.id\"', ?1) WHERE span_id = ?2",
+                rusqlite::params![sid, format!("l{i}")],
+            )
+            .unwrap();
+        }
+        // limit caps rows but not totals
+        let resp = query_session_context(&conn, sid, None, None, 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.spans.len(), 4);
+        assert_eq!(resp.spans_total, 6);
+        assert_eq!(resp.timeline.len(), 4);
+        // window filters by span start_time
+        let resp = query_session_context(&conn, sid, Some(T0 + 3_000_000_000), None, 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resp.spans.len(),
+            3,
+            "spans 3,4,5 start after the window start"
+        );
+        assert_eq!(resp.spans_total, 6, "total ignores the window");
     }
 
     #[test]
