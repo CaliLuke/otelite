@@ -17,6 +17,7 @@ struct DaemonState {
     dashboard_addr: SocketAddr,
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
+    storage_path: PathBuf,
 }
 
 #[cfg(target_os = "macos")]
@@ -315,7 +316,7 @@ fn is_process_running(pid: u32) -> bool {
 
 /// Start otelite as a background daemon
 pub async fn handle_start(
-    storage_path: Option<PathBuf>,
+    storage_config: StorageConfig,
     addr: SocketAddr,
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
@@ -352,10 +353,9 @@ pub async fn handle_start(
         .arg("--grpc-addr")
         .arg(grpc_addr.to_string())
         .arg("--http-addr")
-        .arg(http_addr.to_string());
-    if let Some(path) = &storage_path {
-        cmd.arg("--storage-path").arg(path);
-    }
+        .arg(http_addr.to_string())
+        .arg("--storage-path")
+        .arg(&storage_config.data_dir);
     let child =
         cmd.stdin(Stdio::null())
             .stdout(log_file_handle.try_clone().map_err(|e| {
@@ -373,14 +373,12 @@ pub async fn handle_start(
             dashboard_addr: addr,
             grpc_addr,
             http_addr,
+            storage_path: storage_config.data_dir.clone(),
         },
     )?;
     write_pid(pid)?;
 
-    let storage_display = storage_path
-        .as_deref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| StorageConfig::default_data_dir().display().to_string());
+    let storage_display = storage_config.data_dir.display();
 
     println!("✓ Otelite daemon started with PID {}", pid);
     println!("  Logs: {}", log_file.display());
@@ -388,6 +386,8 @@ pub async fn handle_start(
     println!("  Dashboard: http://{}", addr);
     println!("  OTLP gRPC: {}", grpc_addr);
     println!("  OTLP HTTP: {}", http_addr);
+    println!("  Retention: {} days", storage_config.retention_days);
+    println!("  Automatic purge: {}", storage_config.auto_purge_enabled);
     println!("\nUse 'otelite stop' to stop the daemon");
     println!("Use 'otelite status' to check daemon status");
 
@@ -474,7 +474,7 @@ pub async fn handle_stop() -> Result<()> {
 
 /// Stop the running daemon and start a fresh one
 pub async fn handle_restart(
-    storage_path: Option<PathBuf>,
+    storage_config: StorageConfig,
     addr: SocketAddr,
     grpc_addr: SocketAddr,
     http_addr: SocketAddr,
@@ -505,7 +505,7 @@ pub async fn handle_restart(
     handle_stop().await?;
 
     println!("Daemon stopped. Starting fresh...");
-    handle_start(storage_path, addr, grpc_addr, http_addr).await
+    handle_start(storage_config, addr, grpc_addr, http_addr).await
 }
 
 fn display_running_status(pid: u32, supervisor: Option<&str>) -> Result<()> {
@@ -540,6 +540,7 @@ fn display_running_status(pid: u32, supervisor: Option<&str>) -> Result<()> {
         println!("Dashboard: http://{}", state.dashboard_addr);
         println!("OTLP gRPC: {}", state.grpc_addr);
         println!("OTLP HTTP: {}", state.http_addr);
+        println!("Storage: {}", state.storage_path.display());
     }
 
     Ok(())
@@ -725,6 +726,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::{parse_launchd_service_state, LaunchdServiceState};
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -743,6 +745,7 @@ mod tests {
             dashboard_addr: SocketAddr::from(([127, 0, 0, 1], 3852)),
             grpc_addr: SocketAddr::from(([127, 0, 0, 1], 3850)),
             http_addr: SocketAddr::from(([127, 0, 0, 1], 3851)),
+            storage_path: PathBuf::from("/tmp/otelite"),
         };
 
         write_daemon_state(&state_file, &state).unwrap();
@@ -758,6 +761,7 @@ mod tests {
             dashboard_addr: SocketAddr::from(([127, 0, 0, 1], 3852)),
             grpc_addr: SocketAddr::from(([127, 0, 0, 1], 3850)),
             http_addr: SocketAddr::from(([127, 0, 0, 1], 3851)),
+            storage_path: PathBuf::from("/tmp/otelite"),
         };
         write_daemon_state(&state_file, &state).unwrap();
 

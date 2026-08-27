@@ -92,6 +92,14 @@ impl Default for ServerArgs {
     }
 }
 
+impl ServerArgs {
+    fn storage_config(&self) -> Result<StorageConfig> {
+        StorageConfig::from_env_with_data_dir(self.storage_path.clone()).map_err(|e| {
+            Error::ConfigError(format!("Failed to resolve storage configuration: {e}"))
+        })
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the server with OTLP receivers in the foreground (default if no subcommand)
@@ -559,8 +567,9 @@ async fn run_cli() -> Result<()> {
     match cli.command {
         Some(Commands::Serve { server }) => run_dashboard(server).await,
         Some(Commands::Start { server }) => {
+            let storage_config = server.storage_config()?;
             commands::service::handle_start(
-                server.storage_path,
+                storage_config,
                 server.addr,
                 server.grpc_addr,
                 server.http_addr,
@@ -569,8 +578,9 @@ async fn run_cli() -> Result<()> {
         },
         Some(Commands::Stop) => commands::service::handle_stop().await,
         Some(Commands::Restart { server }) => {
+            let storage_config = server.storage_config()?;
             commands::service::handle_restart(
-                server.storage_path,
+                storage_config,
                 server.addr,
                 server.grpc_addr,
                 server.http_addr,
@@ -668,16 +678,13 @@ async fn create_storage(_config: &Config) -> Result<Arc<dyn StorageBackend>> {
 }
 
 async fn run_dashboard(server: ServerArgs) -> Result<()> {
+    let storage_config = server.storage_config()?;
     let ServerArgs {
         addr,
         grpc_addr,
         http_addr,
-        storage_path,
+        storage_path: _,
     } = server;
-    let storage_config = match storage_path {
-        Some(path) => StorageConfig::default().with_data_dir(path),
-        None => StorageConfig::default(),
-    };
 
     let is_first_run = Config::is_first_run();
     if is_first_run {
@@ -714,6 +721,12 @@ async fn run_dashboard(server: ServerArgs) -> Result<()> {
     info!(
         "Initializing storage at {}",
         storage_config.data_dir.display()
+    );
+    info!(
+        retention_days = storage_config.retention_days,
+        auto_purge_enabled = storage_config.auto_purge_enabled,
+        purge_schedule = %storage_config.purge_schedule,
+        "Resolved storage retention settings"
     );
     let data_dir_str = storage_config.data_dir.to_string_lossy().into_owned();
 
@@ -955,29 +968,37 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    struct ReceiverEnv {
-        grpc: Option<OsString>,
-        http: Option<OsString>,
-    }
+    const SERVER_ENV: [&str; 6] = [
+        "OTELITE_GRPC_ADDR",
+        "OTELITE_HTTP_ADDR",
+        "OTELITE_DATA_DIR",
+        "OTELITE_RETENTION_DAYS",
+        "OTELITE_PURGE_SCHEDULE",
+        "OTELITE_AUTO_PURGE_ENABLED",
+    ];
 
-    impl ReceiverEnv {
-        fn capture() -> Self {
-            Self {
-                grpc: std::env::var_os("OTELITE_GRPC_ADDR"),
-                http: std::env::var_os("OTELITE_HTTP_ADDR"),
+    struct ServerEnv(Vec<(&'static str, Option<OsString>)>);
+
+    impl ServerEnv {
+        fn cleared() -> Self {
+            let values = SERVER_ENV
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+            for key in SERVER_ENV {
+                std::env::remove_var(key);
             }
+            Self(values)
         }
     }
 
-    impl Drop for ReceiverEnv {
+    impl Drop for ServerEnv {
         fn drop(&mut self) {
-            match self.grpc.take() {
-                Some(value) => std::env::set_var("OTELITE_GRPC_ADDR", value),
-                None => std::env::remove_var("OTELITE_GRPC_ADDR"),
-            }
-            match self.http.take() {
-                Some(value) => std::env::set_var("OTELITE_HTTP_ADDR", value),
-                None => std::env::remove_var("OTELITE_HTTP_ADDR"),
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -994,9 +1015,7 @@ mod tests {
     #[test]
     fn receiver_addresses_default_to_loopback_for_all_server_commands() {
         let _lock = ENV_LOCK.lock();
-        let _environment = ReceiverEnv::capture();
-        std::env::remove_var("OTELITE_GRPC_ADDR");
-        std::env::remove_var("OTELITE_HTTP_ADDR");
+        let _environment = ServerEnv::cleared();
         for command in ["serve", "start", "restart"] {
             let cli = Cli::try_parse_from(["otelite", command]).unwrap();
             let server = server_args(cli.command.unwrap());
@@ -1008,7 +1027,7 @@ mod tests {
     #[test]
     fn receiver_address_precedence_is_cli_then_environment_then_default() {
         let _guard = ENV_LOCK.lock();
-        let _environment = ReceiverEnv::capture();
+        let _environment = ServerEnv::cleared();
         std::env::set_var("OTELITE_GRPC_ADDR", "127.0.0.1:5317");
         std::env::set_var("OTELITE_HTTP_ADDR", "127.0.0.1:5318");
 
@@ -1035,5 +1054,28 @@ mod tests {
         let cli = server_args(cli.command.unwrap());
         assert_eq!(cli.grpc_addr, SocketAddr::from(([127, 0, 0, 1], 6317)));
         assert_eq!(cli.http_addr, SocketAddr::from(([127, 0, 0, 1], 6318)));
+    }
+
+    #[test]
+    fn storage_path_precedence_is_consistent_for_all_server_commands() {
+        let _guard = ENV_LOCK.lock();
+        let _environment = ServerEnv::cleared();
+        std::env::set_var("OTELITE_DATA_DIR", "/tmp/otelite-from-env");
+
+        for command in ["serve", "start", "restart"] {
+            let cli = Cli::try_parse_from([
+                "otelite",
+                command,
+                "--storage-path",
+                "/tmp/otelite-from-cli",
+            ])
+            .unwrap();
+            let server = server_args(cli.command.unwrap());
+            let storage = server.storage_config().unwrap();
+            assert_eq!(
+                storage.data_dir,
+                std::path::PathBuf::from("/tmp/otelite-from-cli")
+            );
+        }
     }
 }

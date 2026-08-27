@@ -419,15 +419,16 @@ du -sh ~/.otelite/data
 
 **Solution**:
 ```bash
-# Clean old data
-otelite clean --older-than 7d
+# Keep seven days of telemetry; applies to serve, start, and restart
+OTELITE_RETENTION_DAYS=7 otelite restart
 
-# Or configure retention
-# otelite.toml
-[storage]
-retention_days = 7
-max_size_gb = 5
+# Or disable automatic retention entirely
+OTELITE_RETENTION_DAYS=0 otelite restart
 ```
+
+Use `OTELITE_PURGE_SCHEDULE` to change when scheduled deletion runs, or
+`OTELITE_AUTO_PURGE_ENABLED=false` to disable the scheduler while retaining the
+configured window.
 
 ### Corrupted Database
 

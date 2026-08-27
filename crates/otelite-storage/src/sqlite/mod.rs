@@ -2,7 +2,6 @@
 
 use crate::StorageConfig;
 use async_trait::async_trait;
-use chrono::Timelike;
 use otelite_core::filters::GenAiFilters;
 use otelite_core::storage::{
     PurgeAllStats, PurgeOptions, QueryParams, Result, StorageBackend, StorageError, StorageStats,
@@ -96,6 +95,7 @@ impl SqliteBackend {
 #[async_trait]
 impl StorageBackend for SqliteBackend {
     async fn initialize(&mut self) -> Result<()> {
+        self.config.validate()?;
         let db_path = self.db_path();
 
         if !db_path.to_string_lossy().starts_with(":memory:") {
@@ -123,8 +123,8 @@ impl StorageBackend for SqliteBackend {
                 .ok();
         }
 
-        if self.config.retention_days > 0 {
-            self.start_purge_scheduler(db_path);
+        if self.config.auto_purge_enabled && self.config.retention_days > 0 {
+            self.start_purge_scheduler(db_path)?;
         }
 
         Ok(())
@@ -861,10 +861,10 @@ impl StorageBackend for SqliteBackend {
 }
 
 impl SqliteBackend {
-    fn start_purge_scheduler(&self, db_path: PathBuf) {
+    fn start_purge_scheduler(&self, db_path: PathBuf) -> Result<()> {
         let config = self.config.clone();
+        let schedule = config.parsed_purge_schedule()?;
         let purge_lock = self.purge_lock.clone();
-
         let handle = tokio::spawn(async move {
             // Dedicated connection: purge never competes with the main conn mutex.
             let mut conn = match Connection::open(&db_path) {
@@ -880,19 +880,16 @@ impl SqliteBackend {
             }
 
             loop {
-                let now = chrono::Local::now();
-                let next_purge = if now.hour() < 2 {
-                    now.date_naive().and_hms_opt(2, 0, 0).unwrap()
-                } else {
-                    (now.date_naive() + chrono::Duration::days(1))
-                        .and_hms_opt(2, 0, 0)
-                        .unwrap()
+                let Some(next_purge) = schedule.upcoming(chrono::Local).next() else {
+                    tracing::error!(
+                        "Purge scheduler: schedule {:?} has no future occurrences",
+                        config.purge_schedule
+                    );
+                    return;
                 };
-                let next_purge =
-                    chrono::TimeZone::from_local_datetime(&chrono::Local, &next_purge).unwrap();
-                let duration = (next_purge - now)
+                let duration = (next_purge - chrono::Local::now())
                     .to_std()
-                    .unwrap_or(std::time::Duration::from_secs(86400));
+                    .unwrap_or_default();
 
                 tokio::time::sleep(duration).await;
 
@@ -904,7 +901,7 @@ impl SqliteBackend {
                     if let Ok(record) = purge::purge_old_data(
                         &mut conn,
                         cutoff_timestamp,
-                        10000,
+                        config.purge_batch_size,
                         &[
                             crate::SignalType::Logs,
                             crate::SignalType::Traces,
@@ -930,6 +927,8 @@ impl SqliteBackend {
         });
 
         *self.purge_handle.lock() = Some(handle);
+
+        Ok(())
     }
 }
 
@@ -956,6 +955,32 @@ mod tests {
         let result = backend.initialize().await;
         assert!(result.is_ok());
         assert!(backend.conn.lock().is_some());
+    }
+
+    #[tokio::test]
+    async fn zero_retention_disables_automatic_purge_scheduler() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig::default()
+            .with_data_dir(temp_dir.path().to_path_buf())
+            .with_retention_days(0);
+        let mut backend = SqliteBackend::new(config);
+
+        backend.initialize().await.unwrap();
+
+        assert!(backend.purge_handle.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_auto_purge_does_not_start_scheduler() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig::default()
+            .with_data_dir(temp_dir.path().to_path_buf())
+            .with_auto_purge(false);
+        let mut backend = SqliteBackend::new(config);
+
+        backend.initialize().await.unwrap();
+
+        assert!(backend.purge_handle.lock().is_none());
     }
 
     #[tokio::test]
